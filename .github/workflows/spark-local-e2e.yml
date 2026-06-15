@@ -43,6 +43,8 @@ jobs:
           sleep 15
 
       - name: Run local unilateral-exit E2E
+        env:
+          SPARK_DANGEROUSLY_DISABLE_TLS_VERIFICATION: "true"
         run: npm run test:e2e
 
       - name: Dump Spark logs on failure
