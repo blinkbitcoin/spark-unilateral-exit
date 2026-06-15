@@ -23,6 +23,13 @@ jobs:
           repository: buildonspark/spark
           path: upstream-spark
 
+      - name: Use bitcoind with ephemeral anchor policy
+        working-directory: upstream-spark
+        run: |
+          grep -q 'lncm/bitcoind:v28.0' docker-compose.yml
+          sed -i 's#lncm/bitcoind:v28.0#lnliz/bitcoind:29.3#g' docker-compose.yml
+          grep -q 'lnliz/bitcoind:29.3' docker-compose.yml
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
