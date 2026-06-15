@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { ripemd160 } from "@noble/hashes/legacy";
@@ -9,7 +8,6 @@ import { Network, getNetwork } from "@buildonspark/spark-sdk";
 import {
   BitcoinFaucet,
   SparkWalletTesting,
-  createNewTree,
   getTestWalletConfig,
 } from "@buildonspark/spark-sdk/test-utils";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
@@ -31,8 +29,8 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
 
     try {
       const leaf = await retry(
-        () => createNewTree(wallet, randomUUID(), faucet, 100_000n),
-        "create funded Spark leaf",
+        () => claimSingleDeposit(wallet, faucet, 100_000n),
+        "claim Spark deposit leaf",
         20,
       );
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
@@ -78,6 +76,27 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     }
   });
 });
+
+async function claimSingleDeposit(wallet, faucet, amount) {
+  const depositAddress = await wallet.getSingleUseDepositAddress();
+  if (!depositAddress) throw new Error("Deposit address not found");
+
+  const fundingTx = await faucet.sendToAddress(depositAddress, amount);
+  await faucet.mineBlocksAndWaitForMiningToComplete(6);
+  await wallet.claimDeposit(fundingTx.id);
+
+  return retry(
+    async () => {
+      const leaves = await wallet.getLeaves();
+      if (leaves.length !== 1) {
+        throw new Error(`Expected one claimed leaf, got ${leaves.length}`);
+      }
+      return leaves[0];
+    },
+    "wait for claimed Spark leaf",
+    20,
+  );
+}
 
 async function retry(fn, label, attempts = 8) {
   let lastError;
