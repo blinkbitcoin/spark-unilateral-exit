@@ -45,3 +45,16 @@ The `package` command is intentionally still low-level. It creates unilateral-ex
 ```sh
 npm test
 ```
+
+## GitHub Actions
+
+This repo has two workflows:
+
+- `CI`: runs on push/PR, installs dependencies, runs `npm audit`, unit coverage, and a CLI smoke test.
+- `Spark Local E2E`: runs nightly and via `workflow_dispatch`. It checks out upstream `buildonspark/spark`, starts the local docker-compose Spark/bitcoind stack, then runs `npm run test:e2e`.
+
+The local E2E can also be run manually when Docker and the Spark local stack are available:
+
+```sh
+RUN_SPARK_E2E=1 npm run test:e2e
+```

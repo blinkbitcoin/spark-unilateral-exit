@@ -1,0 +1,54 @@
+name: Spark Local E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  spark-local-e2e:
+    name: Spark local unilateral-exit E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout recovery tool
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream Spark
+        uses: actions/checkout@v4
+        with:
+          repository: buildonspark/spark
+          path: upstream-spark
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install recovery tool dependencies
+        run: npm ci
+
+      - name: Build and start Spark local stack
+        working-directory: upstream-spark
+        run: |
+          docker compose up -d --build postgres bitcoind bitcoin-init spark-operator-0 spark-operator-1 spark-operator-2
+          docker compose ps
+
+      - name: Wait for Spark operators
+        run: node scripts/wait-for-spark-local.mjs
+
+      - name: Run local unilateral-exit E2E
+        run: npm run test:e2e
+
+      - name: Dump Spark logs on failure
+        if: failure()
+        working-directory: upstream-spark
+        run: docker compose logs --no-color --tail=300
+
+      - name: Stop Spark local stack
+        if: always()
+        working-directory: upstream-spark
+        run: docker compose down -v

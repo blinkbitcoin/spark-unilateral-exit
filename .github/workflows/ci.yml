@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit
+      - run: npm test
+      - name: CLI smoke test
+        run: |
+          node src/cli.js plan \
+            --bundle examples/recovery-bundle.example.json \
+            --destination bc1qexampledestination0000 \
+            --fee-rate 10 \
+            --cpfp-utxo abababababababababababababababababababababababababababababababab:0:50000:0014abcd:02abcd

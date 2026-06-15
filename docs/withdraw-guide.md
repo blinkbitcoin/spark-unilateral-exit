@@ -103,4 +103,4 @@ Target end-to-end test:
 6. Confirm timelocks.
 7. Sweep recovered funds to a destination address.
 
-This has not been completed in the initial scaffold.
+This is now represented by the `Spark Local E2E` GitHub Actions workflow and the `test/e2e/local-spark-unilateral-exit.test.js` test. The workflow is intentionally separate from normal CI because it needs Docker and builds/runs the upstream Spark local stack.
