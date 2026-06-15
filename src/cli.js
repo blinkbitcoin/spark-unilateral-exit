@@ -7,6 +7,7 @@ import {
   assertSeedOnlyIsNotOfflineRecoverable,
   createRecoveryPlan,
 } from "./planner.js";
+import { exportRecoveryBundleFromSeed } from "./recovery-bundle.js";
 import { constructSparkPackages } from "./spark-packages.js";
 
 async function main() {
@@ -46,6 +47,25 @@ async function main() {
     return;
   }
 
+  if (command === "refresh-bundle") {
+    const seed = loadSeed(args);
+    if (args.out === true) throw new Error("--out requires a path");
+    const bundle = await exportRecoveryBundleFromSeed({
+      seed,
+      accountNumber: args["account-number"] ?? 0,
+      network: args.network ?? "MAINNET",
+      operatorSet: args["operator-set"] ?? "spark-sdk",
+      appVersion: args["app-version"] ?? "unknown",
+    });
+    const output = `${serializeForJson(bundle)}\n`;
+    if (args.out) {
+      fs.writeFileSync(args.out, output, { mode: 0o600 });
+    } else {
+      process.stdout.write(output);
+    }
+    return;
+  }
+
   throw new Error(`Unknown command: ${command}`);
 }
 
@@ -79,6 +99,15 @@ function loadOptionalBundle(path) {
   return parseRecoveryBundle(fs.readFileSync(path, "utf8"));
 }
 
+function loadSeed(args) {
+  if (args.seed && args.seed !== true) return String(args.seed).trim();
+  if (args["seed-file"] && args["seed-file"] !== true) {
+    return fs.readFileSync(args["seed-file"], "utf8").trim();
+  }
+  if (process.env.SPARK_SEED) return process.env.SPARK_SEED.trim();
+  throw new Error("--seed, --seed-file, or SPARK_SEED is required");
+}
+
 function collect(value) {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : [value];
@@ -95,14 +124,22 @@ function printHelp() {
   console.log(`spark-unilateral-exit
 
 Commands:
-  plan     Validate a saved recovery bundle and print a recovery plan
-  package  Construct Spark unilateral-exit packages using upstream Spark SDK
+  refresh-bundle  Query live Spark leaves from a seed and write a bundle
+  plan            Validate a saved recovery bundle and print a recovery plan
+  package         Construct Spark unilateral-exit packages using upstream Spark SDK
 
 Required for offline recovery:
   --bundle <path>          Saved Spark recovery bundle JSON
   --destination <address>  On-chain Bitcoin destination
   --fee-rate <number>     Fee rate in sat/vbyte
   --cpfp-utxo <utxo>      txid:vout:value:script:publicKey, repeatable
+
+Required for refresh-bundle:
+  --seed-file <path>       File containing Spark seed or mnemonic
+  --seed <value>           Spark seed or mnemonic; prefer --seed-file
+  --out <path>             Bundle output path; stdout when omitted
+  --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
+  --account-number <n>     Spark account number, default 0
 
 Seed-only mode is intentionally rejected for offline recovery.
 `);

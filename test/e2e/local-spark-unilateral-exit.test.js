@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { ripemd160 } from "@noble/hashes/legacy";
@@ -8,10 +9,12 @@ import { Network, getNetwork } from "@buildonspark/spark-sdk";
 import {
   BitcoinFaucet,
   SparkWalletTesting,
-  getTestWalletConfig,
+  createNewTree,
+  signerTypes,
 } from "@buildonspark/spark-sdk/test-utils";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
+import { exportRecoveryBundleFromSeed } from "../../src/recovery-bundle.js";
 import { constructSparkPackages } from "../../src/spark-packages.js";
 
 const runE2e = process.env.RUN_SPARK_E2E === "1";
@@ -19,10 +22,12 @@ const runE2e = process.env.RUN_SPARK_E2E === "1";
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
   it("constructs and broadcasts a unilateral-exit package from a saved bundle", async () => {
     const faucet = BitcoinFaucet.getInstance();
-    const { wallet } = await retry(
+    const { Signer } = signerTypes[0];
+    const { wallet, mnemonic } = await retry(
       () =>
         SparkWalletTesting.initialize({
-          options: getTestWalletConfig(),
+          options: { network: "LOCAL" },
+          signer: new Signer(),
         }),
       "initialize Spark wallet",
     );
@@ -34,20 +39,28 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         20,
       );
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
-      const bundle = {
-        schema: "blink.spark-unilateral-exit-bundle.v1",
-        createdAt: new Date().toISOString(),
+      const bundle = await exportRecoveryBundleFromSeed({
+        seed: mnemonic,
         network: "LOCAL",
         operatorSet: "local-docker-compose",
-        leaves: [
-          {
-            id: leaf.id,
-            status: leaf.status,
-            valueSats: Number(leaf.value),
-            treeNodeHex: bytesToHex(TreeNode.encode(leaf).finish()),
-          },
-        ],
-      };
+        leafPollAttempts: 20,
+        leafPollDelayMs: 5_000,
+        cleanupWallet: false,
+        walletFactory: ({ seed }) => {
+          expect(seed).toBe(mnemonic);
+          return { wallet };
+        },
+      });
+
+      expect(bundle.leaves).toHaveLength(1);
+      expect(bundle.leaves[0]).toMatchObject({
+        id: leaf.id,
+        status: leaf.status,
+        valueSats: Number(leaf.value),
+      });
+      const decodedLeaf = TreeNode.decode(hexToBytes(bundle.leaves[0].treeNodeHex));
+      expect(decodedLeaf.id).toBe(leaf.id);
+      expect(decodedLeaf.value).toBe(leaf.value);
 
       const chains = await constructSparkPackages({
         bundle,
@@ -89,15 +102,12 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
 });
 
 async function claimSingleDeposit(wallet, faucet, amount) {
-  const depositAddress = await wallet.getSingleUseDepositAddress();
-  if (!depositAddress) throw new Error("Deposit address not found");
-
-  const fundingTx = await faucet.sendToAddress(depositAddress, amount);
-  await faucet.mineBlocksAndWaitForMiningToComplete(6);
-  await wallet.claimDeposit(fundingTx.id);
+  const leafId = randomUUID();
+  await createNewTree(wallet, leafId, faucet, amount);
 
   return retry(
     async () => {
+      await wallet.experimental_syncWallet?.();
       const leaves = await wallet.getLeaves();
       if (leaves.length !== 1) {
         throw new Error(`Expected one claimed leaf, got ${leaves.length}`);

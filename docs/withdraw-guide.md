@@ -35,6 +35,27 @@ The bundle should contain:
 
 The bundle is sensitive even without private keys because it reveals wallet graph metadata. Mobile must encrypt it client-side before writing it to Files, Google Drive, iCloud, or any backend storage.
 
+## Keeping the bundle fresh
+
+Refresh the bundle while Spark operators are online, after wallet startup and after any event that can change leaves: deposit claim, incoming Spark transfer, outgoing Spark transfer, swap, receive, optimization, or token/output sync.
+
+```sh
+node src/cli.js refresh-bundle \
+  --seed-file /path/to/spark-seed.txt \
+  --network MAINNET \
+  --operator-set blink-mainnet \
+  --app-version blink-mobile-2.x \
+  --out recovery-bundle.json
+```
+
+Operational notes:
+
+- Prefer `--seed-file` or `SPARK_SEED`; avoid passing real seeds via `--seed` in shared shells.
+- The command initializes the Spark wallet from the seed, forces a wallet sync when the SDK exposes that API, queries `getLeaves()`, serializes each `TreeNode`, and writes a bundle matching this repo's recovery schema.
+- The command fails if no leaves are present. An empty bundle cannot recover funds offline.
+- Mobile should encrypt the bundle before uploading it to Google Drive, iCloud, or a local user-selected file location.
+- Refresh cadence should be event-driven plus periodic. Event-driven refresh captures state changes immediately; a periodic refresh handles missed app lifecycle events.
+
 ## High-level CLI flow
 
 1. Decrypt and validate the bundle.
@@ -46,7 +67,16 @@ The bundle is sensitive even without private keys because it reveals wallet grap
 7. Wait for required confirmations/timelocks.
 8. Sweep final spendable outputs to the user's destination address.
 
-## Current prototype command
+## Current prototype commands
+
+Bundle refresh:
+
+```sh
+node src/cli.js refresh-bundle \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --out recovery-bundle.json
+```
 
 Dry run:
 
@@ -91,16 +121,14 @@ Until those questions are answered, the CLI must show USDB/Dollar balance as "de
 
 ## Spark test network and faucet
 
-Upstream Spark has local/integration unilateral-exit tests and Spark CLI support. The next step is to wire this repo to Spark's local test environment or public test network if one is available.
+Upstream Spark has local/integration unilateral-exit tests and Spark CLI support.
 
-Target end-to-end test:
+The current local end-to-end test:
 
 1. Create a Spark wallet on test/local network.
 2. Fund it through a test faucet.
-3. Save a recovery bundle with leaves and ancestors.
-4. Simulate operator unavailability by using only the bundle.
-5. Construct and broadcast unilateral-exit packages.
-6. Confirm timelocks.
-7. Sweep recovered funds to a destination address.
+3. Export the funded wallet's live leaves into a recovery bundle.
+4. Construct and broadcast unilateral-exit packages from the saved bundle.
+5. Confirm the package reaches local bitcoind policy through `submitpackage`.
 
 This is now represented by the `Spark Local E2E` GitHub Actions workflow and the `test/e2e/local-spark-unilateral-exit.test.js` test. The workflow is intentionally separate from normal CI because it needs Docker and builds/runs the upstream Spark local stack.
