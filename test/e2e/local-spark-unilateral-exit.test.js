@@ -205,10 +205,18 @@ function summarizeTx(txHex) {
     });
   }
   return {
-    txid: tx.id,
+    txid: getTransactionIdForDiagnostics(tx),
     inputs: tx.inputsLength,
     outputs,
   };
+}
+
+function getTransactionIdForDiagnostics(tx) {
+  try {
+    return tx.id;
+  } catch {
+    return null;
+  }
 }
 
 function findOutputIndex(tx, script, amount) {
