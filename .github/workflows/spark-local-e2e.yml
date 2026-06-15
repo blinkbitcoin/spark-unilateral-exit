@@ -38,7 +38,9 @@ jobs:
           docker compose ps
 
       - name: Wait for Spark operators
-        run: node scripts/wait-for-spark-local.mjs
+        run: |
+          node scripts/wait-for-spark-local.mjs
+          sleep 15
 
       - name: Run local unilateral-exit E2E
         run: npm run test:e2e

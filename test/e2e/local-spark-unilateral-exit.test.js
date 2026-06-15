@@ -20,9 +20,13 @@ const runE2e = process.env.RUN_SPARK_E2E === "1";
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
   it("constructs and broadcasts a unilateral-exit package from a saved bundle", async () => {
     const faucet = BitcoinFaucet.getInstance();
-    const { wallet } = await SparkWalletTesting.initialize({
-      options: getTestWalletConfig(),
-    });
+    const { wallet } = await retry(
+      () =>
+        SparkWalletTesting.initialize({
+          options: getTestWalletConfig(),
+        }),
+      "initialize Spark wallet",
+    );
 
     try {
       const leaf = await createNewTree(wallet, "blink-e2e-leaf", faucet, 100_000n);
@@ -69,6 +73,23 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     }
   });
 });
+
+async function retry(fn, label, attempts = 8) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      console.warn(
+        `${label} failed on attempt ${attempt}/${attempts}; retrying: ${error.message}`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  }
+  throw lastError;
+}
 
 async function makeCpfpFundingUtxo(faucet, amount) {
   const privateKey = secp256k1.utils.randomPrivateKey();
