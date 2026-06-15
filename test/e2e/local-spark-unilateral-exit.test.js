@@ -177,7 +177,9 @@ function findOutputIndex(tx, script, amount) {
 
 function packageSubmitSucceeded(result) {
   if (!result || typeof result !== "object") return false;
-  const packageMsg = String(result["package-msg"] ?? "").toLowerCase();
+  const packageMsg = String(
+    result["package-msg"] ?? result.package_msg ?? "",
+  ).toLowerCase();
   if (packageMsg === "success") return true;
   const txResults = result["tx-results"];
   if (!txResults || typeof txResults !== "object") return false;
