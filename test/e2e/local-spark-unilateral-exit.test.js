@@ -53,6 +53,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         bundle,
         cpfpUtxos: [funding.utxo],
         feeRate: 5,
+        sparkClient: await createSparkClient(wallet),
       });
 
       expect(chains).toHaveLength(1);
@@ -70,7 +71,14 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       ]);
 
       if (!packageSubmitSucceeded(submitResult)) {
-        console.error("submitpackage result", JSON.stringify(submitResult, null, 2));
+        console.error(
+          "submitpackage tx summary",
+          JSON.stringify(summarizePackage(firstPackage.tx, signedFeeBump), null, 2),
+        );
+        console.error(
+          "submitpackage result",
+          JSON.stringify(submitResult, null, 2),
+        );
       }
       expect(packageSubmitSucceeded(submitResult)).toBe(true);
       await faucet.mineBlocksAndWaitForMiningToComplete(2000);
@@ -99,6 +107,16 @@ async function claimSingleDeposit(wallet, faucet, amount) {
     "wait for claimed Spark leaf",
     20,
   );
+}
+
+async function createSparkClient(wallet) {
+  const connectionManager =
+    wallet.getConnectionManager?.() ?? wallet.connectionManager;
+  const configService = wallet.getConfigService?.() ?? wallet.config;
+  if (!connectionManager?.createSparkClient || !configService?.getCoordinatorAddress) {
+    return undefined;
+  }
+  return connectionManager.createSparkClient(configService.getCoordinatorAddress());
 }
 
 async function retry(fn, label, attempts = 8) {
@@ -164,6 +182,33 @@ function signPsbtWithKey(psbtHex, privateKey) {
   }
 
   return bytesToHex(tx.toBytes(true, true));
+}
+
+function summarizePackage(parentHex, childHex) {
+  return {
+    parent: summarizeTx(parentHex),
+    child: summarizeTx(childHex),
+  };
+}
+
+function summarizeTx(txHex) {
+  const tx = Transaction.fromRaw(hexToBytes(txHex), {
+    allowUnknownOutputs: true,
+  });
+  const outputs = [];
+  for (let i = 0; i < tx.outputsLength; i += 1) {
+    const output = tx.getOutput(i);
+    outputs.push({
+      index: i,
+      amount: output?.amount?.toString(),
+      script: output?.script ? bytesToHex(output.script) : null,
+    });
+  }
+  return {
+    txid: tx.id,
+    inputs: tx.inputsLength,
+    outputs,
+  };
 }
 
 function findOutputIndex(tx, script, amount) {

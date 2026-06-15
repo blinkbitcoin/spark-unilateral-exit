@@ -2,7 +2,12 @@ import { getNodeHexStrings } from "./bundle.js";
 
 const NETWORKS = new Set(["MAINNET", "REGTEST", "TESTNET", "SIGNET", "LOCAL"]);
 
-export async function constructSparkPackages({ bundle, cpfpUtxos, feeRate }) {
+export async function constructSparkPackages({
+  bundle,
+  cpfpUtxos,
+  feeRate,
+  sparkClient,
+}) {
   const { constructUnilateralExitFeeBumpPackages, Network } = await import(
     "@buildonspark/spark-sdk"
   );
@@ -13,6 +18,7 @@ export async function constructSparkPackages({ bundle, cpfpUtxos, feeRate }) {
     cpfpUtxos,
     { satPerVbyte: feeRate },
     network,
+    sparkClient,
   );
 }
 
