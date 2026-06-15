@@ -69,8 +69,11 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         signedFeeBump,
       ]);
 
+      if (!packageSubmitSucceeded(submitResult)) {
+        console.error("submitpackage result", JSON.stringify(submitResult, null, 2));
+      }
       expect(packageSubmitSucceeded(submitResult)).toBe(true);
-      await faucet.mineBlocksAndWaitForMiningToComplete(1);
+      await faucet.mineBlocksAndWaitForMiningToComplete(2000);
     } finally {
       await wallet.cleanup?.();
     }
@@ -124,7 +127,8 @@ async function makeCpfpFundingUtxo(faucet, amount) {
     hash: hash160(publicKey),
   });
 
-  const fundingTx = await faucet.sendToAddress(address, amount, 1);
+  const fundingTx = await faucet.sendToAddress(address, amount);
+  await faucet.mineBlocksAndWaitForMiningToComplete(6);
   const script = OutScript.encode(Address(bitcoinNetwork).decode(address));
   const vout = findOutputIndex(fundingTx, script, amount);
 
