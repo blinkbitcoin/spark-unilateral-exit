@@ -1,0 +1,24 @@
+{
+  "schema": "blink.spark-unilateral-exit-bundle.v1",
+  "createdAt": "2026-06-15T00:00:00.000Z",
+  "network": "MAINNET",
+  "operatorSet": "unknown",
+  "walletIdentityPublicKey": "example",
+  "sparkSdkVersion": "unknown",
+  "appVersion": "unknown",
+  "leaves": [
+    {
+      "id": "leaf-id-example",
+      "valueSats": 1000,
+      "status": "AVAILABLE",
+      "treeNodeHex": "00"
+    }
+  ],
+  "balances": {
+    "btcSats": 1000,
+    "usdb": {
+      "amount": "0.00",
+      "status": "not-covered-by-bitcoin-unilateral-exit"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@blinkbitcoin/spark-unilateral-exit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "spark-unilateral-exit": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "vitest run --coverage",
+    "test:unit": "vitest run",
+    "plan": "node src/cli.js plan"
+  },
+  "dependencies": {
+    "@buildonspark/spark-sdk": "^0.8.6"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.9",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
