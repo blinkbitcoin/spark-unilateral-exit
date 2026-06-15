@@ -69,7 +69,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       expect(packageSubmitSucceeded(submitResult)).toBe(true);
       await faucet.mineBlocksAndWaitForMiningToComplete(1);
     } finally {
-      await wallet.getConnectionManager().closeConnections();
+      await wallet.cleanup?.();
     }
   });
 });
