@@ -30,7 +30,11 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     );
 
     try {
-      const leaf = await createNewTree(wallet, randomUUID(), faucet, 100_000n);
+      const leaf = await retry(
+        () => createNewTree(wallet, randomUUID(), faucet, 100_000n),
+        "create funded Spark leaf",
+        20,
+      );
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
       const bundle = {
         schema: "blink.spark-unilateral-exit-bundle.v1",
