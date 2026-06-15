@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { ripemd160 } from "@noble/hashes/legacy";
@@ -29,7 +30,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     );
 
     try {
-      const leaf = await createNewTree(wallet, "blink-e2e-leaf", faucet, 100_000n);
+      const leaf = await createNewTree(wallet, randomUUID(), faucet, 100_000n);
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
       const bundle = {
         schema: "blink.spark-unilateral-exit-bundle.v1",
