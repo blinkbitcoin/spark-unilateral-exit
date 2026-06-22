@@ -1,0 +1,482 @@
+use std::rc::Rc;
+
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use wasm_bindgen::prelude::*;
+
+use crate::{
+    error::WasmResult,
+    event::{EventListener, WasmEventListener},
+    issuer::TokenIssuer,
+    logger::{Logger, WasmTracingLayer},
+    models::{chain_service::RecommendedFees, *},
+    sdk_builder::SdkBuilder,
+};
+
+#[wasm_bindgen]
+pub struct BreezSdk {
+    pub(crate) sdk: Rc<breez_sdk_spark::BreezSdk>,
+}
+
+#[wasm_bindgen(js_name = "initLogging")]
+pub async fn init_logging(logger: Logger, filter: Option<String>) -> WasmResult<()> {
+    crate::logger::WASM_LOGGER.set(Some(logger));
+
+    let filter =
+        EnvFilter::new(filter.unwrap_or_else(|| breez_sdk_spark::DEFAULT_FILTER.to_string()));
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(WasmTracingLayer {});
+
+    subscriber.try_init()?;
+
+    Ok(())
+}
+
+#[wasm_bindgen(js_name = "connect")]
+pub async fn connect(request: ConnectRequest) -> WasmResult<BreezSdk> {
+    let builder = SdkBuilder::new(request.config, request.seed)
+        .with_default_storage(request.storage_dir)
+        .await?;
+    let sdk = builder.build().await?;
+    Ok(sdk)
+}
+
+#[wasm_bindgen(js_name = "connectWithSigner")]
+pub async fn connect_with_signer(
+    config: Config,
+    breez_signer: crate::signer::JsExternalBreezSigner,
+    spark_signer: crate::signer::JsExternalSparkSigner,
+    storage_dir: String,
+) -> WasmResult<BreezSdk> {
+    let builder = SdkBuilder::new_with_signer(config, breez_signer, spark_signer)
+        .with_default_storage(storage_dir)
+        .await?;
+    let sdk = builder.build().await?;
+    Ok(sdk)
+}
+
+#[wasm_bindgen(js_name = "defaultConfig")]
+pub fn default_config(network: Network) -> Config {
+    breez_sdk_spark::default_config(network.into()).into()
+}
+
+#[wasm_bindgen(js_name = "defaultServerConfig")]
+pub fn default_server_config(network: Network) -> Config {
+    breez_sdk_spark::default_server_config(network.into()).into()
+}
+
+#[wasm_bindgen(js_name = "getSparkStatus")]
+pub async fn get_spark_status() -> WasmResult<SparkStatus> {
+    Ok(breez_sdk_spark::get_spark_status().await?.into())
+}
+
+/// The two external signers for the SDK's signer-based connect. Returned by
+/// `defaultExternalSigners` (seed) and `createTurnkeySigner` (Turnkey); pass
+/// both halves to `connectWithSigner` or `SdkBuilder.newWithSigner`.
+#[wasm_bindgen]
+pub struct ExternalSigners {
+    breez_signer: crate::signer::ExternalBreezSignerHandle,
+    spark_signer: crate::signer::ExternalSparkSignerHandle,
+}
+
+impl ExternalSigners {
+    pub(crate) fn new(
+        breez_signer: crate::signer::ExternalBreezSignerHandle,
+        spark_signer: crate::signer::ExternalSparkSignerHandle,
+    ) -> Self {
+        Self {
+            breez_signer,
+            spark_signer,
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl ExternalSigners {
+    /// External signer for non-Spark SDK signing (LNURL-auth, sync, message
+    /// signing, ECIES).
+    #[wasm_bindgen(getter, js_name = "breezSigner")]
+    pub fn breez_signer(&self) -> crate::signer::ExternalBreezSignerHandle {
+        self.breez_signer.clone()
+    }
+
+    /// External high-level Spark signer for the Spark wallet flows.
+    #[wasm_bindgen(getter, js_name = "sparkSigner")]
+    pub fn spark_signer(&self) -> crate::signer::ExternalSparkSignerHandle {
+        self.spark_signer.clone()
+    }
+}
+
+/// Creates the default external signers from a mnemonic phrase.
+///
+/// Key derivation matches the seed-based connect path: an SDK built either
+/// way from the same mnemonic is the same wallet.
+#[wasm_bindgen(js_name = "defaultExternalSigners")]
+pub fn default_external_signers(
+    mnemonic: String,
+    passphrase: Option<String>,
+    network: Network,
+    account_number: Option<u32>,
+) -> WasmResult<ExternalSigners> {
+    let signers = breez_sdk_spark::default_external_signers(
+        mnemonic,
+        passphrase,
+        network.into(),
+        account_number,
+    )?;
+
+    Ok(ExternalSigners {
+        breez_signer: crate::signer::ExternalBreezSignerHandle::new(signers.breez_signer),
+        spark_signer: crate::signer::ExternalSparkSignerHandle::new(signers.spark_signer),
+    })
+}
+
+#[wasm_bindgen]
+impl BreezSdk {
+    #[wasm_bindgen(js_name = "addEventListener")]
+    pub async fn add_event_listener(&self, listener: EventListener) -> String {
+        self.sdk
+            .add_event_listener(Box::new(WasmEventListener { listener }))
+            .await
+    }
+
+    #[wasm_bindgen(js_name = "removeEventListener")]
+    pub async fn remove_event_listener(&self, id: &str) -> bool {
+        self.sdk.remove_event_listener(id).await
+    }
+
+    #[wasm_bindgen(js_name = "disconnect")]
+    pub async fn disconnect(&self) -> WasmResult<()> {
+        Ok(self.sdk.disconnect().await?)
+    }
+
+    #[wasm_bindgen(js_name = "parse")]
+    pub async fn parse(&self, input: &str) -> WasmResult<InputType> {
+        Ok(self.sdk.parse(input).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "getCrossChainRoutes")]
+    pub async fn get_cross_chain_routes(
+        &self,
+        filter: CrossChainRouteFilter,
+    ) -> WasmResult<Vec<CrossChainRoutePair>> {
+        let filter: breez_sdk_spark::CrossChainRouteFilter = filter.into();
+        Ok(self
+            .sdk
+            .get_cross_chain_routes(&filter)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[wasm_bindgen(js_name = "getInfo")]
+    pub async fn get_info(&self, request: GetInfoRequest) -> WasmResult<GetInfoResponse> {
+        Ok(self.sdk.get_info(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "receivePayment")]
+    pub async fn receive_payment(
+        &self,
+        request: ReceivePaymentRequest,
+    ) -> WasmResult<ReceivePaymentResponse> {
+        Ok(self.sdk.receive_payment(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "claimHtlcPayment")]
+    pub async fn claim_htlc_payment(
+        &self,
+        request: ClaimHtlcPaymentRequest,
+    ) -> WasmResult<ClaimHtlcPaymentResponse> {
+        Ok(self.sdk.claim_htlc_payment(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "prepareSendPayment")]
+    pub async fn prepare_send_payment(
+        &self,
+        request: PrepareSendPaymentRequest,
+    ) -> WasmResult<PrepareSendPaymentResponse> {
+        Ok(self.sdk.prepare_send_payment(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "prepareLnurlPay")]
+    pub async fn prepare_lnurl_pay(
+        &self,
+        request: PrepareLnurlPayRequest,
+    ) -> WasmResult<PrepareLnurlPayResponse> {
+        Ok(self.sdk.prepare_lnurl_pay(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "lnurlPay")]
+    pub async fn lnurl_pay(&self, request: LnurlPayRequest) -> WasmResult<LnurlPayResponse> {
+        Ok(self.sdk.lnurl_pay(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "lnurlWithdraw")]
+    pub async fn lnurl_withdraw(
+        &self,
+        request: LnurlWithdrawRequest,
+    ) -> WasmResult<LnurlWithdrawResponse> {
+        Ok(self.sdk.lnurl_withdraw(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "lnurlAuth")]
+    pub async fn lnurl_auth(
+        &self,
+        request_data: LnurlAuthRequestDetails,
+    ) -> WasmResult<LnurlCallbackStatus> {
+        Ok(self.sdk.lnurl_auth(request_data.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "sendPayment")]
+    pub async fn send_payment(
+        &self,
+        request: SendPaymentRequest,
+    ) -> WasmResult<SendPaymentResponse> {
+        Ok(self.sdk.send_payment(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "syncWallet")]
+    pub async fn sync_wallet(&self, request: SyncWalletRequest) -> WasmResult<SyncWalletResponse> {
+        Ok(self.sdk.sync_wallet(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "listPayments")]
+    pub async fn list_payments(
+        &self,
+        request: ListPaymentsRequest,
+    ) -> WasmResult<ListPaymentsResponse> {
+        Ok(self.sdk.list_payments(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "getPayment")]
+    pub async fn get_payment(&self, request: GetPaymentRequest) -> WasmResult<GetPaymentResponse> {
+        Ok(self.sdk.get_payment(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "claimDeposit")]
+    pub async fn claim_deposit(
+        &self,
+        request: ClaimDepositRequest,
+    ) -> WasmResult<ClaimDepositResponse> {
+        Ok(self.sdk.claim_deposit(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "refundDeposit")]
+    pub async fn refund_deposit(
+        &self,
+        request: RefundDepositRequest,
+    ) -> WasmResult<RefundDepositResponse> {
+        Ok(self.sdk.refund_deposit(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "listUnclaimedDeposits")]
+    pub async fn list_unclaimed_deposits(
+        &self,
+        request: ListUnclaimedDepositsRequest,
+    ) -> WasmResult<ListUnclaimedDepositsResponse> {
+        Ok(self
+            .sdk
+            .list_unclaimed_deposits(request.into())
+            .await?
+            .into())
+    }
+
+    #[wasm_bindgen(js_name = "checkLightningAddressAvailable")]
+    pub async fn check_lightning_address_available(
+        &self,
+        request: CheckLightningAddressRequest,
+    ) -> WasmResult<bool> {
+        Ok(self
+            .sdk
+            .check_lightning_address_available(request.into())
+            .await?)
+    }
+
+    #[wasm_bindgen(js_name = "getLightningAddress")]
+    pub async fn get_lightning_address(&self) -> WasmResult<Option<LightningAddressInfo>> {
+        Ok(self
+            .sdk
+            .get_lightning_address()
+            .await?
+            .map(|resp| resp.into()))
+    }
+
+    #[wasm_bindgen(js_name = "registerLightningAddress")]
+    pub async fn register_lightning_address(
+        &self,
+        request: RegisterLightningAddressRequest,
+    ) -> WasmResult<LightningAddressInfo> {
+        Ok(self
+            .sdk
+            .register_lightning_address(request.into())
+            .await?
+            .into())
+    }
+
+    #[wasm_bindgen(js_name = "authorizeLightningAddressTransfer")]
+    pub async fn authorize_lightning_address_transfer(
+        &self,
+        request: AuthorizeTransferRequest,
+    ) -> WasmResult<TransferAuthorization> {
+        Ok(self
+            .sdk
+            .authorize_lightning_address_transfer(request.into())
+            .await?
+            .into())
+    }
+
+    #[wasm_bindgen(js_name = "claimLightningAddressTransfer")]
+    pub async fn claim_lightning_address_transfer(
+        &self,
+        request: ClaimTransferRequest,
+    ) -> WasmResult<LightningAddressInfo> {
+        Ok(self
+            .sdk
+            .claim_lightning_address_transfer(request.into())
+            .await?
+            .into())
+    }
+
+    #[wasm_bindgen(js_name = "deleteLightningAddress")]
+    pub async fn delete_lightning_address(&self) -> WasmResult<()> {
+        Ok(self.sdk.delete_lightning_address().await?)
+    }
+
+    #[wasm_bindgen(js_name = "listFiatCurrencies")]
+    pub async fn list_fiat_currencies(&self) -> WasmResult<ListFiatCurrenciesResponse> {
+        Ok(self.sdk.list_fiat_currencies().await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "listFiatRates")]
+    pub async fn list_fiat_rates(&self) -> WasmResult<ListFiatRatesResponse> {
+        Ok(self.sdk.list_fiat_rates().await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "recommendedFees")]
+    pub async fn recommended_fees(&self) -> WasmResult<RecommendedFees> {
+        Ok(self.sdk.recommended_fees().await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "getTokensMetadata")]
+    pub async fn get_tokens_metadata(
+        &self,
+        request: GetTokensMetadataRequest,
+    ) -> WasmResult<GetTokensMetadataResponse> {
+        Ok(self.sdk.get_tokens_metadata(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "signMessage")]
+    pub async fn sign_message(
+        &self,
+        request: SignMessageRequest,
+    ) -> WasmResult<SignMessageResponse> {
+        Ok(self.sdk.sign_message(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "checkMessage")]
+    pub async fn check_message(
+        &self,
+        request: CheckMessageRequest,
+    ) -> WasmResult<CheckMessageResponse> {
+        Ok(self.sdk.check_message(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "getUserSettings")]
+    pub async fn get_user_settings(&self) -> WasmResult<UserSettings> {
+        Ok(self.sdk.get_user_settings().await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "updateUserSettings")]
+    pub async fn update_user_settings(&self, request: UpdateUserSettingsRequest) -> WasmResult<()> {
+        Ok(self.sdk.update_user_settings(request.into()).await?)
+    }
+
+    #[wasm_bindgen(js_name = "getTokenIssuer")]
+    pub fn get_token_issuer(&self) -> TokenIssuer {
+        let token_issuer = self.sdk.get_token_issuer();
+        TokenIssuer {
+            token_issuer: Rc::new(token_issuer),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "optimizeLeaves")]
+    pub async fn optimize_leaves(
+        &self,
+        request: OptimizeLeavesRequest,
+    ) -> WasmResult<OptimizeLeavesResponse> {
+        Ok(self.sdk.optimize_leaves(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "fetchConversionLimits")]
+    pub async fn fetch_conversion_limits(
+        &self,
+        request: FetchConversionLimitsRequest,
+    ) -> WasmResult<FetchConversionLimitsResponse> {
+        Ok(self
+            .sdk
+            .fetch_conversion_limits(request.into())
+            .await?
+            .into())
+    }
+
+    #[wasm_bindgen(js_name = "refundPendingConversions")]
+    pub async fn refund_pending_conversions(&self) -> WasmResult<()> {
+        Ok(self.sdk.refund_pending_conversions().await?)
+    }
+
+    #[wasm_bindgen(js_name = "buyBitcoin")]
+    pub async fn buy_bitcoin(&self, request: BuyBitcoinRequest) -> WasmResult<BuyBitcoinResponse> {
+        Ok(self.sdk.buy_bitcoin(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "registerWebhook")]
+    pub async fn register_webhook(
+        &self,
+        request: RegisterWebhookRequest,
+    ) -> WasmResult<RegisterWebhookResponse> {
+        Ok(self.sdk.register_webhook(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "unregisterWebhook")]
+    pub async fn unregister_webhook(&self, request: UnregisterWebhookRequest) -> WasmResult<()> {
+        Ok(self.sdk.unregister_webhook(request.into()).await?)
+    }
+
+    #[wasm_bindgen(js_name = "listWebhooks")]
+    pub async fn list_webhooks(&self) -> WasmResult<Vec<Webhook>> {
+        Ok(self
+            .sdk
+            .list_webhooks()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[wasm_bindgen(js_name = "addContact")]
+    pub async fn add_contact(&self, request: AddContactRequest) -> WasmResult<Contact> {
+        Ok(self.sdk.add_contact(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "updateContact")]
+    pub async fn update_contact(&self, request: UpdateContactRequest) -> WasmResult<Contact> {
+        Ok(self.sdk.update_contact(request.into()).await?.into())
+    }
+
+    #[wasm_bindgen(js_name = "deleteContact")]
+    pub async fn delete_contact(&self, id: String) -> WasmResult<()> {
+        Ok(self.sdk.delete_contact(id).await?)
+    }
+
+    #[wasm_bindgen(js_name = "listContacts")]
+    pub async fn list_contacts(&self, request: ListContactsRequest) -> WasmResult<Vec<Contact>> {
+        Ok(self
+            .sdk
+            .list_contacts(request.into())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+}

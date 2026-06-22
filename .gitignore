@@ -1,5 +1,7 @@
 node_modules/
 coverage/
+.cargo-target/
+.direnv/
 .env
 *.log
 *.bundle.cleartext.json

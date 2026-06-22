@@ -1,0 +1,458 @@
+mod api;
+mod contacts;
+mod deposits;
+mod helpers;
+mod init;
+mod lightning_address;
+mod lightning_sender;
+mod lnurl;
+mod payments;
+mod runtime;
+mod sync;
+mod sync_coordinator;
+
+pub(crate) use lightning_sender::LightningSender;
+pub(crate) use runtime::{RuntimeEvent, SdkRuntime, runtime_from_config};
+pub(crate) use sync_coordinator::SyncCoordinator;
+
+use bitflags::bitflags;
+use breez_sdk_common::{buy::moonpay::MoonpayProvider, fiat::FiatService};
+use platform_utils::HttpClient;
+use platform_utils::tokio;
+use spark_wallet::SparkWallet;
+use std::sync::Arc;
+use tokio::sync::{Mutex, OnceCell, oneshot, watch};
+
+use crate::{
+    BitcoinChainService, ExternalInputParser, InputType, LeafOptimizationConfig, Logger, Network,
+    TokenOptimizationConfig, error::SdkError, events::EventEmitter, lnurl::LnurlServerClient,
+    logger, models::Config, persist::Storage, signer::lnurl_auth::LnurlAuthSignerAdapter,
+    stable_balance::StableBalance, token_conversion::TokenConverter,
+};
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+const BREEZ_SYNC_SERVICE_URL: &str = "https://datasync.breez.technology";
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+const BREEZ_SYNC_SERVICE_URL: &str = "https://datasync.breez.technology:442";
+
+pub(crate) const CLAIM_TX_SIZE_VBYTES: u64 = 99;
+pub(crate) const SYNC_PAGING_LIMIT: u32 = 100;
+
+bitflags! {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct SyncType: u32 {
+        const Wallet = 1 << 0;
+        const WalletState = 1 << 1;
+        const Deposits = 1 << 2;
+        const LnurlMetadata = 1 << 3;
+        const Full = Self::Wallet.0.0
+            | Self::WalletState.0.0
+            | Self::Deposits.0.0
+            | Self::LnurlMetadata.0.0;
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SyncRequest {
+    pub(crate) sync_type: SyncType,
+    #[allow(clippy::type_complexity)]
+    pub(crate) reply: Arc<Mutex<Option<oneshot::Sender<Result<(), SdkError>>>>>,
+    /// If true, bypass the "recently synced" check and sync immediately.
+    /// Use for event-driven syncs (after payments, transfers, etc.) that should happen immediately.
+    pub(crate) force: bool,
+}
+
+impl SyncRequest {
+    pub(crate) async fn reply(&self, error: Option<SdkError>) {
+        if let Some(reply) = self.reply.lock().await.take() {
+            let _ = match error {
+                Some(e) => reply.send(Err(e)),
+                None => reply.send(Ok(())),
+            };
+        }
+    }
+}
+
+/// `BreezSDK` is a wrapper around `SparkSDK` that provides a more structured API
+/// with request/response objects and comprehensive error handling.
+#[derive(Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct BreezSdk {
+    pub(crate) config: Config,
+    pub(crate) spark_wallet: Arc<SparkWallet>,
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) chain_service: Arc<dyn BitcoinChainService>,
+    pub(crate) fiat_service: Arc<dyn FiatService>,
+    pub(crate) lnurl_client: Arc<dyn HttpClient>,
+    pub(crate) lnurl_server_client: Option<Arc<dyn LnurlServerClient>>,
+    pub(crate) lnurl_auth_signer: Arc<LnurlAuthSignerAdapter>,
+    pub(crate) event_emitter: Arc<EventEmitter>,
+    pub(crate) shutdown_sender: watch::Sender<()>,
+    pub(crate) runtime: SdkRuntime,
+    /// Coordinator for coalescing duplicate sync requests
+    pub(crate) sync_coordinator: SyncCoordinator,
+    pub(crate) initial_synced_watcher: watch::Receiver<bool>,
+    pub(crate) external_input_parsers: Vec<ExternalInputParser>,
+    pub(crate) spark_private_mode_initialized: Arc<OnceCell<()>>,
+    pub(crate) token_converter: Arc<dyn TokenConverter>,
+    pub(crate) stable_balance: Option<Arc<StableBalance>>,
+    pub(crate) buy_bitcoin_provider: Arc<MoonpayProvider>,
+    pub(crate) cross_chain_context: crate::cross_chain::CrossChainContext,
+    /// Shared helper for paying LN invoices and persisting the resulting
+    /// payment rows. Reused by cross-chain providers (e.g. Boltz) that
+    /// need to pay an LN invoice as part of a larger flow.
+    #[allow(dead_code)]
+    pub(crate) lightning_sender: Arc<LightningSender>,
+}
+
+pub(crate) struct BreezSdkParams {
+    pub config: Config,
+    pub storage: Arc<dyn Storage>,
+    pub chain_service: Arc<dyn BitcoinChainService>,
+    pub fiat_service: Arc<dyn FiatService>,
+    pub lnurl_client: Arc<dyn HttpClient>,
+    pub lnurl_server_client: Option<Arc<dyn LnurlServerClient>>,
+    pub lnurl_auth_signer: Arc<LnurlAuthSignerAdapter>,
+    pub shutdown_sender: watch::Sender<()>,
+    pub runtime: SdkRuntime,
+    pub spark_wallet: Arc<SparkWallet>,
+    pub event_emitter: Arc<EventEmitter>,
+    pub buy_bitcoin_provider: Arc<MoonpayProvider>,
+    pub token_converter: Arc<dyn TokenConverter>,
+    pub stable_balance: Option<Arc<StableBalance>>,
+    pub sync_coordinator: SyncCoordinator,
+    pub cross_chain_context: crate::cross_chain::CrossChainContext,
+    pub lightning_sender: Arc<LightningSender>,
+}
+
+pub async fn parse_input(
+    input: &str,
+    external_input_parsers: Option<Vec<ExternalInputParser>>,
+) -> Result<InputType, SdkError> {
+    Ok(breez_sdk_common::input::parse(
+        input,
+        external_input_parsers.map(|parsers| parsers.into_iter().map(From::from).collect()),
+    )
+    .await?
+    .into())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn init_logging(
+    log_dir: Option<String>,
+    app_logger: Option<Box<dyn Logger>>,
+    log_filter: Option<String>,
+) -> Result<(), SdkError> {
+    logger::init_logging(log_dir.as_deref(), app_logger, log_filter.as_deref())
+}
+
+/// Connects to the Spark network using the provided configuration and mnemonic.
+///
+/// # Arguments
+///
+/// * `request` - The connection request object
+///
+/// # Returns
+///
+/// Result containing either the initialized `BreezSdk` or an `SdkError`
+#[cfg(feature = "sqlite")]
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+pub async fn connect(request: crate::ConnectRequest) -> Result<BreezSdk, SdkError> {
+    let builder = super::sdk_builder::SdkBuilder::new(request.config, request.seed)
+        .with_default_storage(request.storage_dir);
+    let sdk = builder.build().await?;
+    Ok(sdk)
+}
+
+/// Connects to the Spark network using an external signer.
+///
+/// This method allows using a custom signer implementation instead of providing
+/// a seed directly.
+///
+/// # Arguments
+///
+/// * `request` - The connection request object with external signer
+///
+/// # Returns
+///
+/// Result containing either the initialized `BreezSdk` or an `SdkError`
+#[cfg(feature = "sqlite")]
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+pub async fn connect_with_signer(
+    request: crate::ConnectWithSignerRequest,
+) -> Result<BreezSdk, SdkError> {
+    let builder = super::sdk_builder::SdkBuilder::new_with_signer(
+        request.config,
+        request.breez_signer,
+        request.spark_signer,
+    )
+    .with_default_storage(request.storage_dir);
+    let sdk = builder.build().await?;
+    Ok(sdk)
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn default_config(network: Network) -> Config {
+    let lnurl_domain = match network {
+        Network::Mainnet => Some("breez.tips".to_string()),
+        Network::Regtest => None,
+    };
+    Config {
+        api_key: None,
+        network,
+        sync_interval_secs: 60, // every 1 minute
+        max_deposit_claim_fee: Some(crate::MaxFee::Rate { sat_per_vbyte: 1 }),
+        lnurl_domain,
+        prefer_spark_over_lightning: false,
+        external_input_parsers: None,
+        use_default_external_input_parsers: true,
+        real_time_sync_server_url: Some(BREEZ_SYNC_SERVICE_URL.to_string()),
+        private_enabled_default: true,
+        leaf_optimization_config: LeafOptimizationConfig {
+            auto_enabled: true,
+            multiplicity: 1,
+        },
+        token_optimization_config: TokenOptimizationConfig {
+            auto_enabled: true,
+            target_output_count: 5,
+            min_outputs_threshold: 50,
+        },
+        stable_balance_config: None,
+        max_concurrent_claims: 4,
+        spark_config: Some(default_spark_config(network)),
+        background_tasks_enabled: true,
+        cross_chain_config: None,
+    }
+}
+
+/// Builds a [`Config`] suitable for multi-tenant server-mode deployments.
+///
+/// This preset returns the same configuration as [`default_config`] with
+/// [`background_tasks_enabled`](Config::background_tasks_enabled) set to
+/// `false`. In server mode, the SDK is treated as a library: the host
+/// orchestrates sync, claiming, and event delivery (typically via webhooks)
+/// explicitly, so an ephemeral SDK instance stays cheap and predictable.
+///
+/// Config fields whose background services are gated off are reset to their
+/// inactive shape: `real_time_sync_server_url` and `cross_chain_config` are
+/// set to `None`, and both `leaf_optimization_config.auto_enabled` and
+/// `token_optimization_config.auto_enabled` are set to `false`. The SDK
+/// rejects builds where `background_tasks_enabled` is `false` and any of
+/// those fields is left in its active shape, so flip the flag via this
+/// helper rather than by hand.
+///
+/// Explicit operations (`sync_wallet`, `claim_deposit`,
+/// `list_unclaimed_deposits`, `refund_deposit`,
+/// `refund_pending_conversions`, etc.) continue to work and are the intended
+/// entry points in this mode.
+///
+/// Stable Balance is not supported in this mode because its conversion worker
+/// is a background service.
+///
+/// One-time setup that the SDK normally applies automatically — notably
+/// `private_enabled_default` — is NOT applied in this mode. Drive setup
+/// explicitly via `update_user_settings` (and any other relevant APIs) so
+/// ephemeral per-request SDK instances incur no implicit setup overhead.
+///
+/// `get_info` reads balance directly from the spark wallet in this mode
+/// rather than from the background-maintained storage cache, so balance
+/// reflects the latest local sync and `ensure_synced=true` is rejected with
+/// an invalid-input error
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn default_server_config(network: Network) -> Config {
+    let mut config = default_config(network);
+    config.background_tasks_enabled = false;
+    config.real_time_sync_server_url = None;
+    config.leaf_optimization_config.auto_enabled = false;
+    config.token_optimization_config.auto_enabled = false;
+    config.cross_chain_config = None;
+    config
+}
+
+/// Builds the default [`SparkConfig`](crate::models::SparkConfig) for the given network.
+///
+/// Surfaced through [`default_config`] as `Config::spark_config` so callers can read the
+/// baked-in operator and SSP endpoints and selectively override individual fields (e.g. to
+/// point at a staging environment) before passing the [`Config`] to [`connect`].
+fn default_spark_config(network: Network) -> crate::models::SparkConfig {
+    use crate::models::{SparkSigningOperator, SparkSspConfig};
+
+    let wallet_config = spark_wallet::SparkWalletConfig::default_config(network.into());
+
+    let coordinator_identifier = hex::encode(
+        wallet_config
+            .operator_pool
+            .get_coordinator()
+            .identifier
+            .serialize(),
+    );
+
+    let signing_operators = wallet_config
+        .operator_pool
+        .get_all_operators()
+        .map(|op| SparkSigningOperator {
+            id: u32::try_from(op.id).expect("operator id fits in u32"),
+            identifier: hex::encode(op.identifier.serialize()),
+            address: op.address.clone(),
+            identity_public_key: hex::encode(op.identity_public_key.serialize()),
+            ca_cert_pem: op
+                .ca_cert
+                .as_ref()
+                .and_then(|b| String::from_utf8(b.clone()).ok()),
+        })
+        .collect();
+
+    let ssp = &wallet_config.service_provider_config;
+
+    crate::models::SparkConfig {
+        coordinator_identifier,
+        threshold: wallet_config.split_secret_threshold,
+        signing_operators,
+        ssp_config: SparkSspConfig {
+            base_url: ssp.base_url.clone(),
+            identity_public_key: hex::encode(ssp.identity_public_key.serialize()),
+            schema_endpoint: ssp.schema_endpoint.clone(),
+        },
+        expected_withdraw_bond_sats: wallet_config.tokens_config.expected_withdraw_bond_sats,
+        expected_withdraw_relative_block_locktime: wallet_config
+            .tokens_config
+            .expected_withdraw_relative_block_locktime,
+    }
+}
+
+/// The two default external signers created from one mnemonic by
+/// [`default_external_signers`].
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ExternalSigners {
+    /// External signer for non-Spark SDK signing (LNURL-auth, sync, message
+    /// signing, ECIES).
+    pub breez_signer: Arc<dyn crate::signer::ExternalBreezSigner>,
+    /// External high-level Spark signer for the Spark wallet flows.
+    pub spark_signer: Arc<dyn crate::signer::ExternalSparkSigner>,
+}
+
+/// Creates the default external signers from a mnemonic.
+///
+/// This is a convenience factory method for creating the two signer halves
+/// that can be passed to `connect_with_signer` or `SdkBuilder::new_with_signer`.
+/// Key derivation matches the seed-based connect path: an SDK built either way
+/// from the same mnemonic is the same wallet.
+///
+/// # Arguments
+///
+/// * `mnemonic` - BIP39 mnemonic phrase (12 or 24 words)
+/// * `passphrase` - Optional passphrase for the mnemonic
+/// * `network` - Network to use (Mainnet or Regtest)
+/// * `account_number` - Account number in the derivation path. Unset uses the
+///   network default: 0 on Regtest, 1 on all other networks.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn default_external_signers(
+    mnemonic: String,
+    passphrase: Option<String>,
+    network: Network,
+    account_number: Option<u32>,
+) -> Result<ExternalSigners, SdkError> {
+    use crate::signer::{DefaultExternalSigner, DefaultExternalSparkSigner};
+
+    let breez_signer = DefaultExternalSigner::new(
+        mnemonic.clone(),
+        passphrase.clone(),
+        network,
+        account_number,
+    )?;
+    let spark_signer =
+        DefaultExternalSparkSigner::new(mnemonic, passphrase, network, account_number)?;
+
+    Ok(ExternalSigners {
+        breez_signer: Arc::new(breez_signer),
+        spark_signer: Arc::new(spark_signer),
+    })
+}
+
+/// Fetches the current status of Spark network services relevant to the SDK.
+///
+/// This function queries the Spark status API and returns the worst status
+/// across the Spark Operators and SSP services.
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+pub async fn get_spark_status() -> Result<crate::SparkStatus, SdkError> {
+    use chrono::DateTime;
+    use platform_utils::DefaultHttpClient;
+
+    #[derive(serde::Deserialize)]
+    struct StatusApiResponse {
+        services: Vec<StatusApiService>,
+        #[serde(rename = "lastUpdated")]
+        last_updated: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct StatusApiService {
+        name: String,
+        status: String,
+    }
+
+    fn parse_service_status(s: &str) -> crate::ServiceStatus {
+        match s {
+            "operational" => crate::ServiceStatus::Operational,
+            "degraded" => crate::ServiceStatus::Degraded,
+            "partial" => crate::ServiceStatus::Partial,
+            "major" => crate::ServiceStatus::Major,
+            _ => {
+                tracing::warn!("Unknown service status: {s}");
+                crate::ServiceStatus::Unknown
+            }
+        }
+    }
+
+    let http_client = DefaultHttpClient::default();
+
+    let response = http_client
+        .get("https://spark.money/api/v1/status".to_string(), None)
+        .await
+        .map_err(|e| SdkError::NetworkError(e.to_string()))?;
+
+    let api_response: StatusApiResponse = response
+        .json()
+        .map_err(|e| SdkError::Generic(format!("Failed to parse status response: {e}")))?;
+
+    let status = api_response
+        .services
+        .iter()
+        .filter(|s| s.name == "Spark Operators" || s.name == "SSP")
+        .map(|s| parse_service_status(&s.status))
+        .max()
+        .unwrap_or(crate::ServiceStatus::Unknown);
+
+    let last_updated = DateTime::parse_from_rfc3339(&api_response.last_updated)
+        .map(|dt| dt.timestamp().cast_unsigned())
+        .map_err(|e| SdkError::Generic(format!("Failed to parse lastUpdated timestamp: {e}")))?;
+
+    Ok(crate::SparkStatus {
+        status,
+        last_updated,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_server_config_disables_background_tasks() {
+        for network in [Network::Mainnet, Network::Regtest] {
+            let cfg = default_server_config(network);
+            assert!(!cfg.background_tasks_enabled);
+            assert!(cfg.real_time_sync_server_url.is_none());
+            assert!(!cfg.leaf_optimization_config.auto_enabled);
+            assert!(!cfg.token_optimization_config.auto_enabled);
+        }
+    }
+
+    #[test]
+    fn default_config_enables_background_tasks() {
+        assert!(default_config(Network::Mainnet).background_tasks_enabled);
+        assert!(default_config(Network::Regtest).background_tasks_enabled);
+    }
+}

@@ -1,0 +1,34 @@
+[package]
+name = "breez-sdk-bindings"
+edition = "2024"
+version.workspace = true
+
+[features]
+default = ["postgres", "mysql"]
+# PostgreSQL storage backend (disable for mobile builds to reduce binary size)
+postgres = ["breez-sdk-spark/postgres"]
+# MySQL storage backend (disable for mobile builds to reduce binary size)
+mysql = ["breez-sdk-spark/mysql"]
+uniffi-cli = ["uniffi/bindgen-tests", "uniffi/cli"]
+# Bench-only: see breez-sdk-spark's `span-trace` feature.
+span-trace = ["breez-sdk-spark/span-trace"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["uniffi-cli"]
+
+[lib]
+name = "breez_sdk_spark_bindings"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[dependencies]
+breez-sdk-spark = { workspace = true, features = ["uniffi", "passkey", "sqlite", "turnkey-p256"] }
+uniffi = { workspace = true, features = ["tokio"] }
+
+[build-dependencies]
+glob.workspace = true
+uniffi = { workspace = true, features = ["build"] }
+
+[lints]
+workspace = true

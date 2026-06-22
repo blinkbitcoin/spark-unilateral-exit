@@ -10,7 +10,7 @@ describe("recovery bundle validation", () => {
   it("parses a valid bundle", () => {
     const bundle = parseRecoveryBundle(
       JSON.stringify({
-        schema: "blink.spark-unilateral-exit-bundle.v1",
+        schema: "spark.unilateral-exit-bundle.v1",
         createdAt: "2026-06-15T00:00:00.000Z",
         network: "LOCAL",
         leaves: [{ id: "leaf", treeNodeHex: "00", valueSats: 1 }],
@@ -20,11 +20,28 @@ describe("recovery bundle validation", () => {
     expect(getNodeHexStrings(bundle)).toEqual(["00"]);
   });
 
+  it("accepts optional ancestor nodes", () => {
+    const bundle = parseRecoveryBundle(
+      JSON.stringify({
+        schema: "spark.unilateral-exit-bundle.v1",
+        createdAt: "2026-06-15T00:00:00.000Z",
+        network: "LOCAL",
+        leaves: [{ id: "leaf", treeNodeHex: "00", valueSats: 1 }],
+        nodes: [
+          { id: "root", treeNodeHex: "00" },
+          { id: "leaf", treeNodeHex: "00" },
+        ],
+      }),
+    );
+
+    expect(bundle.nodes).toHaveLength(2);
+  });
+
   it("rejects seedless bundles without leaves", () => {
     expect(() =>
       parseRecoveryBundle(
         JSON.stringify({
-          schema: "blink.spark-unilateral-exit-bundle.v1",
+          schema: "spark.unilateral-exit-bundle.v1",
           createdAt: "2026-06-15T00:00:00.000Z",
           network: "LOCAL",
           leaves: [],
@@ -54,12 +71,26 @@ describe("recovery bundle validation", () => {
     expect(() =>
       parseRecoveryBundle(
         JSON.stringify({
-          schema: "blink.spark-unilateral-exit-bundle.v1",
+          schema: "spark.unilateral-exit-bundle.v1",
           createdAt: "2026-06-15T00:00:00.000Z",
           network: "LOCAL",
           leaves: [{ id: "leaf", treeNodeHex: "not hex" }],
         }),
       ),
     ).toThrow(/treeNodeHex/);
+  });
+
+  it("rejects malformed ancestor nodes", () => {
+    expect(() =>
+      parseRecoveryBundle(
+        JSON.stringify({
+          schema: "spark.unilateral-exit-bundle.v1",
+          createdAt: "2026-06-15T00:00:00.000Z",
+          network: "LOCAL",
+          leaves: [{ id: "leaf", treeNodeHex: "00" }],
+          nodes: [{ id: "root", treeNodeHex: "not hex" }],
+        }),
+      ),
+    ).toThrow(/Node root treeNodeHex/);
   });
 });

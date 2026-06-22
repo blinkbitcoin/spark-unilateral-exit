@@ -1,0 +1,126 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckUsernameAvailableResponse {
+    pub available: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecoverLnurlPayRequest {
+    pub signature: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecoverLnurlPayResponse {
+    pub lnurl: String,
+    pub lightning_address: String,
+    pub username: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterLnurlPayRequest {
+    pub username: String,
+    pub signature: String,
+    pub timestamp: u64,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnregisterLnurlPayRequest {
+    pub username: String,
+    pub signature: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterLnurlPayResponse {
+    pub lnurl: String,
+    pub lightning_address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferLnurlPayRequest {
+    pub username: String,
+    pub description: String,
+    /// Hex-encoded secp256k1 compressed public key of the current owner (A).
+    pub from_pubkey: String,
+    /// Hex-encoded DER ECDSA signature by A over
+    /// `"transfer:{username}-{to_pubkey}"`.
+    pub from_signature: String,
+    /// Hex-encoded DER ECDSA signature by B (the `to_pubkey` in the URL path)
+    /// over the same `"transfer:{username}-{to_pubkey}"` canonical message.
+    pub to_signature: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferLnurlPayResponse {
+    pub lnurl: String,
+    pub lightning_address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListMetadataRequest {
+    pub signature: String,
+    pub timestamp: u64,
+    pub offset: Option<u32>,
+    pub limit: Option<u32>,
+    /// Only return metadata updated after this timestamp (milliseconds)
+    pub updated_after: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListMetadataResponse {
+    pub metadata: Vec<ListMetadataMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListMetadataMetadata {
+    pub payment_hash: String,
+    pub sender_comment: Option<String>,
+    pub nostr_zap_request: Option<String>,
+    /// The zap receipt event (kind 9735) as JSON, if created
+    pub nostr_zap_receipt: Option<String>,
+    /// Unix timestamp (milliseconds) when this metadata was last updated
+    pub updated_at: i64,
+    /// The payment preimage if invoice has been paid
+    pub preimage: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublishZapReceiptRequest {
+    pub signature: String,
+    pub timestamp: u64,
+    pub zap_receipt: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvoicePaidRequest {
+    pub signature: String,
+    pub timestamp: u64,
+    pub preimage: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvoicesPaidRequest {
+    pub signature: String,
+    pub timestamp: u64,
+    pub invoices: Vec<PaidInvoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaidInvoice {
+    pub preimage: String,
+    pub invoice: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublishZapReceiptResponse {
+    pub published: bool,
+    pub zap_receipt: String,
+}
+
+pub fn sanitize_username(username: &str) -> String {
+    username.trim().to_lowercase()
+}

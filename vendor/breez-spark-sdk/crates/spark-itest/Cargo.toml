@@ -1,0 +1,33 @@
+[package]
+name = "spark-itest"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bitcoin = { workspace = true, features = ["serde"] }
+futures.workspace = true
+hex.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+platform-utils.workspace = true
+base64.workspace = true
+rstest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+spark-mysql.workspace = true
+spark-postgres.workspace = true
+spark-wallet.workspace = true
+test-log = { workspace = true, features = ["trace"] }
+testcontainers.workspace = true
+testcontainers-modules = { workspace = true, features = ["postgres", "mysql"] }
+testdir.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tokio-test.workspace = true

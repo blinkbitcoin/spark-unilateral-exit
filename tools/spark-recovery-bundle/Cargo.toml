@@ -1,0 +1,18 @@
+[package]
+name = "spark-recovery-bundle"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0.98"
+bip39 = "2.2.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5.40", features = ["derive"] }
+hex = "0.4.3"
+prost = "0.13.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+spark = { path = "../../vendor/breez-spark-sdk/crates/spark" }
+spark-wallet = { path = "../../vendor/breez-spark-sdk/crates/spark-wallet" }
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }

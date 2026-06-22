@@ -3,7 +3,7 @@ import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
 import { validateRecoveryBundle } from "./bundle.js";
 
-const DEFAULT_SCHEMA = "blink.spark-unilateral-exit-bundle.v1";
+const DEFAULT_SCHEMA = "spark.unilateral-exit-bundle.v1";
 const DEFAULT_OPERATOR_SET = "spark-sdk";
 
 export class RecoveryBundleExportError extends Error {

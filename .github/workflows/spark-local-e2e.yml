@@ -23,13 +23,6 @@ jobs:
           repository: buildonspark/spark
           path: upstream-spark
 
-      - name: Use bitcoind with ephemeral anchor policy
-        working-directory: upstream-spark
-        run: |
-          grep -q 'lncm/bitcoind:v28.0' docker-compose.yml
-          sed -i 's#lncm/bitcoind:v28.0#lnliz/bitcoind:29.3#g' docker-compose.yml
-          grep -q 'lnliz/bitcoind:29.3' docker-compose.yml
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,7 +34,10 @@ jobs:
       - name: Build and start Spark local stack
         working-directory: upstream-spark
         run: |
-          docker compose up -d --build postgres bitcoind bitcoin-init spark-operator-0 spark-operator-1 spark-operator-2
+          docker compose \
+            -f docker-compose.yml \
+            -f ../scripts/spark-local-bitcoind29.override.yml \
+            up -d --build postgres bitcoind bitcoin-init spark-operator-0 spark-operator-1 spark-operator-2
           docker compose ps
 
       - name: Wait for Spark operators
@@ -62,4 +58,8 @@ jobs:
       - name: Stop Spark local stack
         if: always()
         working-directory: upstream-spark
-        run: docker compose down -v
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f ../scripts/spark-local-bitcoind29.override.yml \
+            down -v

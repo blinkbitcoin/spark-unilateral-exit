@@ -18,7 +18,26 @@ A Spark seed alone is not enough for offline recovery.
 
 The seed can derive user keys, but the current Spark leaves are normally discovered from Spark operators. If operators are already down and the app did not save the current leaves and ancestor chain, the recovery tool cannot know what to exit.
 
-For this reason, Blink mobile should save an encrypted recovery bundle while Spark operators are online.
+For this reason, a Spark wallet should save an encrypted recovery bundle while Spark operators are online.
+
+## Minimum practical balance
+
+The current CLI does not enforce a minimum recoverable Bitcoin balance. It validates that the bundle has at least one leaf, that the fee rate is positive, and that at least one CPFP UTXO is provided. It does not yet estimate package vsize, subtract L1 fees, or reject economically uneconomic recoveries.
+
+Use this conservative planning floor until package and sweep sizing are measured from production-like Spark packages:
+
+| Scenario | Practical floor at 1 sat/vbyte | Notes |
+| --- | ---: | --- |
+| 1 Bitcoin leaf | ~10,000 sats | Covers a simple unilateral-exit package, CPFP fee bump, final sweep fee, dust, and margin. |
+| 2 Bitcoin leaves | ~20,000 sats total | Assumes roughly one package path per leaf; use a higher floor if the leaves have different ancestor chains. |
+
+These are not protocol limits. They are operator guidance for whether recovery is worth attempting at low fee rates. The real threshold is:
+
+```text
+recoverable leaf sats > unilateral-exit package fees + CPFP fees + final sweep fee + dust threshold
+```
+
+At fee rates above 1 sat/vbyte, scale the practical floor roughly linearly with the fee rate until the tool has explicit fee estimation. For example, use about 50,000 sats for one leaf and 100,000 sats total for two leaves at 5 sat/vbyte. If the CPFP UTXO is external funding, the user still needs that UTXO available even when the recovered leaf balance is above the floor.
 
 ## Recovery bundle contents
 
@@ -41,20 +60,39 @@ Refresh the bundle while Spark operators are online, after wallet startup and af
 
 ```sh
 node src/cli.js refresh-bundle \
-  --seed-file /path/to/spark-seed.txt \
+  --seed-file ../.spark-seed.txt \
   --network MAINNET \
-  --operator-set blink-mainnet \
-  --app-version blink-mobile-2.x \
-  --out recovery-bundle.json
+  --out ../recovery-bundle.json \
+  --operator-set spark-mainnet \
+  --app-version example-app
 ```
 
 Operational notes:
 
 - Prefer `--seed-file` or `SPARK_SEED`; avoid passing real seeds via `--seed` in shared shells.
+- `--operator-set` and `--app-version` are optional provenance metadata stored in the bundle.
 - The command initializes the Spark wallet from the seed, forces a wallet sync when the SDK exposes that API, queries `getLeaves()`, serializes each `TreeNode`, and writes a bundle matching this repo's recovery schema.
 - The command fails if no leaves are present. An empty bundle cannot recover funds offline.
 - Mobile should encrypt the bundle before uploading it to Google Drive, iCloud, or a local user-selected file location.
 - Refresh cadence should be event-driven plus periodic. Event-driven refresh captures state changes immediately; a periodic refresh handles missed app lifecycle events.
+
+### Rust SDK exporter
+
+Some Spark wallet implementations do not expose leaves through the upstream `@buildonspark/spark-sdk` wallet API. For those wallets, use the standalone Rust exporter instead of modifying an SDK:
+
+```sh
+npm run refresh-recovery-bundle -- \
+  --seed-file ../.spark-seed.txt \
+  --network mainnet \
+  --out ../recovery-bundle.json \
+  --account-number 1 \
+  --operator-set spark-mainnet \
+  --app-version example-app
+```
+
+The exporter lives in `tools/spark-recovery-bundle`, builds against the repo-local Rust SDK snapshot under `vendor/breez-spark-sdk`, and is run through the repo Nix flake. It authenticates to Spark operators from the seed, queries available leaves with `include_parents=true`, stores leaf `treeNodeHex` values plus bundled ancestor nodes, and writes the same `spark.unilateral-exit-bundle.v1` JSON schema. The recovery package builder can then satisfy parent lookups from the bundle while offline.
+
+`--account-number`, `--operator-set`, and `--app-version` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the vendored SDK default for the selected network.
 
 ## High-level CLI flow
 

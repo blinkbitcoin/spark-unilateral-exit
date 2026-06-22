@@ -1,0 +1,490 @@
+use crate::{repository::LnurlRepository, routes::LnurlServer, state::State};
+use anyhow::anyhow;
+use axum::{
+    Extension, Router,
+    extract::DefaultBodyLimit,
+    http::{Method, StatusCode},
+    middleware,
+    routing::{delete, get, post},
+};
+use base64::{Engine, prelude::BASE64_STANDARD};
+use clap::Parser;
+use figment::{
+    Figment,
+    providers::{Env, Format, Serialized, Toml},
+};
+use serde::{Deserialize, Serialize};
+use spark::operator::rpc::DefaultConnectionManager;
+use spark::session_store::InMemorySessionStore;
+use spark::ssp::{ServiceProvider, SparkWalletWebhookEventType};
+use spark::token::InMemoryTokenOutputStore;
+use spark::tree::InMemoryTreeStore;
+use spark_wallet::{DefaultSigner, Network, SparkSignerAdapter, SparkWalletConfig};
+use sqlx::{PgPool, SqlitePool, sqlite::SqlitePoolOptions};
+use std::collections::HashSet;
+use std::str::FromStr;
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::{Mutex, watch};
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{debug, error, info};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use x509_parser::prelude::{FromDer, X509Certificate};
+
+mod auth;
+mod domains;
+mod error;
+mod invoice_paid;
+mod postgresql;
+mod repository;
+mod routes;
+mod sqlite;
+mod state;
+mod time;
+mod user;
+mod webhook_notify;
+mod webhooks;
+mod zap;
+
+#[derive(Clone, Parser, Debug, Serialize, Deserialize)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Address the lnurl server will listen on.
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    pub address: core::net::SocketAddr,
+
+    #[arg(long, default_value = "lnurl.conf")]
+    pub config: PathBuf,
+
+    /// Automatically apply migrations to the database.
+    #[arg(long)]
+    pub auto_migrate: bool,
+
+    /// Connection string to the postgres database.
+    #[arg(long, default_value = "")]
+    pub db_url: String,
+
+    /// Loglevel to use. Can be used to filter logs through the env filter
+    /// format.
+    #[arg(long, default_value = "info")]
+    pub log_level: String,
+
+    /// Spark network.
+    #[arg(long, default_value = "mainnet")]
+    pub network: Network,
+
+    /// Scheme prefix for lnurl urls.
+    #[arg(long, default_value = "https")]
+    pub scheme: String,
+
+    /// Minimum amount (in millisatoshi) that can be sent in a lnurl payment.
+    #[arg(long, default_value = "1000")]
+    pub min_sendable: u64,
+
+    /// Maximum amount (in millisatoshi) that can be sent in a lnurl payment.
+    #[arg(long, default_value = "4000000000")]
+    pub max_sendable: u64,
+
+    /// Whether to include the spark address in the invoices generated.
+    /// If included this can reduce fees for wallets that support it at the
+    /// cost of privacy.
+    #[cfg(feature = "dev")]
+    #[arg(long, default_value = "false")]
+    pub dev_dont_use_lnurl_include_spark_address: bool,
+
+    /// List of domains that are allowed to use the lnurl server. Comma separated.
+    /// These are in addition to any domains stored in the database. The configured
+    /// domains here will be added to the database on startup.
+    #[arg(long, default_value = "localhost:8080")]
+    pub domains: String,
+
+    /// Nostr private key for zaps. If not set, zap requests will be ignored.
+    #[arg(long)]
+    pub nsec: Option<String>,
+
+    /// Base64 encoded DER format CA certificate without begin/end certificate markers.
+    /// If set, the server will use this certificate to validate api keys.
+    #[arg(long)]
+    pub ca_cert: Option<String>,
+
+    /// URL to fetch a comma-separated certificate revocation list from.
+    #[arg(long)]
+    pub crl_url: Option<String>,
+
+    /// Domain for the webhook URL registered with the SSP.
+    #[arg(long)]
+    pub webhook_domain: Option<String>,
+
+    /// Hex-encoded 32-byte seed used for SSP authentication.
+    /// If not set, a random seed will be generated.
+    #[arg(long)]
+    pub ssp_auth_seed: Option<String>,
+
+    /// Number of days to keep webhook deliveries (both succeeded and failed)
+    /// for audit/debugging before they are cleaned up periodically.
+    #[arg(long, default_value = "90")]
+    pub webhook_delivery_ttl_days: u32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let args = Args::parse();
+    let config_file = std::fs::canonicalize(&args.config).ok();
+    let mut figment = Figment::new().merge(Serialized::defaults(args));
+    if let Some(config_file) = &config_file {
+        figment = figment.merge(Toml::file(config_file));
+    }
+
+    let args: Args = figment.merge(Env::prefixed("BREEZ_LNURL_")).extract()?;
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(&args.log_level))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .init();
+
+    if let Some(config_file) = &config_file {
+        info!(
+            "starting lnurl server with config file: {}",
+            config_file.display()
+        );
+    } else {
+        info!("starting lnurl server without config file");
+    }
+
+    if args.db_url.trim().to_lowercase().starts_with("postgres") {
+        let pool = PgPool::connect(&args.db_url)
+            .await
+            .map_err(|e| anyhow!("failed to create connection pool: {:?}", e))?;
+
+        if args.auto_migrate {
+            debug!("running postgres database migrations");
+            postgresql::run_migrations(&pool).await?;
+            debug!("finished running postgres database migrations");
+        } else {
+            debug!("skipping postgres database migrations");
+        }
+        let repository = postgresql::LnurlRepository::new(pool);
+        run_server(args, repository).await?;
+    } else {
+        // For in-memory databases, limit to 1 connection so all queries share
+        // the same database. Each separate connection to `:memory:` creates its
+        // own independent database.
+        let pool = if args.db_url.contains(":memory:") {
+            SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&args.db_url)
+                .await
+        } else {
+            SqlitePool::connect(&args.db_url).await
+        }
+        .map_err(|e| anyhow!("failed to create connection pool: {:?}", e))?;
+
+        if args.auto_migrate {
+            debug!("running sqlite database migrations");
+            sqlite::run_migrations(&pool).await?;
+            debug!("finished running sqlite database migrations");
+        } else {
+            debug!("skipping sqlite database migrations");
+        }
+        let repository = sqlite::LnurlRepository::new(pool);
+        run_server(args, repository).await?;
+    }
+
+    Ok(())
+}
+
+fn parse_auth_seed(hex_str: Option<&str>) -> [u8; 32] {
+    let Some(hex_str) = hex_str else {
+        return rand::random();
+    };
+    let Ok(bytes) = hex::decode(hex_str) else {
+        error!("invalid ssp_auth_seed hex, using random seed");
+        return rand::random();
+    };
+    let Ok(seed) = bytes.try_into() else {
+        error!("ssp_auth_seed must be 32 bytes, using random seed");
+        return rand::random();
+    };
+    seed
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_server<DB>(args: Args, repository: DB) -> Result<(), anyhow::Error>
+where
+    DB: LnurlRepository + webhooks::WebhookRepository + Clone + Send + Sync + 'static,
+{
+    let auth_seed = parse_auth_seed(args.ssp_auth_seed.as_deref());
+
+    let mut spark_config = SparkWalletConfig::default_config(args.network);
+    spark_config.service_provider_config.schema_endpoint = Some("graphql/spark/rc".to_string());
+
+    // Create shared infrastructure components
+    let signer = Arc::new(DefaultSigner::new(&auth_seed, args.network)?);
+    // High-level Spark signer wrapping the in-process low-level signer, used by
+    // the Spark wallet and service provider.
+    let spark_signer: Arc<dyn spark_wallet::SparkSigner> =
+        Arc::new(SparkSignerAdapter::new(signer.clone()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let connection_manager: Arc<dyn spark::operator::rpc::ConnectionManager> =
+        Arc::new(DefaultConnectionManager::new());
+    let coordinator = spark_config.operator_pool.get_coordinator().clone();
+    let service_provider = Arc::new(ServiceProvider::new(
+        spark_config.service_provider_config.clone(),
+        spark_signer.clone(),
+        session_store.clone(),
+        None,
+    ));
+
+    // Create wallet using shared signer
+    let wallet = Arc::new(
+        spark_wallet::SparkWallet::new(
+            spark_config.clone(),
+            spark_signer.clone(),
+            session_store.clone(),
+            Arc::new(InMemoryTreeStore::default()),
+            Arc::new(InMemoryTokenOutputStore::default()),
+            Arc::clone(&connection_manager),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?,
+    );
+    wallet.start_background_processing().await;
+
+    let config_domains: Vec<String> = args
+        .domains
+        .split(',')
+        .map(|d| d.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+
+    for domain in &config_domains {
+        repository.add_domain(domain).await?;
+        debug!("ensured domain '{}' exists in database", domain);
+    }
+
+    let domains = domains::start(repository.clone()).await?;
+
+    let ca_cert = args
+        .ca_cert
+        .map(|ca_cert_str| {
+            let raw_ca = BASE64_STANDARD
+                .decode(ca_cert_str.trim())
+                .map_err(|e| anyhow!("failed to decode base64 ca_cert: {:?}", e))?;
+            let (_, ca_cert) = X509Certificate::from_der(&raw_ca)
+                .map_err(|e| anyhow!("failed to parse ca certificate: {e:?}"))?;
+            Ok::<_, anyhow::Error>(ca_cert.as_raw().to_vec())
+        })
+        .transpose()?;
+
+    let crl: HashSet<String> = if let Some(url) = &args.crl_url {
+        let client = reqwest::Client::new();
+        let body = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("failed to fetch crl from {url}: {e:?}"))?
+            .text()
+            .await
+            .map_err(|e| anyhow!("failed to read crl response body: {e:?}"))?;
+        body.split(',').map(str::to_string).collect()
+    } else {
+        HashSet::new()
+    };
+
+    let nostr_keys = args
+        .nsec
+        .map(|nsec| {
+            let keys = nostr::Keys::from_str(&nsec)
+                .map_err(|e| anyhow!("failed to parse nsec key: {:?}", e))?;
+            Ok::<_, anyhow::Error>(keys)
+        })
+        .transpose()?;
+
+    let subscribed_keys = Arc::new(Mutex::new(HashSet::new()));
+
+    // Create watch channel for triggering background processing
+    let (invoice_paid_trigger, invoice_paid_rx) = watch::channel(());
+
+    // Create a shared HTTP client for webhook delivery. reqwest's default pool
+    // settings keep connections warm and HTTP/2 multiplexes requests per host.
+    let http_client = reqwest::Client::new();
+
+    let webhook_service = webhooks::WebhookService::new(repository.clone());
+
+    // Load webhook endpoint configs (domain → {url, secret}) and start
+    // a background refresher that keeps them in sync with the database.
+    let webhook_config_cache = webhooks::config::start(repository.clone()).await?;
+
+    // Start background processors.
+    zap::start_background_processor(
+        repository.clone(),
+        nostr_keys.as_ref(),
+        invoice_paid_rx.clone(),
+    );
+    webhooks::start_background_processor(
+        repository.clone(),
+        http_client,
+        invoice_paid_rx,
+        args.webhook_delivery_ttl_days,
+        webhook_config_cache,
+    );
+
+    // Get or create a shared webhook secret persisted in the database.
+    // All instances share the same secret so webhooks verify correctly
+    // regardless of which instance receives them.
+    let default_secret = hex::encode(rand::random::<[u8; 32]>());
+    let webhook_secret = repository
+        .get_or_create_setting("webhook_secret", &default_secret)
+        .await?;
+
+    if let Some(webhook_domain) = &args.webhook_domain {
+        let webhook_url = format!("{}://{}/webhook", args.scheme, webhook_domain);
+        register_webhook(
+            Arc::clone(&service_provider),
+            webhook_url,
+            webhook_secret.clone(),
+        );
+    }
+
+    let state = State {
+        db: repository,
+        webhook_service,
+        wallet,
+        scheme: args.scheme,
+        min_sendable: args.min_sendable,
+        max_sendable: args.max_sendable,
+        include_spark_address: {
+            #[cfg(feature = "dev")]
+            {
+                args.dev_dont_use_lnurl_include_spark_address
+            }
+            #[cfg(not(feature = "dev"))]
+            {
+                false
+            }
+        },
+        domains,
+        nostr_keys,
+        ca_cert,
+        crl_url: args.crl_url,
+        crl,
+        connection_manager,
+        coordinator,
+        signer,
+        session_store,
+        service_provider,
+        subscribed_keys,
+        invoice_paid_trigger,
+        webhook_secret,
+    };
+
+    let server_router = Router::new()
+        .route(
+            "/lnurlpay/available/{identifier}",
+            get(LnurlServer::<DB>::available),
+        )
+        .route("/lnurlpay/{pubkey}", post(LnurlServer::<DB>::register))
+        .route("/lnurlpay/{pubkey}", delete(LnurlServer::<DB>::unregister))
+        .route(
+            "/lnurlpay/{pubkey}/transfer",
+            post(LnurlServer::<DB>::transfer),
+        )
+        .route(
+            "/lnurlpay/{pubkey}/recover",
+            post(LnurlServer::<DB>::recover),
+        )
+        .route(
+            "/lnurlpay/{pubkey}/metadata",
+            get(LnurlServer::<DB>::list_metadata),
+        )
+        .route(
+            "/lnurlpay/{pubkey}/metadata/{payment_hash}/zap",
+            post(LnurlServer::<DB>::publish_zap_receipt),
+        )
+        .route(
+            "/lnurlpay/{pubkey}/invoice-paid",
+            post(LnurlServer::<DB>::invoice_paid),
+        )
+        .route(
+            "/lnurlpay/{pubkey}/invoices-paid",
+            post(LnurlServer::<DB>::invoices_paid),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth::<DB>,
+        ))
+        .route(
+            "/.well-known/lnurlp/{identifier}",
+            get(LnurlServer::<DB>::handle_lnurl_pay),
+        )
+        .route(
+            "/lnurlp/{identifier}",
+            get(LnurlServer::<DB>::handle_lnurl_pay),
+        )
+        .route(
+            "/lnurlp/{identifier}/invoice",
+            get(LnurlServer::<DB>::handle_invoice),
+        )
+        .route("/verify/{payment_hash}", get(LnurlServer::<DB>::verify))
+        .route("/webhook", post(LnurlServer::<DB>::webhook))
+        .route("/health", get(|| async { StatusCode::OK }))
+        .layer(Extension(state))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_headers(Any)
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]),
+        )
+        .layer(DefaultBodyLimit::max(1_000_000));
+
+    let listener = tokio::net::TcpListener::bind(args.address).await?;
+    let server = axum::serve(listener, server_router.into_make_service());
+
+    let graceful = server.with_graceful_shutdown(async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to create Ctrl+C shutdown signal");
+    });
+
+    // Await the server to receive the shutdown signal
+    if let Err(e) = graceful.await {
+        error!("shutdown error: {e}");
+    }
+
+    info!("lnurl server stopped");
+    Ok(())
+}
+
+fn register_webhook(service_provider: Arc<ServiceProvider>, webhook_url: String, secret: String) {
+    tokio::spawn(async move {
+        let mut delay = std::time::Duration::from_secs(1);
+        let max_delay = std::time::Duration::from_mins(1);
+        loop {
+            info!("registering webhook with SSP at {}", webhook_url);
+            match service_provider
+                .register_wallet_webhook(
+                    &webhook_url,
+                    &secret,
+                    vec![SparkWalletWebhookEventType::SparkLightningReceiveFinished],
+                )
+                .await
+            {
+                Ok(_) => {
+                    info!("webhook registered successfully");
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "failed to register webhook with SSP: {:?}, retrying in {:?}",
+                        e, delay
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2).min(max_delay);
+                }
+            }
+        }
+    });
+}

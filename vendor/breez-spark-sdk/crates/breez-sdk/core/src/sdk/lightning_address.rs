@@ -1,0 +1,268 @@
+use bitcoin::hex::DisplayHex;
+use lnurl_models::sanitize_username;
+
+use crate::{
+    AuthorizeTransferRequest, CheckLightningAddressRequest, ClaimTransferRequest,
+    LightningAddressInfo, LnurlInfo, RegisterLightningAddressRequest, TransferAuthorization,
+    error::SdkError, persist::ObjectCacheRepository,
+};
+
+use super::BreezSdk;
+
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+#[allow(clippy::needless_pass_by_value)]
+impl BreezSdk {
+    pub async fn check_lightning_address_available(
+        &self,
+        req: CheckLightningAddressRequest,
+    ) -> Result<bool, SdkError> {
+        let Some(client) = &self.lnurl_server_client else {
+            return Err(SdkError::Generic(
+                "LNURL server is not configured".to_string(),
+            ));
+        };
+
+        let username = sanitize_username(&req.username);
+        let available = client.check_username_available(&username).await?;
+        Ok(available)
+    }
+
+    pub async fn get_lightning_address(&self) -> Result<Option<LightningAddressInfo>, SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+        let cached = cache.fetch_lightning_address().await?;
+        if cached.is_none() && self.lnurl_server_client.is_some() {
+            return self.recover_lightning_address().await;
+        }
+        Ok(cached.flatten())
+    }
+
+    pub async fn register_lightning_address(
+        &self,
+        request: RegisterLightningAddressRequest,
+    ) -> Result<LightningAddressInfo, SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+        let Some(client) = &self.lnurl_server_client else {
+            return Err(SdkError::Generic(
+                "LNURL server is not configured".to_string(),
+            ));
+        };
+
+        let username = sanitize_username(&request.username);
+
+        let description = match request.description {
+            Some(description) => description,
+            None => format!("Pay to {}@{}", username, client.domain()),
+        };
+
+        let params = crate::lnurl::RegisterLightningAddressRequest {
+            username: username.clone(),
+            description: description.clone(),
+        };
+
+        let response = client.register_lightning_address(&params).await?;
+        let address_info = LightningAddressInfo {
+            lightning_address: response.lightning_address,
+            description,
+            lnurl: LnurlInfo::new(response.lnurl),
+            username,
+        };
+        cache.save_lightning_address(&address_info, false).await?;
+        Ok(address_info)
+    }
+
+    /// Authorize transferring the current owner's registered lightning address
+    /// username to `request.transferee_pubkey`. Returns a
+    /// [`TransferAuthorization`] to hand to the new owner, who
+    /// claims it via [`BreezSdk::claim_lightning_address_transfer`].
+    /// Errors if the current owner has no lightning address registered.
+    pub async fn authorize_lightning_address_transfer(
+        &self,
+        request: AuthorizeTransferRequest,
+    ) -> Result<TransferAuthorization, SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+        let Some(address_info) = cache.fetch_lightning_address().await?.flatten() else {
+            return Err(SdkError::Generic(
+                "No lightning address registered to transfer".to_string(),
+            ));
+        };
+        let self_pubkey = self.spark_wallet.get_identity_public_key().to_string();
+        let message = format!(
+            "transfer:{}-{}",
+            address_info.username, request.transferee_pubkey
+        );
+        let signature = self.spark_wallet.sign_message(&message).await?;
+        Ok(TransferAuthorization {
+            username: address_info.username,
+            pubkey: self_pubkey,
+            signature: signature.serialize_der().to_lower_hex_string(),
+        })
+    }
+
+    /// Claim a lightning address username handed over by its current owner,
+    /// using the [`TransferAuthorization`] from
+    /// [`BreezSdk::authorize_lightning_address_transfer`]. Completes the
+    /// takeover and returns the newly-owned address.
+    pub async fn claim_lightning_address_transfer(
+        &self,
+        request: ClaimTransferRequest,
+    ) -> Result<LightningAddressInfo, SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+        let Some(client) = &self.lnurl_server_client else {
+            return Err(SdkError::Generic(
+                "LNURL server is not configured".to_string(),
+            ));
+        };
+
+        let username = sanitize_username(&request.authorization.username);
+        let description = match request.description {
+            Some(description) => description,
+            None => format!("Pay to {}@{}", username, client.domain()),
+        };
+
+        let params = crate::lnurl::TransferLightningAddressRequest {
+            username: username.clone(),
+            description: description.clone(),
+            from_pubkey: request.authorization.pubkey,
+            from_signature: request.authorization.signature,
+        };
+
+        let response = client.transfer_lightning_address(&params).await?;
+        let address_info = LightningAddressInfo {
+            lightning_address: response.lightning_address,
+            description,
+            lnurl: LnurlInfo::new(response.lnurl),
+            username,
+        };
+        cache.save_lightning_address(&address_info, false).await?;
+        Ok(address_info)
+    }
+
+    pub async fn delete_lightning_address(&self) -> Result<(), SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+        let Some(address_info) = cache.fetch_lightning_address().await?.flatten() else {
+            return Ok(());
+        };
+
+        let Some(client) = &self.lnurl_server_client else {
+            return Err(SdkError::Generic(
+                "LNURL server is not configured".to_string(),
+            ));
+        };
+
+        let params = crate::lnurl::UnregisterLightningAddressRequest {
+            username: address_info.username,
+        };
+
+        client.unregister_lightning_address(&params).await?;
+        cache.delete_lightning_address(false).await?;
+        Ok(())
+    }
+}
+
+// Private lightning address methods
+impl BreezSdk {
+    /// Attempts to recover a lightning address from the lnurl server.
+    pub(super) async fn recover_lightning_address(
+        &self,
+    ) -> Result<Option<LightningAddressInfo>, SdkError> {
+        let cache = ObjectCacheRepository::new(self.storage.clone());
+
+        let Some(client) = &self.lnurl_server_client else {
+            return Err(SdkError::Generic(
+                "LNURL server is not configured".to_string(),
+            ));
+        };
+        let resp = client.recover_lightning_address().await?;
+
+        let result = if let Some(resp) = resp {
+            let address_info = resp.into();
+            cache.save_lightning_address(&address_info, true).await?;
+            Some(address_info)
+        } else {
+            cache.delete_lightning_address(true).await?;
+            None
+        };
+
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "sqlite")]
+mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
+    use crate::{LightningAddressInfo, LnurlInfo, persist::sqlite::SqliteStorage};
+
+    use crate::persist::ObjectCacheRepository;
+
+    fn create_temp_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("breez-test-{}-{}", name, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn create_temp_storage(name: &str) -> (Arc<SqliteStorage>, PathBuf) {
+        let dir = create_temp_dir(name);
+        let storage = SqliteStorage::new(&dir).expect("Failed to create storage");
+        (Arc::new(storage), dir)
+    }
+
+    fn sample_address_info() -> LightningAddressInfo {
+        LightningAddressInfo {
+            lightning_address: "test@example.com".to_string(),
+            username: "test".to_string(),
+            description: "Test address".to_string(),
+            lnurl: LnurlInfo::new("https://example.com/.well-known/lnurlp/test".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_none_when_never_recovered() {
+        let (storage, _dir) = create_temp_storage("never_recovered");
+        let cache = ObjectCacheRepository::new(storage as Arc<_>);
+
+        // Key absent -> None (never recovered)
+        let result = cache.fetch_lightning_address().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_some_none_after_delete() {
+        let (storage, _dir) = create_temp_storage("after_delete");
+        let cache = ObjectCacheRepository::new(storage as Arc<_>);
+
+        // Save an address, then delete it
+        cache
+            .save_lightning_address(&sample_address_info(), false)
+            .await
+            .unwrap();
+        cache.delete_lightning_address(false).await.unwrap();
+
+        // Key present, value null -> Some(None) (recovered, no address)
+        let result = cache.fetch_lightning_address().await.unwrap();
+        assert!(
+            matches!(result, Some(None)),
+            "Expected Some(None) after delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_some_some_after_save() {
+        let (storage, _dir) = create_temp_storage("after_save");
+        let cache = ObjectCacheRepository::new(storage as Arc<_>);
+
+        cache
+            .save_lightning_address(&sample_address_info(), false)
+            .await
+            .unwrap();
+
+        // Key present, value non-null -> Some(Some(info))
+        let result = cache.fetch_lightning_address().await.unwrap();
+        let info = result
+            .flatten()
+            .expect("Expected Some(Some(info)) after save");
+        assert_eq!(info.lightning_address, "test@example.com");
+    }
+}

@@ -7,7 +7,7 @@ import {
 } from "../src/planner.js";
 
 const bundle = {
-  schema: "blink.spark-unilateral-exit-bundle.v1",
+  schema: "spark.unilateral-exit-bundle.v1",
   createdAt: "2026-06-15T00:00:00.000Z",
   network: "LOCAL",
   leaves: [

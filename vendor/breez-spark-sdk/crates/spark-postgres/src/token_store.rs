@@ -1,0 +1,2122 @@
+//! `PostgreSQL`-backed implementation of the `TokenOutputStore` trait.
+//!
+//! This module provides a persistent token output store backed by `PostgreSQL`,
+//! suitable for server-side or multi-instance deployments where
+//! in-memory storage is insufficient.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use deadpool_postgres::Pool;
+use macros::async_trait;
+use platform_utils::time::SystemTime;
+use spark_wallet::{
+    GetTokenOutputsFilter, ReservationTarget, SelectionStrategy, TokenMetadata, TokenOutput,
+    TokenOutputServiceError, TokenOutputStore, TokenOutputWithPrevOut, TokenOutputs,
+    TokenOutputsPerStatus, TokenOutputsReservation, TokenOutputsReservationId,
+    TokenReservationPurpose,
+};
+use tracing::{trace, warn};
+use uuid::Uuid;
+
+use crate::advisory_lock::identity_lock_key;
+use crate::config::PostgresStorageConfig;
+use crate::error::PostgresError;
+use crate::migrations::{SchemaRenames, run_migrations};
+use crate::pool::create_pool;
+
+/// Name of the schema migrations table for `PostgresTokenStore`.
+const TOKEN_MIGRATIONS_TABLE: &str = "brz_token_schema_migrations";
+
+/// Pre-prefix rename map for upgrading token-store deployments.
+const SCHEMA_RENAMES: SchemaRenames<'static> = SchemaRenames {
+    old_migrations_table: "token_schema_migrations",
+    new_migrations_table: TOKEN_MIGRATIONS_TABLE,
+    tables: &[
+        ("token_metadata", "brz_token_metadata"),
+        ("token_reservations", "brz_token_reservations"),
+        ("token_outputs", "brz_token_outputs"),
+        ("token_spent_outputs", "brz_token_spent_outputs"),
+        ("token_swap_status", "brz_token_swap_status"),
+    ],
+    indexes: &[
+        // Post-multi-tenant indexes.
+        (
+            "idx_token_metadata_user_issuer_pk",
+            "brz_idx_token_metadata_user_issuer_pk",
+        ),
+        (
+            "idx_token_outputs_user_identifier",
+            "brz_idx_token_outputs_user_identifier",
+        ),
+        (
+            "idx_token_outputs_user_reservation",
+            "brz_idx_token_outputs_user_reservation",
+        ),
+        // Pre-multi-tenant indexes (dropped by the multi-tenant migration).
+        (
+            "idx_token_metadata_issuer_pk",
+            "brz_idx_token_metadata_issuer_pk",
+        ),
+        (
+            "idx_token_outputs_identifier",
+            "brz_idx_token_outputs_identifier",
+        ),
+        (
+            "idx_token_outputs_reservation",
+            "brz_idx_token_outputs_reservation",
+        ),
+    ],
+    constraints: &[
+        (
+            "brz_token_metadata",
+            "token_metadata_pkey",
+            "brz_token_metadata_pkey",
+        ),
+        (
+            "brz_token_reservations",
+            "token_reservations_pkey",
+            "brz_token_reservations_pkey",
+        ),
+        (
+            "brz_token_outputs",
+            "token_outputs_pkey",
+            "brz_token_outputs_pkey",
+        ),
+        (
+            "brz_token_outputs",
+            "token_outputs_user_id_token_identifier_fkey",
+            "brz_token_outputs_user_id_token_identifier_fkey",
+        ),
+        (
+            "brz_token_outputs",
+            "token_outputs_user_id_reservation_id_fkey",
+            "brz_token_outputs_user_id_reservation_id_fkey",
+        ),
+        // Pre-multi-tenant FKs (single-column). Rename so the post-tenant
+        // migration's `DROP CONSTRAINT IF EXISTS brz_*_fkey` finds them.
+        (
+            "brz_token_outputs",
+            "token_outputs_token_identifier_fkey",
+            "brz_token_outputs_token_identifier_fkey",
+        ),
+        (
+            "brz_token_outputs",
+            "token_outputs_reservation_id_fkey",
+            "brz_token_outputs_reservation_id_fkey",
+        ),
+        (
+            "brz_token_spent_outputs",
+            "token_spent_outputs_pkey",
+            "brz_token_spent_outputs_pkey",
+        ),
+        (
+            "brz_token_swap_status",
+            "token_swap_status_pkey",
+            "brz_token_swap_status_pkey",
+        ),
+    ],
+};
+
+/// Domain prefix mixed into the per-tenant advisory lock hash so the token
+/// store's locks never collide with the tree store's, even when two tenants
+/// share a database.
+const TOKEN_STORE_LOCK_PREFIX: &[u8] = b"breez-spark-sdk:token:";
+
+/// Spent markers are kept in the database for this duration to support multiple
+/// SDK instances sharing the same postgres database. During `set_tokens_outputs`, spent
+/// markers older than `refresh_timestamp` are ignored (treated as deleted).
+/// Actual deletion only happens for markers older than this threshold.
+const SPENT_MARKER_CLEANUP_THRESHOLD_MS: i64 = 5 * 60 * 1000; // 5 minutes
+
+/// Reservations whose `created_at` is older than this are considered stale and are
+/// dropped at the start of `set_tokens_outputs`. Matches the tree store's timeout.
+const RESERVATION_TIMEOUT_SECS: f64 = 300.0; // 5 minutes
+
+/// `PostgreSQL`-backed token output store implementation.
+///
+/// Each instance is scoped to a single tenant identity so multiple tenants
+/// can share one Postgres database without cross-pollinating token state.
+pub struct PostgresTokenStore {
+    pool: Pool,
+    /// 33-byte secp256k1 compressed pubkey identifying this tenant. All reads
+    /// and writes are filtered by `user_id = self.identity`.
+    identity: Vec<u8>,
+    /// Stable per-tenant 64-bit advisory lock key derived from `identity`.
+    /// Passed to the single-arg form `pg_advisory_xact_lock(bigint)` so two
+    /// tenants don't serialize on each other's writes.
+    lock_key: i64,
+}
+
+/// Builds the multi-tenant scoping migration for the token store. Adds
+/// `user_id BYTEA` to every per-user table (including `brz_token_metadata` —
+/// metadata is per-tenant to avoid 0-balance leakage for tokens a tenant
+/// never owned), backfills with the connecting tenant, and rewrites primary
+/// keys / FKs to lead with `user_id`. The composite FK from `brz_token_outputs`
+/// to `brz_token_reservations` uses NO ACTION (the default) — column-list SET
+/// NULL is PG15+ and a whole-row SET NULL would null `user_id` (NOT NULL).
+fn token_store_multi_tenant_migration(identity: &[u8]) -> Vec<String> {
+    let id_hex = hex::encode(identity);
+    let id_lit = format!("'\\x{id_hex}'::bytea");
+
+    vec![
+        // Drop dependent FKs FIRST so we can rebuild the parent PKs they
+        // reference. Inline `REFERENCES` clauses get auto-named
+        // `<table>_<column>_fkey` so we drop those exact names if present.
+        "ALTER TABLE brz_token_outputs DROP CONSTRAINT IF EXISTS brz_token_outputs_reservation_id_fkey"
+            .to_string(),
+        "ALTER TABLE brz_token_outputs DROP CONSTRAINT IF EXISTS brz_token_outputs_token_identifier_fkey"
+            .to_string(),
+        // brz_token_metadata: scope per-tenant. Required even though metadata
+        // never structurally collides — leaking a token's mere existence
+        // (e.g. a 0-balance entry for a token a tenant never held) would be
+        // a privacy regression.
+        "ALTER TABLE brz_token_metadata ADD COLUMN user_id BYTEA".to_string(),
+        format!("UPDATE brz_token_metadata SET user_id = {id_lit}"),
+        "ALTER TABLE brz_token_metadata \
+         ALTER COLUMN user_id SET NOT NULL, \
+         DROP CONSTRAINT IF EXISTS brz_token_metadata_pkey, \
+         ADD PRIMARY KEY (user_id, identifier)"
+            .to_string(),
+        "DROP INDEX IF EXISTS brz_idx_token_metadata_issuer_pk".to_string(),
+        "CREATE INDEX brz_idx_token_metadata_user_issuer_pk \
+         ON brz_token_metadata (user_id, issuer_public_key)"
+            .to_string(),
+        // brz_token_reservations: scope by user_id.
+        "ALTER TABLE brz_token_reservations ADD COLUMN user_id BYTEA".to_string(),
+        format!("UPDATE brz_token_reservations SET user_id = {id_lit}"),
+        "ALTER TABLE brz_token_reservations \
+         ALTER COLUMN user_id SET NOT NULL, \
+         DROP CONSTRAINT IF EXISTS brz_token_reservations_pkey, \
+         ADD PRIMARY KEY (user_id, id)"
+            .to_string(),
+        // brz_token_outputs: scope by user_id, rekey, re-add composite FKs.
+        "ALTER TABLE brz_token_outputs ADD COLUMN user_id BYTEA".to_string(),
+        format!("UPDATE brz_token_outputs SET user_id = {id_lit}"),
+        "ALTER TABLE brz_token_outputs \
+         ALTER COLUMN user_id SET NOT NULL, \
+         DROP CONSTRAINT IF EXISTS brz_token_outputs_pkey, \
+         ADD PRIMARY KEY (user_id, id), \
+         ADD FOREIGN KEY (user_id, token_identifier) \
+            REFERENCES brz_token_metadata(user_id, identifier), \
+         ADD FOREIGN KEY (user_id, reservation_id) \
+            REFERENCES brz_token_reservations(user_id, id)"
+            .to_string(),
+        "DROP INDEX IF EXISTS brz_idx_token_outputs_identifier".to_string(),
+        "DROP INDEX IF EXISTS brz_idx_token_outputs_reservation".to_string(),
+        "CREATE INDEX brz_idx_token_outputs_user_identifier \
+         ON brz_token_outputs (user_id, token_identifier)"
+            .to_string(),
+        "CREATE INDEX brz_idx_token_outputs_user_reservation \
+         ON brz_token_outputs (user_id, reservation_id) \
+         WHERE reservation_id IS NOT NULL"
+            .to_string(),
+        // brz_token_spent_outputs: scope by user_id.
+        "ALTER TABLE brz_token_spent_outputs ADD COLUMN user_id BYTEA".to_string(),
+        format!("UPDATE brz_token_spent_outputs SET user_id = {id_lit}"),
+        "ALTER TABLE brz_token_spent_outputs \
+         ALTER COLUMN user_id SET NOT NULL, \
+         DROP CONSTRAINT IF EXISTS brz_token_spent_outputs_pkey, \
+         ADD PRIMARY KEY (user_id, output_id)"
+            .to_string(),
+        // brz_token_swap_status was a singleton (PK id=1, CHECK id=1). Drop the
+        // id column (CASCADE removes both PK and CHECK), then re-key by
+        // user_id so each tenant has its own swap-status row.
+        "ALTER TABLE brz_token_swap_status DROP COLUMN id CASCADE".to_string(),
+        "ALTER TABLE brz_token_swap_status ADD COLUMN user_id BYTEA".to_string(),
+        format!("UPDATE brz_token_swap_status SET user_id = {id_lit}"),
+        "ALTER TABLE brz_token_swap_status \
+         ALTER COLUMN user_id SET NOT NULL, \
+         ADD PRIMARY KEY (user_id)"
+            .to_string(),
+    ]
+}
+
+#[async_trait]
+impl TokenOutputStore for PostgresTokenStore {
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    async fn set_tokens_outputs(
+        &self,
+        token_outputs: &[TokenOutputs],
+        refresh_started_at: SystemTime,
+    ) -> Result<(), TokenOutputServiceError> {
+        // Convert SystemTime to chrono for PostgreSQL
+        let refresh_timestamp: chrono::DateTime<chrono::Utc> = refresh_started_at.into();
+
+        let mut client = self.pool.get().await.map_err(map_err)?;
+        let tx = client.transaction().await.map_err(map_err)?;
+
+        self.acquire_write_lock(&tx).await?;
+
+        // Drop expired reservations BEFORE evaluating has_active_swap, otherwise a stale
+        // Swap reservation (from a crashed client or a swap whose finalize/cancel never
+        // ran) keeps has_active_swap true forever, which makes set_tokens_outputs
+        // early-return and never reach any subsequent reconciliation. The reservation
+        // pins itself in place and the local token-output set freezes.
+        self.cleanup_stale_reservations(&tx).await?;
+
+        // Skip if swap is active or completed during this refresh
+        let (has_active_swap, swap_completed_during_refresh): (bool, bool) = {
+            let row = tx
+                .query_one(
+                    r"
+                    SELECT
+                        EXISTS(
+                            SELECT 1 FROM brz_token_reservations
+                            WHERE user_id = $1 AND purpose = 'Swap'
+                        ),
+                        COALESCE(
+                            (SELECT last_completed_at >= $2
+                             FROM brz_token_swap_status WHERE user_id = $1),
+                            FALSE
+                        )
+                    ",
+                    &[&self.identity, &refresh_timestamp],
+                )
+                .await
+                .map_err(map_err)?;
+            (row.get(0), row.get(1))
+        };
+
+        if has_active_swap || swap_completed_during_refresh {
+            trace!(
+                "Skipping set_tokens_outputs: active_swap={}, swap_completed_during_refresh={}",
+                has_active_swap, swap_completed_during_refresh
+            );
+            return Ok(());
+        }
+
+        // Clean up old spent markers
+        self.cleanup_spent_markers(&tx, refresh_timestamp).await?;
+
+        // Get recent spent outpoints (spent_at >= refresh_timestamp).
+        // Older spent markers are ignored - if the refresh started after the spend,
+        // operators had time to process it.
+        let spent_outpoints: HashSet<(String, i32)> = {
+            let rows = tx
+                .query(
+                    "SELECT prev_tx_hash, prev_tx_vout FROM brz_token_spent_outputs \
+                     WHERE user_id = $1 AND spent_at >= $2",
+                    &[&self.identity, &refresh_timestamp],
+                )
+                .await
+                .map_err(map_err)?;
+            rows.iter().map(|r| (r.get(0), r.get(1))).collect()
+        };
+
+        // Delete non-reserved outputs added BEFORE the refresh started.
+        // Outputs added after will be preserved (they were inserted while refresh was in progress).
+        tx.execute(
+            "DELETE FROM brz_token_outputs \
+             WHERE user_id = $1 AND reservation_id IS NULL AND added_at < $2",
+            &[&self.identity, &refresh_timestamp],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // Build a set of all incoming outpoints for reconciliation
+        let incoming_outpoints: HashSet<(String, i32)> = token_outputs
+            .iter()
+            .flat_map(|to| {
+                to.outputs
+                    .iter()
+                    .map(|o| (o.prev_tx_hash.clone(), o.prev_tx_vout as i32))
+            })
+            .collect();
+
+        // Reconcile reservations: find reserved outputs that no longer exist
+        let reserved_rows = tx
+            .query(
+                r"SELECT r.id, o.prev_tx_hash, o.prev_tx_vout
+                  FROM brz_token_reservations r
+                  JOIN brz_token_outputs o
+                    ON o.reservation_id = r.id AND o.user_id = r.user_id
+                  WHERE r.user_id = $1",
+                &[&self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+
+        // Group reserved outpoints by reservation ID
+        let mut reservation_outputs: HashMap<String, Vec<(String, i32)>> = HashMap::new();
+        for row in &reserved_rows {
+            let reservation_id: String = row.get("id");
+            let outpoint: (String, i32) = (row.get("prev_tx_hash"), row.get("prev_tx_vout"));
+            reservation_outputs
+                .entry(reservation_id)
+                .or_default()
+                .push(outpoint);
+        }
+
+        // Find reservations that have no valid outputs after reconciliation
+        let mut reservations_to_delete: Vec<String> = Vec::new();
+        let mut outpoints_to_remove_from_reservation: Vec<(String, i32)> = Vec::new();
+        for (reservation_id, outpoints) in &reservation_outputs {
+            let has_valid = outpoints.iter().any(|op| incoming_outpoints.contains(op));
+            if has_valid {
+                // Remove individual outputs that no longer exist
+                for op in outpoints {
+                    if !incoming_outpoints.contains(op) {
+                        outpoints_to_remove_from_reservation.push(op.clone());
+                    }
+                }
+            } else {
+                reservations_to_delete.push(reservation_id.clone());
+            }
+        }
+
+        // Delete outputs whose reservations are being removed entirely
+        if !reservations_to_delete.is_empty() {
+            tx.execute(
+                "DELETE FROM brz_token_outputs WHERE user_id = $1 AND reservation_id = ANY($2)",
+                &[&self.identity, &reservations_to_delete],
+            )
+            .await
+            .map_err(map_err)?;
+
+            tx.execute(
+                "DELETE FROM brz_token_reservations WHERE user_id = $1 AND id = ANY($2)",
+                &[&self.identity, &reservations_to_delete],
+            )
+            .await
+            .map_err(map_err)?;
+        }
+
+        // Delete individual reserved outputs that no longer exist
+        if !outpoints_to_remove_from_reservation.is_empty() {
+            let tx_hashes: Vec<String> = outpoints_to_remove_from_reservation
+                .iter()
+                .map(|(h, _)| h.clone())
+                .collect();
+            let vouts: Vec<i32> = outpoints_to_remove_from_reservation
+                .iter()
+                .map(|(_, v)| *v)
+                .collect();
+            tx.execute(
+                "DELETE FROM brz_token_outputs WHERE user_id = $1 \
+                   AND (prev_tx_hash, prev_tx_vout) IN ( \
+                     SELECT * FROM UNNEST($2::text[], $3::int[]) \
+                   )",
+                &[&self.identity, &tx_hashes, &vouts],
+            )
+            .await
+            .map_err(map_err)?;
+
+            // Check if any reservations are now empty after removing individual outputs
+            let empty_reservations = tx
+                .query(
+                    r"SELECT r.id FROM brz_token_reservations r
+                      LEFT JOIN brz_token_outputs o
+                        ON o.reservation_id = r.id AND o.user_id = r.user_id
+                      WHERE r.user_id = $1 AND o.prev_tx_hash IS NULL",
+                    &[&self.identity],
+                )
+                .await
+                .map_err(map_err)?;
+            let empty_ids: Vec<String> =
+                empty_reservations.iter().map(|row| row.get("id")).collect();
+            if !empty_ids.is_empty() {
+                tx.execute(
+                    "DELETE FROM brz_token_reservations WHERE user_id = $1 AND id = ANY($2)",
+                    &[&self.identity, &empty_ids],
+                )
+                .await
+                .map_err(map_err)?;
+            }
+        }
+
+        // Collect outpoints of currently reserved outputs (that survived reconciliation)
+        let reserved_outpoints: HashSet<(String, i32)> = {
+            let rows = tx
+                .query(
+                    "SELECT prev_tx_hash, prev_tx_vout FROM brz_token_outputs \
+                     WHERE user_id = $1 AND reservation_id IS NOT NULL",
+                    &[&self.identity],
+                )
+                .await
+                .map_err(map_err)?;
+            rows.iter().map(|r| (r.get(0), r.get(1))).collect()
+        };
+
+        // Delete metadata not referenced by any remaining outputs (per-tenant).
+        tx.execute(
+            r"DELETE FROM brz_token_metadata
+              WHERE user_id = $1
+                AND identifier NOT IN (
+                    SELECT DISTINCT token_identifier
+                    FROM brz_token_outputs WHERE user_id = $1
+                )",
+            &[&self.identity],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // Insert new metadata and outputs, excluding spent and reserved
+        for to in token_outputs {
+            // Upsert metadata
+            self.upsert_metadata(&tx, &to.metadata).await?;
+
+            // Insert outputs that aren't currently reserved or spent
+            for output in &to.outputs {
+                let outpoint = (output.prev_tx_hash.clone(), output.prev_tx_vout as i32);
+                if reserved_outpoints.contains(&outpoint) || spent_outpoints.contains(&outpoint) {
+                    continue;
+                }
+                self.insert_single_output(&tx, &to.metadata.identifier, output)
+                    .await?;
+            }
+        }
+
+        tx.commit().await.map_err(map_err)?;
+
+        trace!(
+            "Updated {} token outputs in PostgreSQL",
+            token_outputs.len()
+        );
+        Ok(())
+    }
+
+    async fn get_token_balances(
+        &self,
+    ) -> Result<Vec<(TokenMetadata, u128)>, TokenOutputServiceError> {
+        let client = self.pool.get().await.map_err(map_err)?;
+        let rows = client
+            .query(
+                r"SELECT m.identifier, m.issuer_public_key, m.name, m.ticker, m.decimals,
+                         m.max_supply, m.is_freezable, m.creation_entity_public_key,
+                         COALESCE(SUM(
+                            CASE
+                              WHEN o.reservation_id IS NULL THEN o.token_amount::numeric
+                              WHEN r.purpose = 'Swap' THEN o.token_amount::numeric
+                              ELSE 0
+                            END
+                         ), 0)::text AS balance
+                  FROM brz_token_metadata m
+                  JOIN brz_token_outputs o
+                    ON o.token_identifier = m.identifier AND o.user_id = m.user_id
+                  LEFT JOIN brz_token_reservations r
+                    ON o.reservation_id = r.id AND o.user_id = r.user_id
+                  WHERE m.user_id = $1
+                  GROUP BY m.identifier, m.issuer_public_key, m.name, m.ticker,
+                           m.decimals, m.max_supply, m.is_freezable, m.creation_entity_public_key",
+                &[&self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let metadata = Self::metadata_from_row(&row)?;
+            let balance_str: String = row.get("balance");
+            let balance: u128 = balance_str.parse().map_err(map_err)?;
+            out.push((metadata, balance));
+        }
+        Ok(out)
+    }
+
+    async fn list_tokens_outputs(
+        &self,
+    ) -> Result<Vec<TokenOutputsPerStatus>, TokenOutputServiceError> {
+        let client = self.pool.get().await.map_err(map_err)?;
+
+        let rows = client
+            .query(
+                r"SELECT m.identifier, m.issuer_public_key, m.name, m.ticker, m.decimals,
+                         m.max_supply, m.is_freezable, m.creation_entity_public_key,
+                         o.owner_public_key, o.revocation_commitment,
+                         o.withdraw_bond_sats, o.withdraw_relative_block_locktime,
+                         o.token_public_key, o.token_amount,
+                         o.prev_tx_hash, o.prev_tx_vout, o.reservation_id,
+                         r.purpose
+                  FROM brz_token_metadata m
+                  LEFT JOIN brz_token_outputs o
+                    ON o.token_identifier = m.identifier AND o.user_id = m.user_id
+                  LEFT JOIN brz_token_reservations r
+                    ON o.reservation_id = r.id AND o.user_id = r.user_id
+                  WHERE m.user_id = $1
+                  ORDER BY m.identifier, o.token_amount::NUMERIC ASC",
+                &[&self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+
+        let mut map: HashMap<String, TokenOutputsPerStatus> = HashMap::new();
+
+        for row in rows {
+            let identifier: String = row.get("identifier");
+            if !map.contains_key(&identifier) {
+                let metadata = Self::metadata_from_row(&row)?;
+                map.insert(
+                    identifier.clone(),
+                    TokenOutputsPerStatus {
+                        metadata,
+                        available: Vec::new(),
+                        reserved_for_payment: Vec::new(),
+                        reserved_for_swap: Vec::new(),
+                    },
+                );
+            }
+            let Some(entry) = map.get_mut(&identifier) else {
+                continue;
+            };
+
+            let prev_tx_hash: Option<String> = row.get("prev_tx_hash");
+            if prev_tx_hash.is_none() {
+                continue;
+            }
+
+            let output = Self::output_from_row(&row)?;
+            let purpose: Option<String> = row.get("purpose");
+
+            match purpose.as_deref() {
+                Some("Payment") => entry.reserved_for_payment.push(output),
+                Some("Swap") => entry.reserved_for_swap.push(output),
+                _ => entry.available.push(output),
+            }
+        }
+
+        Ok(map.into_values().collect())
+    }
+
+    async fn get_token_outputs(
+        &self,
+        filter: GetTokenOutputsFilter<'_>,
+    ) -> Result<TokenOutputsPerStatus, TokenOutputServiceError> {
+        let client = self.pool.get().await.map_err(map_err)?;
+
+        let (where_clause, param): (&str, String) = match filter {
+            GetTokenOutputsFilter::Identifier(id) => ("m.identifier = $1", id.to_string()),
+            GetTokenOutputsFilter::IssuerPublicKey(pk) => {
+                ("m.issuer_public_key = $1", pk.to_string())
+            }
+        };
+
+        let query = format!(
+            r"SELECT m.identifier, m.issuer_public_key, m.name, m.ticker, m.decimals,
+                     m.max_supply, m.is_freezable, m.creation_entity_public_key,
+                     o.owner_public_key, o.revocation_commitment,
+                     o.withdraw_bond_sats, o.withdraw_relative_block_locktime,
+                     o.token_public_key, o.token_amount,
+                     o.prev_tx_hash, o.prev_tx_vout, o.reservation_id,
+                     r.purpose
+              FROM brz_token_metadata m
+              LEFT JOIN brz_token_outputs o
+                ON o.token_identifier = m.identifier AND o.user_id = m.user_id
+              LEFT JOIN brz_token_reservations r
+                ON o.reservation_id = r.id AND o.user_id = r.user_id
+              WHERE m.user_id = $2 AND {where_clause}
+              ORDER BY o.token_amount::NUMERIC ASC"
+        );
+
+        let rows = client
+            .query(&query, &[&param, &self.identity])
+            .await
+            .map_err(map_err)?;
+
+        if rows.is_empty() {
+            return Err(TokenOutputServiceError::Generic(
+                "Token outputs not found".to_string(),
+            ));
+        }
+
+        let metadata = Self::metadata_from_row(&rows[0])?;
+        let mut result = TokenOutputsPerStatus {
+            metadata,
+            available: Vec::new(),
+            reserved_for_payment: Vec::new(),
+            reserved_for_swap: Vec::new(),
+        };
+
+        for row in &rows {
+            let prev_tx_hash: Option<String> = row.get("prev_tx_hash");
+            if prev_tx_hash.is_none() {
+                continue;
+            }
+
+            let output = Self::output_from_row(row)?;
+            let purpose: Option<String> = row.get("purpose");
+
+            match purpose.as_deref() {
+                Some("Payment") => result.reserved_for_payment.push(output),
+                Some("Swap") => result.reserved_for_swap.push(output),
+                _ => result.available.push(output),
+            }
+        }
+
+        Ok(result)
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    async fn update_token_outputs(
+        &self,
+        outputs_to_remove: &[(String, u32)],
+        outputs_to_add: Option<&TokenOutputs>,
+    ) -> Result<(), TokenOutputServiceError> {
+        let mut client = self.pool.get().await.map_err(map_err)?;
+        let tx = client.transaction().await.map_err(map_err)?;
+
+        // Serialize against the other token-store mutators (refresh, reservation, finalization),
+        // which take the same per-user advisory lock.
+        self.acquire_write_lock(&tx).await?;
+
+        // 1. Remove spent outputs and mark them as spent.
+        for (tx_hash, vout) in outputs_to_remove {
+            let vout_i32 = (*vout).cast_signed();
+            let deleted = tx
+                .execute(
+                    "DELETE FROM brz_token_outputs \
+                     WHERE user_id = $1 AND prev_tx_hash = $2 AND prev_tx_vout = $3",
+                    &[&self.identity, tx_hash, &vout_i32],
+                )
+                .await
+                .map_err(map_err)?;
+
+            if deleted > 0 {
+                tx.execute(
+                    "INSERT INTO brz_token_spent_outputs \
+                       (user_id, prev_tx_hash, prev_tx_vout, spent_at) \
+                     VALUES ($1, $2, $3, NOW()) ON CONFLICT DO NOTHING",
+                    &[&self.identity, tx_hash, &vout_i32],
+                )
+                .await
+                .map_err(map_err)?;
+            }
+        }
+
+        // 2. Insert new outputs.
+        if let Some(token_outputs) = outputs_to_add {
+            self.upsert_metadata(&tx, &token_outputs.metadata).await?;
+
+            // Clear spent status for outputs being (re-)added.
+            let tx_hashes: Vec<String> = token_outputs
+                .outputs
+                .iter()
+                .map(|o| o.prev_tx_hash.clone())
+                .collect();
+            let vouts: Vec<i32> = token_outputs
+                .outputs
+                .iter()
+                .map(|o| o.prev_tx_vout as i32)
+                .collect();
+            if !tx_hashes.is_empty() {
+                tx.execute(
+                    "DELETE FROM brz_token_spent_outputs \
+                     WHERE user_id = $1 \
+                       AND (prev_tx_hash, prev_tx_vout) IN ( \
+                         SELECT * FROM UNNEST($2::text[], $3::int[]) \
+                       )",
+                    &[&self.identity, &tx_hashes, &vouts],
+                )
+                .await
+                .map_err(map_err)?;
+            }
+
+            for output in &token_outputs.outputs {
+                self.insert_single_output(&tx, &token_outputs.metadata.identifier, output)
+                    .await?;
+            }
+        }
+
+        tx.commit().await.map_err(map_err)?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    async fn reserve_token_outputs(
+        &self,
+        token_identifier: &str,
+        target: ReservationTarget,
+        purpose: TokenReservationPurpose,
+        preferred_outputs: Option<Vec<TokenOutputWithPrevOut>>,
+        selection_strategy: Option<SelectionStrategy>,
+    ) -> Result<TokenOutputsReservation, TokenOutputServiceError> {
+        match target {
+            ReservationTarget::MinTotalValue(amount) => {
+                if amount == 0 {
+                    return Err(TokenOutputServiceError::Generic(
+                        "Amount to reserve must be greater than zero".to_string(),
+                    ));
+                }
+            }
+            ReservationTarget::MaxOutputCount(count) => {
+                if count == 0 {
+                    return Err(TokenOutputServiceError::Generic(
+                        "Count to reserve must be greater than zero".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let mut client = self.pool.get().await.map_err(map_err)?;
+        let tx = client.transaction().await.map_err(map_err)?;
+
+        self.acquire_write_lock(&tx).await?;
+
+        // Get metadata
+        let metadata_row = tx
+            .query_opt(
+                "SELECT * FROM brz_token_metadata WHERE user_id = $1 AND identifier = $2",
+                &[&self.identity, &token_identifier],
+            )
+            .await
+            .map_err(map_err)?
+            .ok_or_else(|| {
+                TokenOutputServiceError::Generic(format!(
+                    "Token outputs not found for identifier: {token_identifier}"
+                ))
+            })?;
+        let metadata = Self::metadata_from_row(&metadata_row)?;
+
+        // Get available (non-reserved) outputs
+        let rows = tx
+            .query(
+                r"SELECT o.owner_public_key, o.revocation_commitment,
+                         o.withdraw_bond_sats, o.withdraw_relative_block_locktime,
+                         o.token_public_key, o.token_amount, o.prev_tx_hash, o.prev_tx_vout,
+                         o.token_identifier AS identifier
+                  FROM brz_token_outputs o
+                  WHERE o.user_id = $1
+                    AND o.token_identifier = $2
+                    AND o.reservation_id IS NULL",
+                &[&self.identity, &token_identifier],
+            )
+            .await
+            .map_err(map_err)?;
+
+        let mut outputs: Vec<TokenOutputWithPrevOut> = rows
+            .iter()
+            .map(Self::output_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Filter by preferred if provided
+        if let Some(ref preferred) = preferred_outputs {
+            let preferred_outpoints: HashSet<(&str, u32)> = preferred
+                .iter()
+                .map(|p| (p.prev_tx_hash.as_str(), p.prev_tx_vout))
+                .collect();
+            outputs.retain(|o| {
+                preferred_outpoints.contains(&(o.prev_tx_hash.as_str(), o.prev_tx_vout))
+            });
+        }
+
+        // Check sufficiency for MinTotalValue
+        if let ReservationTarget::MinTotalValue(amount) = target
+            && outputs.iter().map(|o| o.output.token_amount).sum::<u128>() < amount
+        {
+            return Err(TokenOutputServiceError::InsufficientFunds);
+        }
+
+        // Select outputs using the same logic as InMemory
+        let selected_outputs = if let ReservationTarget::MinTotalValue(amount) = target
+            && let Some(output) = outputs.iter().find(|o| o.output.token_amount == amount)
+        {
+            vec![output.clone()]
+        } else {
+            match selection_strategy {
+                None | Some(SelectionStrategy::SmallestFirst) => {
+                    outputs.sort_by_key(|o| o.output.token_amount);
+                }
+                Some(SelectionStrategy::LargestFirst) => {
+                    outputs.sort_by_key(|o| std::cmp::Reverse(o.output.token_amount));
+                }
+            }
+
+            match target {
+                ReservationTarget::MinTotalValue(amount) => {
+                    let mut selected = Vec::new();
+                    let mut remaining = amount;
+                    for output in outputs {
+                        if remaining == 0 {
+                            break;
+                        }
+                        selected.push(output.clone());
+                        remaining = remaining.saturating_sub(output.output.token_amount);
+                    }
+                    if remaining > 0 {
+                        return Err(TokenOutputServiceError::InsufficientFunds);
+                    }
+                    selected
+                }
+                ReservationTarget::MaxOutputCount(count) => {
+                    outputs.truncate(count);
+                    outputs
+                }
+            }
+        };
+
+        // Create reservation
+        let reservation_id = Uuid::now_v7().to_string();
+        let purpose_str = match purpose {
+            TokenReservationPurpose::Payment => "Payment",
+            TokenReservationPurpose::Swap => "Swap",
+        };
+
+        tx.execute(
+            "INSERT INTO brz_token_reservations (user_id, id, purpose) VALUES ($1, $2, $3)",
+            &[&self.identity, &reservation_id, &purpose_str],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // Set reservation_id on selected outputs (by outpoint)
+        let selected_tx_hashes: Vec<String> = selected_outputs
+            .iter()
+            .map(|o| o.prev_tx_hash.clone())
+            .collect();
+        let selected_vouts: Vec<i32> = selected_outputs
+            .iter()
+            .map(|o| o.prev_tx_vout as i32)
+            .collect();
+        tx.execute(
+            "UPDATE brz_token_outputs SET reservation_id = $1 \
+             WHERE user_id = $4 \
+               AND (prev_tx_hash, prev_tx_vout) IN ( \
+                 SELECT * FROM UNNEST($2::text[], $3::int[]) \
+               )",
+            &[
+                &reservation_id,
+                &selected_tx_hashes,
+                &selected_vouts,
+                &self.identity,
+            ],
+        )
+        .await
+        .map_err(map_err)?;
+
+        tx.commit().await.map_err(map_err)?;
+
+        let reservation_token_outputs = TokenOutputs {
+            metadata,
+            outputs: selected_outputs,
+        };
+
+        Ok(TokenOutputsReservation::new(
+            reservation_id,
+            reservation_token_outputs,
+        ))
+    }
+
+    async fn cancel_reservation(
+        &self,
+        id: &TokenOutputsReservationId,
+    ) -> Result<(), TokenOutputServiceError> {
+        let mut client = self.pool.get().await.map_err(map_err)?;
+        let tx = client.transaction().await.map_err(map_err)?;
+
+        // Clear reservation_id from outputs first — the composite FK uses NO
+        // ACTION (column-list SET NULL is PG15+ and a whole-row SET NULL would
+        // null user_id, which is NOT NULL).
+        tx.execute(
+            "UPDATE brz_token_outputs SET reservation_id = NULL \
+             WHERE user_id = $1 AND reservation_id = $2",
+            &[&self.identity, id],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // Delete the reservation
+        tx.execute(
+            "DELETE FROM brz_token_reservations WHERE user_id = $1 AND id = $2",
+            &[&self.identity, id],
+        )
+        .await
+        .map_err(map_err)?;
+
+        tx.commit().await.map_err(map_err)?;
+
+        trace!("Canceled token outputs reservation: {}", id);
+        Ok(())
+    }
+
+    async fn finalize_reservation(
+        &self,
+        id: &TokenOutputsReservationId,
+    ) -> Result<(), TokenOutputServiceError> {
+        let mut client = self.pool.get().await.map_err(map_err)?;
+        let tx = client.transaction().await.map_err(map_err)?;
+
+        // Serialize against `set_tokens_outputs` so its spent-marker snapshot and upsert cannot
+        // interleave with this transaction's spent-marker write.
+        self.acquire_write_lock(&tx).await?;
+
+        // Get reservation purpose and reserved output IDs
+        let reservation_row = tx
+            .query_opt(
+                "SELECT purpose FROM brz_token_reservations WHERE user_id = $1 AND id = $2",
+                &[&self.identity, id],
+            )
+            .await
+            .map_err(map_err)?;
+
+        let Some(reservation_row) = reservation_row else {
+            warn!("Tried to finalize a non existing reservation");
+            return Ok(());
+        };
+
+        let is_swap = reservation_row.get::<_, String>("purpose") == "Swap";
+
+        // Get reserved outpoints and mark them as spent
+        let reserved_outpoints: Vec<(String, i32)> = {
+            let rows = tx
+                .query(
+                    "SELECT prev_tx_hash, prev_tx_vout FROM brz_token_outputs \
+                     WHERE user_id = $1 AND reservation_id = $2",
+                    &[&self.identity, id],
+                )
+                .await
+                .map_err(map_err)?;
+            rows.iter().map(|r| (r.get(0), r.get(1))).collect()
+        };
+
+        // Batch insert spent output markers
+        if !reserved_outpoints.is_empty() {
+            let tx_hashes: Vec<String> =
+                reserved_outpoints.iter().map(|(h, _)| h.clone()).collect();
+            let vouts: Vec<i32> = reserved_outpoints.iter().map(|(_, v)| *v).collect();
+            tx.execute(
+                r"INSERT INTO brz_token_spent_outputs (user_id, prev_tx_hash, prev_tx_vout)
+                  SELECT $3, h, v FROM UNNEST($1::text[], $2::int[]) AS t(h, v)
+                  ON CONFLICT DO NOTHING",
+                &[&tx_hashes, &vouts, &self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+        }
+
+        // Delete reserved outputs
+        tx.execute(
+            "DELETE FROM brz_token_outputs WHERE user_id = $1 AND reservation_id = $2",
+            &[&self.identity, id],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // Delete the reservation
+        tx.execute(
+            "DELETE FROM brz_token_reservations WHERE user_id = $1 AND id = $2",
+            &[&self.identity, id],
+        )
+        .await
+        .map_err(map_err)?;
+
+        // If this was a swap reservation, update last_completed_at. UPSERT so a
+        // tenant that joined after migration 2 (and thus has no row) gets one.
+        if is_swap {
+            tx.execute(
+                "INSERT INTO brz_token_swap_status (user_id, last_completed_at) \
+                 VALUES ($1, NOW()) \
+                 ON CONFLICT (user_id) DO UPDATE SET last_completed_at = EXCLUDED.last_completed_at",
+                &[&self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+        }
+
+        // Clean up any orphaned metadata (per-tenant).
+        tx.execute(
+            r"DELETE FROM brz_token_metadata
+              WHERE user_id = $1
+                AND identifier NOT IN (
+                    SELECT DISTINCT token_identifier
+                    FROM brz_token_outputs WHERE user_id = $1
+                )",
+            &[&self.identity],
+        )
+        .await
+        .map_err(map_err)?;
+
+        tx.commit().await.map_err(map_err)?;
+
+        trace!("Finalized token outputs reservation: {}", id);
+        Ok(())
+    }
+
+    async fn now(&self) -> Result<SystemTime, TokenOutputServiceError> {
+        let client = self.pool.get().await.map_err(map_err)?;
+        let row = client
+            .query_one("SELECT NOW()", &[])
+            .await
+            .map_err(map_err)?;
+        let now: chrono::DateTime<chrono::Utc> = row.get(0);
+        Ok(now.into())
+    }
+}
+
+impl PostgresTokenStore {
+    /// Creates a new `PostgresTokenStore` from a configuration.
+    ///
+    /// This creates its own connection pool and runs token store migrations.
+    /// `identity` is the 33-byte secp256k1 pubkey of the tenant.
+    pub async fn from_config(
+        config: PostgresStorageConfig,
+        identity: &[u8],
+    ) -> Result<Self, PostgresError> {
+        let run_migration = config.run_migration;
+        let pool = create_pool(&config)?;
+        Self::from_pool(pool, identity, run_migration).await
+    }
+
+    /// Creates a new `PostgresTokenStore` from an existing connection pool.
+    ///
+    /// Useful when sharing a pool with other components (e.g., `PostgresStorage`).
+    /// When `run_migration` is `false`, initialization trusts the existing
+    /// schema and skips token store migrations entirely.
+    pub async fn from_pool(
+        pool: Pool,
+        identity: &[u8],
+        run_migration: bool,
+    ) -> Result<Self, PostgresError> {
+        let store = Self {
+            pool,
+            identity: identity.to_vec(),
+            lock_key: identity_lock_key(TOKEN_STORE_LOCK_PREFIX, identity),
+        };
+        if run_migration {
+            store.migrate().await?;
+        }
+        Ok(store)
+    }
+
+    /// Runs database migrations for token store tables.
+    async fn migrate(&self) -> Result<(), PostgresError> {
+        run_migrations(
+            &self.pool,
+            TOKEN_MIGRATIONS_TABLE,
+            &Self::migrations(&self.identity),
+            Some(&SCHEMA_RENAMES),
+        )
+        .await
+    }
+
+    /// Returns the list of migrations for the token store.
+    fn migrations(identity: &[u8]) -> Vec<Vec<String>> {
+        vec![
+            // Migration 1: Token store tables with race condition protection
+            vec![
+                "CREATE TABLE IF NOT EXISTS brz_token_metadata (
+                    identifier TEXT PRIMARY KEY,
+                    issuer_public_key TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    decimals INTEGER NOT NULL,
+                    max_supply TEXT NOT NULL,
+                    is_freezable BOOLEAN NOT NULL,
+                    creation_entity_public_key TEXT
+                )"
+                .to_string(),
+                "CREATE INDEX IF NOT EXISTS brz_idx_token_metadata_issuer_pk
+                    ON brz_token_metadata (issuer_public_key)"
+                    .to_string(),
+                "CREATE TABLE IF NOT EXISTS brz_token_reservations (
+                    id TEXT PRIMARY KEY,
+                    purpose TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )"
+                .to_string(),
+                "CREATE TABLE IF NOT EXISTS brz_token_outputs (
+                    id TEXT PRIMARY KEY,
+                    token_identifier TEXT NOT NULL REFERENCES brz_token_metadata(identifier),
+                    owner_public_key TEXT NOT NULL,
+                    revocation_commitment TEXT NOT NULL,
+                    withdraw_bond_sats BIGINT NOT NULL,
+                    withdraw_relative_block_locktime BIGINT NOT NULL,
+                    token_public_key TEXT,
+                    token_amount TEXT NOT NULL,
+                    prev_tx_hash TEXT NOT NULL,
+                    prev_tx_vout INTEGER NOT NULL,
+                    reservation_id TEXT REFERENCES brz_token_reservations(id) ON DELETE SET NULL,
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )"
+                .to_string(),
+                "CREATE INDEX IF NOT EXISTS brz_idx_token_outputs_identifier
+                    ON brz_token_outputs (token_identifier)"
+                    .to_string(),
+                "CREATE INDEX IF NOT EXISTS brz_idx_token_outputs_reservation
+                    ON brz_token_outputs (reservation_id) WHERE reservation_id IS NOT NULL"
+                    .to_string(),
+                "CREATE TABLE IF NOT EXISTS brz_token_spent_outputs (
+                    output_id TEXT PRIMARY KEY,
+                    spent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )"
+                .to_string(),
+                "CREATE TABLE IF NOT EXISTS brz_token_swap_status (
+                    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    last_completed_at TIMESTAMPTZ
+                )"
+                .to_string(),
+                "INSERT INTO brz_token_swap_status (id) VALUES (1) ON CONFLICT DO NOTHING"
+                    .to_string(),
+            ],
+            // Migration 2: Multi-tenant scoping. Adds user_id to every token-store
+            // table (including `brz_token_metadata` — per-tenant to avoid 0-balance
+            // leakage), backfills with the connecting tenant, and rewrites primary
+            // keys / FKs / indexes to lead with user_id.
+            token_store_multi_tenant_migration(identity),
+            // Migration 3: re-key brz_token_spent_outputs by (prev_tx_hash, prev_tx_vout); v3
+            // FinalTokenOutput has no id, so spent markers only have an outpoint. Old id-keyed rows
+            // can't be backfilled, so the table is wiped — markers age out in 5 minutes anyway.
+            vec![
+                "DROP TABLE IF EXISTS brz_token_spent_outputs".to_string(),
+                "CREATE TABLE brz_token_spent_outputs (
+                    user_id BYTEA NOT NULL,
+                    prev_tx_hash TEXT NOT NULL,
+                    prev_tx_vout INTEGER NOT NULL,
+                    spent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, prev_tx_hash, prev_tx_vout)
+                )"
+                .to_string(),
+            ],
+            // Migration 4: re-key brz_token_outputs by (prev_tx_hash, prev_tx_vout) and drop the
+            // legacy id column. id already held "{prev_tx_hash}:{vout}", so the outpoint is the
+            // natural key. First dedup any duplicate-outpoint rows (possible from pre-outpoint
+            // code) so the composite PK can be added, preferring rows that hold a reservation.
+            vec![
+                "DELETE FROM brz_token_outputs WHERE ctid IN (
+                    SELECT ctid FROM (
+                        SELECT ctid, ROW_NUMBER() OVER (
+                            PARTITION BY user_id, prev_tx_hash, prev_tx_vout
+                            ORDER BY (reservation_id IS NULL) ASC, id ASC
+                        ) AS rn
+                        FROM brz_token_outputs
+                    ) t WHERE t.rn > 1
+                )"
+                .to_string(),
+                "ALTER TABLE brz_token_outputs \
+                 DROP CONSTRAINT IF EXISTS brz_token_outputs_pkey, \
+                 ADD PRIMARY KEY (user_id, prev_tx_hash, prev_tx_vout)"
+                    .to_string(),
+                "ALTER TABLE brz_token_outputs DROP COLUMN id".to_string(),
+            ],
+        ]
+    }
+
+    /// Acquires an exclusive advisory lock for write operations.
+    /// Per-tenant: keyed by `lock_key` (64-bit hash of a token-store domain
+    /// prefix + identity) so concurrent writes from different tenants do not
+    /// block each other. Same-tenant writes still serialize on the same lock.
+    async fn acquire_write_lock(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+    ) -> Result<(), TokenOutputServiceError> {
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&self.lock_key])
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Inserts a single output into the database.
+    #[allow(clippy::cast_possible_wrap)]
+    async fn insert_single_output(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        token_identifier: &str,
+        output: &TokenOutputWithPrevOut,
+    ) -> Result<(), TokenOutputServiceError> {
+        tx.execute(
+            r"INSERT INTO brz_token_outputs
+                (user_id, token_identifier, owner_public_key, revocation_commitment,
+                 withdraw_bond_sats, withdraw_relative_block_locktime,
+                 token_public_key, token_amount, prev_tx_hash, prev_tx_vout, added_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+              ON CONFLICT (user_id, prev_tx_hash, prev_tx_vout) DO NOTHING",
+            &[
+                &self.identity,
+                &token_identifier,
+                &output.output.owner_public_key.to_string(),
+                &output.output.revocation_commitment,
+                &(output.output.withdraw_bond_sats as i64),
+                &(output.output.withdraw_relative_block_locktime as i64),
+                &output.output.token_public_key.map(|pk| pk.to_string()),
+                &output.output.token_amount.to_string(),
+                &output.prev_tx_hash,
+                &(output.prev_tx_vout as i32),
+            ],
+        )
+        .await
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Upserts token metadata.
+    #[allow(clippy::cast_possible_wrap)]
+    async fn upsert_metadata(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        metadata: &TokenMetadata,
+    ) -> Result<(), TokenOutputServiceError> {
+        tx.execute(
+            r"INSERT INTO brz_token_metadata
+                (user_id, identifier, issuer_public_key, name, ticker, decimals, max_supply,
+                 is_freezable, creation_entity_public_key)
+              VALUES ($9, $1, $2, $3, $4, $5, $6, $7, $8)
+              ON CONFLICT (user_id, identifier) DO UPDATE SET
+                issuer_public_key = EXCLUDED.issuer_public_key,
+                name = EXCLUDED.name,
+                ticker = EXCLUDED.ticker,
+                decimals = EXCLUDED.decimals,
+                max_supply = EXCLUDED.max_supply,
+                is_freezable = EXCLUDED.is_freezable,
+                creation_entity_public_key = EXCLUDED.creation_entity_public_key",
+            &[
+                &metadata.identifier,
+                &metadata.issuer_public_key.to_string(),
+                &metadata.name,
+                &metadata.ticker,
+                &(metadata.decimals as i32),
+                &metadata.max_supply.to_string(),
+                &metadata.is_freezable,
+                &metadata.creation_entity_public_key.map(|pk| pk.to_string()),
+                &self.identity,
+            ],
+        )
+        .await
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Deletes reservations that have exceeded the timeout.
+    /// Called during `set_tokens_outputs` to clean up stale reservations from
+    /// crashed clients. Releases the outputs by clearing their `reservation_id`
+    /// first, then deletes the parent reservations — the composite FK uses NO
+    /// ACTION because column-list SET NULL is PG15+ and a whole-row SET NULL
+    /// would null `user_id` (NOT NULL).
+    async fn cleanup_stale_reservations(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+    ) -> Result<u64, TokenOutputServiceError> {
+        // Release outputs still pointing at any soon-to-be-deleted reservation.
+        tx.execute(
+            r"UPDATE brz_token_outputs SET reservation_id = NULL
+              WHERE user_id = $2
+                AND reservation_id IN (
+                    SELECT id FROM brz_token_reservations
+                    WHERE user_id = $2
+                      AND created_at < NOW() - make_interval(secs => $1)
+                )",
+            &[&RESERVATION_TIMEOUT_SECS, &self.identity],
+        )
+        .await
+        .map_err(map_err)?;
+
+        let result = tx
+            .execute(
+                r"DELETE FROM brz_token_reservations
+                  WHERE user_id = $2
+                    AND created_at < NOW() - make_interval(secs => $1)",
+                &[&RESERVATION_TIMEOUT_SECS, &self.identity],
+            )
+            .await
+            .map_err(map_err)?;
+
+        if result > 0 {
+            trace!("Cleaned up {} stale token reservations", result);
+        }
+
+        Ok(result)
+    }
+
+    /// Cleans up spent markers older than the cleanup threshold relative to refresh timestamp.
+    async fn cleanup_spent_markers(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        refresh_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), TokenOutputServiceError> {
+        let threshold = chrono::Duration::milliseconds(SPENT_MARKER_CLEANUP_THRESHOLD_MS);
+        let cleanup_cutoff = refresh_timestamp
+            .checked_sub_signed(threshold)
+            .unwrap_or(refresh_timestamp);
+
+        tx.execute(
+            "DELETE FROM brz_token_spent_outputs WHERE user_id = $2 AND spent_at < $1",
+            &[&cleanup_cutoff, &self.identity],
+        )
+        .await
+        .map_err(map_err)?;
+
+        Ok(())
+    }
+
+    /// Parses a `TokenMetadata` from a database row.
+    #[allow(clippy::cast_sign_loss)]
+    fn metadata_from_row(
+        row: &tokio_postgres::Row,
+    ) -> Result<TokenMetadata, TokenOutputServiceError> {
+        let identifier: String = row.get("identifier");
+        let issuer_pk_str: String = row.get("issuer_public_key");
+        let name: String = row.get("name");
+        let ticker: String = row.get("ticker");
+        let decimals: i32 = row.get("decimals");
+        let max_supply_str: String = row.get("max_supply");
+        let is_freezable: bool = row.get("is_freezable");
+        let creation_entity_pk_str: Option<String> = row.get("creation_entity_public_key");
+
+        Ok(TokenMetadata {
+            identifier,
+            issuer_public_key: issuer_pk_str.parse().map_err(map_err)?,
+            name,
+            ticker,
+            decimals: decimals as u32,
+            max_supply: max_supply_str.parse().map_err(map_err)?,
+            is_freezable,
+            creation_entity_public_key: creation_entity_pk_str
+                .map(|s| s.parse().map_err(map_err))
+                .transpose()?,
+        })
+    }
+
+    /// Parses a `TokenOutputWithPrevOut` from a database row.
+    #[allow(clippy::cast_sign_loss)]
+    fn output_from_row(
+        row: &tokio_postgres::Row,
+    ) -> Result<TokenOutputWithPrevOut, TokenOutputServiceError> {
+        let owner_pk_str: String = row.get("owner_public_key");
+        let revocation_commitment: String = row.get("revocation_commitment");
+        let withdraw_bond_sats: i64 = row.get("withdraw_bond_sats");
+        let withdraw_relative_block_locktime: i64 = row.get("withdraw_relative_block_locktime");
+        let token_pk_str: Option<String> = row.get("token_public_key");
+        let token_amount_str: String = row.get("token_amount");
+        let prev_tx_hash: String = row.get("prev_tx_hash");
+        let prev_tx_vout: i32 = row.get("prev_tx_vout");
+
+        // Get token_identifier from the row if available, otherwise fall back
+        let token_identifier: String = row
+            .try_get("token_identifier")
+            .unwrap_or_else(|_| row.get("identifier"));
+
+        Ok(TokenOutputWithPrevOut {
+            output: TokenOutput {
+                owner_public_key: owner_pk_str.parse().map_err(map_err)?,
+                revocation_commitment,
+                withdraw_bond_sats: withdraw_bond_sats as u64,
+                withdraw_relative_block_locktime: withdraw_relative_block_locktime as u64,
+                token_public_key: token_pk_str
+                    .map(|s| s.parse().map_err(map_err))
+                    .transpose()?,
+                token_identifier,
+                token_amount: token_amount_str.parse().map_err(map_err)?,
+            },
+            prev_tx_hash,
+            prev_tx_vout: prev_tx_vout as u32,
+        })
+    }
+}
+
+/// Maps any error to `TokenOutputServiceError`.
+fn map_err<E: std::fmt::Display>(e: E) -> TokenOutputServiceError {
+    TokenOutputServiceError::Generic(e.to_string())
+}
+
+/// Creates a `PostgresTokenStore` instance from a configuration.
+///
+/// Creates its own connection pool. For sharing a pool, use
+/// [`create_postgres_token_store_from_pool`] instead.
+///
+/// # Arguments
+///
+/// * `config` - Configuration for the `PostgreSQL` connection pool
+/// * `identity` - 33-byte secp256k1 pubkey scoping all reads and writes
+pub async fn create_postgres_token_store(
+    config: PostgresStorageConfig,
+    identity: &[u8],
+) -> Result<Arc<dyn TokenOutputStore>, PostgresError> {
+    Ok(Arc::new(
+        PostgresTokenStore::from_config(config, identity).await?,
+    ))
+}
+
+/// Creates a `PostgresTokenStore` instance from an existing connection pool.
+///
+/// Useful when sharing a pool with other components.
+///
+/// # Arguments
+///
+/// * `pool` - An existing deadpool-postgres connection pool
+/// * `identity` - 33-byte secp256k1 pubkey scoping all reads and writes
+/// * `run_migration` - Whether to run token store migrations. Set to `false`
+///   when the embedding service owns the schema.
+pub async fn create_postgres_token_store_from_pool(
+    pool: Pool,
+    identity: &[u8],
+    run_migration: bool,
+) -> Result<Arc<dyn TokenOutputStore>, PostgresError> {
+    Ok(Arc::new(
+        PostgresTokenStore::from_pool(pool, identity, run_migration).await?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spark_wallet::token_store_tests as shared_tests;
+    use testcontainers::{ContainerAsync, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+
+    /// Fixed 33-byte test identity. Tests run in their own ephemeral container,
+    /// so a single shared identity is fine — the schema still gets exercised.
+    const TEST_IDENTITY: [u8; 33] = [
+        0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f, 0x20,
+    ];
+
+    /// Helper struct that holds the container and store together.
+    /// The container must be kept alive for the duration of the test.
+    struct PostgresTokenStoreTestFixture {
+        store: PostgresTokenStore,
+        #[allow(dead_code)]
+        container: ContainerAsync<Postgres>,
+    }
+
+    impl PostgresTokenStoreTestFixture {
+        async fn new() -> Self {
+            let container = Postgres::default()
+                .start()
+                .await
+                .expect("Failed to start PostgreSQL container");
+
+            let host_port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Failed to get host port");
+
+            let connection_string = format!(
+                "host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=postgres"
+            );
+
+            let store = PostgresTokenStore::from_config(
+                PostgresStorageConfig::with_defaults(connection_string),
+                &TEST_IDENTITY,
+            )
+            .await
+            .expect("Failed to create PostgresTokenStore");
+
+            Self { store, container }
+        }
+    }
+
+    // ==================== Shared tests ====================
+
+    #[tokio::test]
+    async fn test_set_tokens_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_tokens_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_token_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_get_token_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_tokens_outputs_with_update() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_tokens_outputs_with_update(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_insert_token_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_insert_token_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_and_cancel() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_and_cancel(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_and_finalize() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_and_finalize(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_and_set_add_output() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_and_set_add_output(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_and_set_remove_reserved_output() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_and_set_remove_reserved_output(&fixture.store)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_multiple_parallel_reservations() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_multiple_parallel_reservations(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_with_preferred_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_with_preferred_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_insufficient_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_insufficient_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_nonexistent_token() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_nonexistent_token(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_exact_amount_match() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_exact_amount_match(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_multiple_outputs_combination() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_multiple_outputs_combination(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_all_available_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_all_available_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_with_preferred_outputs_insufficient() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_with_preferred_outputs_insufficient(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_zero_amount() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_zero_amount(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_nonexistent_reservation() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_cancel_nonexistent_reservation(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_finalize_nonexistent_reservation() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_finalize_nonexistent_reservation(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_removes_all_tokens() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_removes_all_tokens(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_single_large_output() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_single_large_output(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_token_outputs_none_found() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_get_token_outputs_none_found(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_reconciles_reservation_with_empty_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_reconciles_reservation_with_empty_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_selection_strategy_smallest_first() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_selection_strategy_smallest_first(&fixture.store)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_token_outputs_selection_strategy_largest_first() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_token_outputs_selection_strategy_largest_first(&fixture.store)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_max_output_count_smallest_first() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_max_output_count_smallest_first(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_max_output_count_largest_first() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_max_output_count_largest_first(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_max_output_count_more_than_available() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_max_output_count_more_than_available(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_max_output_count_zero_rejected() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_max_output_count_zero_rejected(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_for_payment_affects_balance() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_for_payment_affects_balance(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_token_balances_includes_zero_spendable() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_get_token_balances_includes_zero_spendable(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_reserve_for_swap_does_not_affect_balance() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_reserve_for_swap_does_not_affect_balance(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_mixed_reservation_purposes_balance() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_mixed_reservation_purposes_balance(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_tokens_outputs_skipped_during_active_swap() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_tokens_outputs_skipped_during_active_swap(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_tokens_outputs_skipped_after_swap_completes_during_refresh() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_set_tokens_outputs_skipped_after_swap_completes_during_refresh(
+            &fixture.store,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_insert_outputs_preserved_by_set_tokens_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_insert_outputs_preserved_by_set_tokens_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_spent_outputs_not_restored_by_set_tokens_outputs() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_spent_outputs_not_restored_by_set_tokens_outputs(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_finalize_swap_marks_spent_and_tracks_completion() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_finalize_swap_marks_spent_and_tracks_completion(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_insert_outputs_clears_spent_status() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_insert_outputs_clears_spent_status(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_token_outputs_by_prev_tx_ref() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_remove_token_outputs_by_prev_tx_ref(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_token_outputs_prevents_refresh_re_add() {
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        shared_tests::test_remove_token_outputs_prevents_refresh_re_add(&fixture.store).await;
+    }
+
+    #[tokio::test]
+    async fn test_stale_swap_reservation_does_not_block_set_tokens_outputs() {
+        // Regression test mirroring the tree store fix: a stale Swap reservation
+        // must be cleaned up before has_active_swap is evaluated, otherwise the
+        // reservation pins itself in place and the local token-output set freezes.
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+        let token1 = shared_tests::create_token_outputs(1, vec![100, 200]);
+        fixture
+            .store
+            .set_tokens_outputs(
+                std::slice::from_ref(&token1),
+                shared_tests::future_refresh_start(&fixture.store).await,
+            )
+            .await
+            .unwrap();
+
+        let reservation = fixture
+            .store
+            .reserve_token_outputs(
+                "token-1",
+                ReservationTarget::MinTotalValue(100),
+                TokenReservationPurpose::Swap,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let stored = fixture
+            .store
+            .get_token_outputs(GetTokenOutputsFilter::Identifier("token-1"))
+            .await
+            .unwrap();
+        assert!(!stored.reserved_for_swap.is_empty());
+
+        // Backdate the swap reservation past the 5-minute timeout.
+        let client = fixture.store.pool.get().await.unwrap();
+        client
+            .execute(
+                "UPDATE brz_token_reservations SET created_at = NOW() - INTERVAL '10 minutes' WHERE id = $1",
+                &[&reservation.id],
+            )
+            .await
+            .unwrap();
+
+        // set_tokens_outputs brings fresh data including a new output. Pre-fix:
+        // skipped on has_active_swap, the new output is dropped and the reservation
+        // lingers forever. Post-fix: cleanup runs first, the stale reservation is
+        // dropped, has_active_swap is false, set_tokens_outputs applies.
+        let token1_refresh = shared_tests::create_token_outputs(1, vec![100, 200, 300]);
+        fixture
+            .store
+            .set_tokens_outputs(
+                std::slice::from_ref(&token1_refresh),
+                shared_tests::future_refresh_start(&fixture.store).await,
+            )
+            .await
+            .unwrap();
+
+        let stored = fixture
+            .store
+            .get_token_outputs(GetTokenOutputsFilter::Identifier("token-1"))
+            .await
+            .unwrap();
+        assert!(
+            stored.reserved_for_swap.is_empty(),
+            "Stale swap reservation should be cleaned up"
+        );
+        assert_eq!(
+            stored.available.len(),
+            3,
+            "set_tokens_outputs should have proceeded and applied the operator's view (3 outputs)"
+        );
+        assert!(
+            stored
+                .available
+                .iter()
+                .any(|o| o.output.token_amount == 300),
+            "the 300-amount output from the refresh should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finalize_reservation_blocked_by_write_lock() {
+        // Regression: `finalize_reservation` must acquire the same advisory
+        // lock as `set_tokens_outputs` so they serialize. Otherwise a
+        // concurrent set_tokens_outputs could read the spent_outputs snapshot
+        // before our marker commits and re-insert the just-spent output as
+        // Available.
+        let fixture = PostgresTokenStoreTestFixture::new().await;
+
+        let token_outputs = shared_tests::create_token_outputs(1, vec![100, 200]);
+        fixture
+            .store
+            .set_tokens_outputs(
+                &[token_outputs],
+                shared_tests::future_refresh_start(&fixture.store).await,
+            )
+            .await
+            .unwrap();
+        let reservation = fixture
+            .store
+            .reserve_token_outputs(
+                "token-1",
+                ReservationTarget::MinTotalValue(100),
+                TokenReservationPurpose::Payment,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Hold the token-store write lock on a separate connection. Must use
+        // the same key as `acquire_write_lock`.
+        let lock_key = fixture.store.lock_key;
+        let mut holder = fixture.store.pool.get().await.unwrap();
+        let holder_tx = holder.transaction().await.unwrap();
+        holder_tx
+            .execute("SELECT pg_advisory_xact_lock($1)", &[&lock_key])
+            .await
+            .unwrap();
+
+        let store = Arc::new(fixture.store);
+        let store_for_task = store.clone();
+        let res_id = reservation.id.clone();
+        let finalize_task =
+            tokio::spawn(async move { store_for_task.finalize_reservation(&res_id).await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !finalize_task.is_finished(),
+            "finalize_reservation completed while advisory lock was held — \
+             the lock is not being acquired"
+        );
+
+        holder_tx.commit().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), finalize_task)
+            .await
+            .expect("finalize_reservation did not complete after lock released")
+            .unwrap()
+            .unwrap();
+    }
+
+    // ==================== Multi-tenant isolation ====================
+
+    /// A second 33-byte test identity (must differ from `TEST_IDENTITY`).
+    const TEST_IDENTITY_B: [u8; 33] = [
+        0x03, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
+        0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd,
+        0xbe, 0xbf, 0xc0,
+    ];
+
+    /// Two `PostgresTokenStore` instances with distinct identities sharing one
+    /// connection pool / DB. The container must be kept alive for the test.
+    struct TwoTenantTokenFixture {
+        a: PostgresTokenStore,
+        b: PostgresTokenStore,
+        #[allow(dead_code)]
+        container: ContainerAsync<Postgres>,
+    }
+
+    impl TwoTenantTokenFixture {
+        async fn new() -> Self {
+            let container = Postgres::default()
+                .start()
+                .await
+                .expect("Failed to start PostgreSQL container");
+
+            let host_port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Failed to get host port");
+
+            let connection_string = format!(
+                "host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=postgres"
+            );
+
+            let config = PostgresStorageConfig::with_defaults(connection_string);
+            let pool = create_pool(&config).expect("Failed to create pool");
+
+            let a = PostgresTokenStore::from_pool(pool.clone(), &TEST_IDENTITY, true)
+                .await
+                .expect("Failed to create tenant A");
+            let b = PostgresTokenStore::from_pool(pool, &TEST_IDENTITY_B, true)
+                .await
+                .expect("Failed to create tenant B");
+
+            Self { a, b, container }
+        }
+    }
+
+    /// End-to-end isolation: every `TokenOutputStore` method must keep tenants
+    /// A and B from observing each other's data. Critically, `brz_token_metadata`
+    /// is per-tenant — both tenants seeding the same `identifier` ("token-1")
+    /// must coexist without collision and without leaking each other's
+    /// balances. Exercises set/insert/list/get/balance/reserve/finalize and
+    /// the per-tenant swap-status row.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
+    async fn test_two_tenant_isolation() {
+        let fx = TwoTenantTokenFixture::new().await;
+
+        // Both tenants seed the SAME token identifier with different output sets.
+        // shared_tests::create_token_outputs derives output IDs from identifier
+        // and amount, so tenants picking different amounts get different IDs —
+        // that's deliberate so we don't fight the schema's composite output PK
+        // unrelated to what we're checking here. The metadata identifier is
+        // identical across tenants and is the privacy-sensitive surface.
+        let a_token1 = shared_tests::create_token_outputs(1, vec![100, 200]);
+        let b_token1 = shared_tests::create_token_outputs(1, vec![500, 1_000, 2_000]);
+        // Plus a token only B holds — A must never see it (0-balance leakage).
+        let b_only_token2 = shared_tests::create_token_outputs(2, vec![777]);
+
+        fx.a.set_tokens_outputs(
+            std::slice::from_ref(&a_token1),
+            shared_tests::future_refresh_start(&fx.a).await,
+        )
+        .await
+        .unwrap();
+        fx.b.set_tokens_outputs(
+            &[b_token1, b_only_token2],
+            shared_tests::future_refresh_start(&fx.b).await,
+        )
+        .await
+        .unwrap();
+
+        // --- list_tokens_outputs respects tenant scope ---
+        let listed_a = fx.a.list_tokens_outputs().await.unwrap();
+        let listed_b = fx.b.list_tokens_outputs().await.unwrap();
+        assert_eq!(listed_a.len(), 1, "A only sees its own token");
+        assert_eq!(listed_b.len(), 2, "B sees its two tokens");
+        assert!(
+            !listed_a.iter().any(|t| t.metadata.identifier == "token-2"),
+            "A must not see B's token-2 (no zero-balance leakage)"
+        );
+        assert_eq!(listed_a[0].available.len(), 2, "A has 2 outputs of token-1");
+        let listed_b_t1 = listed_b
+            .iter()
+            .find(|t| t.metadata.identifier == "token-1")
+            .unwrap();
+        assert_eq!(listed_b_t1.available.len(), 3, "B has 3 outputs of token-1");
+
+        // --- get_token_balances per tenant ---
+        let bal_a = fx.a.get_token_balances().await.unwrap();
+        let bal_b = fx.b.get_token_balances().await.unwrap();
+        assert_eq!(bal_a.len(), 1);
+        assert_eq!(bal_a[0].0.identifier, "token-1");
+        assert_eq!(bal_a[0].1, 300, "A's token-1 balance is just A's outputs");
+        let bal_b_map: std::collections::HashMap<String, u128> =
+            bal_b.into_iter().map(|(m, v)| (m.identifier, v)).collect();
+        assert_eq!(bal_b_map.get("token-1"), Some(&3_500));
+        assert_eq!(bal_b_map.get("token-2"), Some(&777));
+
+        // --- get_token_outputs by identifier respects scope ---
+        let got_a =
+            fx.a.get_token_outputs(GetTokenOutputsFilter::Identifier("token-1"))
+                .await
+                .unwrap();
+        assert_eq!(got_a.available.len(), 2);
+
+        // A must NOT find B's "token-2".
+        let got_a_t2 =
+            fx.a.get_token_outputs(GetTokenOutputsFilter::Identifier("token-2"))
+                .await;
+        assert!(
+            matches!(got_a_t2, Err(TokenOutputServiceError::Generic(_))),
+            "A must not be able to read B's token-2 metadata"
+        );
+
+        // --- reserve on A must not consume B's outputs ---
+        let res_a =
+            fx.a.reserve_token_outputs(
+                "token-1",
+                ReservationTarget::MinTotalValue(100),
+                TokenReservationPurpose::Payment,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!res_a.token_outputs.outputs.is_empty());
+
+        let view_b = fx.b.list_tokens_outputs().await.unwrap();
+        let view_b_t1 = view_b
+            .iter()
+            .find(|t| t.metadata.identifier == "token-1")
+            .unwrap();
+        assert!(
+            view_b_t1.reserved_for_payment.is_empty(),
+            "B must not see A's reservation"
+        );
+        assert_eq!(view_b_t1.available.len(), 3);
+
+        // --- A reserving "token-2" must fail (B's token, A doesn't see it) ---
+        let res_a_t2 =
+            fx.a.reserve_token_outputs(
+                "token-2",
+                ReservationTarget::MinTotalValue(100),
+                TokenReservationPurpose::Payment,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            res_a_t2.is_err(),
+            "A must not be able to reserve from B's token-2"
+        );
+
+        // --- finalize on A must not affect B's outputs ---
+        fx.a.finalize_reservation(&res_a.id).await.unwrap();
+        let view_b = fx.b.list_tokens_outputs().await.unwrap();
+        let view_b_t1 = view_b
+            .iter()
+            .find(|t| t.metadata.identifier == "token-1")
+            .unwrap();
+        assert_eq!(view_b_t1.available.len(), 3, "B's outputs untouched");
+        assert_eq!(fx.b.get_token_balances().await.unwrap().len(), 2);
+
+        // --- swap-status row is per tenant: B's swap finalize lazily upserts
+        // B's row even though only A had ever set_tokens_outputs first. ---
+        let res_b_swap =
+            fx.b.reserve_token_outputs(
+                "token-1",
+                ReservationTarget::MinTotalValue(500),
+                TokenReservationPurpose::Swap,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        // A sees nothing about B's swap.
+        let listed_a = fx.a.list_tokens_outputs().await.unwrap();
+        assert!(
+            listed_a.iter().all(|t| t.reserved_for_swap.is_empty()),
+            "A must not see B's swap reservation"
+        );
+        fx.b.finalize_reservation(&res_b_swap.id).await.unwrap();
+
+        // --- update_token_outputs on A only inserts into A's namespace ---
+        // Use identifier_no=2 so the metadata identifier ("token-2") collides
+        // with B's existing entry — that exercises per-tenant `brz_token_metadata`:
+        // both tenants must end up with their own row, and A's outputs/balance
+        // for "token-2" must differ from B's.
+        let a_token2 = shared_tests::create_token_outputs(2, vec![999]);
+        fx.a.update_token_outputs(&[], Some(&a_token2))
+            .await
+            .unwrap();
+
+        let bal_a = fx.a.get_token_balances().await.unwrap();
+        let bal_a_t2 = bal_a
+            .iter()
+            .find(|(m, _)| m.identifier == "token-2")
+            .expect("A should now have its own token-2");
+        assert_eq!(bal_a_t2.1, 999, "A's token-2 balance is A's output only");
+
+        let bal_b = fx.b.get_token_balances().await.unwrap();
+        let bal_b_t2 = bal_b
+            .iter()
+            .find(|(m, _)| m.identifier == "token-2")
+            .expect("B's token-2 still present");
+        assert_eq!(
+            bal_b_t2.1, 777,
+            "B's token-2 balance unchanged by A's insert"
+        );
+    }
+}

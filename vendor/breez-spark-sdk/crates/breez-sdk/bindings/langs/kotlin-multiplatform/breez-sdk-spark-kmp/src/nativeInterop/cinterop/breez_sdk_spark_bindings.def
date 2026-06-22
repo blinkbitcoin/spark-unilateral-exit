@@ -1,0 +1,4 @@
+headers = breez_sdk_spark_bindings.h
+package = breez_sdk_spark_bindings.cinterop
+
+linkerOpts = -framework Security -framework breez_sdk_sparkFFI -rpath @executable_path/Frameworks -rpath @loader_path/Frameworks

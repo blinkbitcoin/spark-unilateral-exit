@@ -1,0 +1,34 @@
+services:
+  cert-init:
+    command:
+      - |
+        set -e
+        apk add --no-cache openssl > /dev/null
+        for i in 0 1 2; do
+          KEY="/tls/server_$${i}.key"
+          CERT="/tls/server_$${i}.crt"
+          if [ -f "$$KEY" ] && [ -f "$$CERT" ]; then
+            echo "TLS key/cert for operator $$i already exist, skipping"
+            continue
+          fi
+          echo "Generating TLS key/cert for operator $$i..."
+          openssl genrsa -out "$$KEY" 2048 2>/dev/null
+          openssl req -new -x509 \
+            -key "$$KEY" -out "$$CERT" \
+            -days 3650 \
+            -subj "/CN=spark-operator-$${i}" \
+            -addext "basicConstraints = critical,CA:FALSE" \
+            -addext "keyUsage = critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage = serverAuth" \
+            -addext "subjectAltName = DNS:spark-operator-$${i},DNS:localhost"
+        done
+        echo "TLS certificates ready"
+
+  bitcoind:
+    image: lnliz/bitcoind:29.3
+
+  bitcoin-init:
+    image: lnliz/bitcoind:29.3
+
+  bitcoin-miner:
+    image: lnliz/bitcoind:29.3

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import tls from "node:tls";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { ripemd160 } from "@noble/hashes/legacy";
@@ -14,10 +20,34 @@ import {
 } from "@buildonspark/spark-sdk/test-utils";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
-import { exportRecoveryBundleFromSeed } from "../../src/recovery-bundle.js";
+import { parseRecoveryBundle } from "../../src/bundle.js";
 import { constructSparkPackages } from "../../src/spark-packages.js";
 
 const runE2e = process.env.RUN_SPARK_E2E === "1";
+const execFileAsync = promisify(execFile);
+const LOCAL_OPERATORS = [
+  {
+    id: 0,
+    port: 8535,
+    identifier: "0000000000000000000000000000000000000000000000000000000000000001",
+    identityPublicKey:
+      "0322ca18fc489ae25418a0e768273c2c61cabb823edfb14feb891e9bec62016510",
+  },
+  {
+    id: 1,
+    port: 8536,
+    identifier: "0000000000000000000000000000000000000000000000000000000000000002",
+    identityPublicKey:
+      "0341727a6c41b168f07eb50865ab8c397a53c7eef628ac1020956b705e43b6cb27",
+  },
+  {
+    id: 2,
+    port: 8537,
+    identifier: "0000000000000000000000000000000000000000000000000000000000000003",
+    identityPublicKey:
+      "0305ab8d485cc752394de4981f8a5ae004f2becfea6f432c9a59d5022d8764f0a6",
+  },
+];
 
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
   it("constructs and broadcasts a unilateral-exit package from a saved bundle", async () => {
@@ -26,6 +56,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     const { wallet, mnemonic } = await retry(
       () =>
         SparkWalletTesting.initialize({
+          accountNumber: 1,
           options: { network: "LOCAL" },
           signer: new Signer(),
         }),
@@ -39,34 +70,13 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         20,
       );
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
-      const bundle = await exportRecoveryBundleFromSeed({
-        seed: mnemonic,
-        network: "LOCAL",
-        operatorSet: "local-docker-compose",
-        leafPollAttempts: 20,
-        leafPollDelayMs: 5_000,
-        cleanupWallet: false,
-        walletFactory: ({ seed }) => {
-          expect(seed).toBe(mnemonic);
-          return { wallet };
-        },
-      });
-
-      expect(bundle.leaves).toHaveLength(1);
-      expect(bundle.leaves[0]).toMatchObject({
-        id: leaf.id,
-        status: leaf.status,
-        valueSats: Number(leaf.value),
-      });
-      const decodedLeaf = TreeNode.decode(hexToBytes(bundle.leaves[0].treeNodeHex));
-      expect(decodedLeaf.id).toBe(leaf.id);
-      expect(decodedLeaf.value).toBe(leaf.value);
+      const recoveryBundle = await exportBundleWithStandaloneTool(mnemonic);
+      assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
       const chains = await constructSparkPackages({
-        bundle,
+        bundle: recoveryBundle,
         cpfpUtxos: [funding.utxo],
         feeRate: 5,
-        sparkClient: await createSparkClient(wallet),
       });
 
       expect(chains).toHaveLength(1);
@@ -119,14 +129,101 @@ async function claimSingleDeposit(wallet, faucet, amount) {
   );
 }
 
-async function createSparkClient(wallet) {
-  const connectionManager =
-    wallet.getConnectionManager?.() ?? wallet.connectionManager;
-  const configService = wallet.getConfigService?.() ?? wallet.config;
-  if (!connectionManager?.createSparkClient || !configService?.getCoordinatorAddress) {
-    return undefined;
+async function exportBundleWithStandaloneTool(mnemonic) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-recovery-e2e-"));
+  const seedFile = path.join(tempDir, "seed.txt");
+  const outFile = path.join(tempDir, "bundle.json");
+  await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
+
+  const operatorArgs = [];
+  for (const operator of LOCAL_OPERATORS) {
+    const caCertFile = path.join(tempDir, `operator-${operator.id}.crt`);
+    await fs.writeFile(caCertFile, await fetchOperatorCertificate(operator.port));
+    operatorArgs.push("--operator");
+    operatorArgs.push(
+      [
+        `id=${operator.id}`,
+        `identifier=${operator.identifier}`,
+        `address=https://localhost:${operator.port}`,
+        `identity-public-key=${operator.identityPublicKey}`,
+        `ca-cert=${caCertFile}`,
+      ].join(","),
+    );
   }
-  return connectionManager.createSparkClient(configService.getCoordinatorAddress());
+
+  await execFileAsync(
+    "npm",
+    [
+      "run",
+      "refresh-recovery-bundle",
+      "--",
+      "--seed-file",
+      seedFile,
+      "--network",
+      "regtest",
+      "--account-number",
+      "1",
+      "--out",
+      outFile,
+      "--operator-set",
+      "local-docker-compose",
+      "--app-version",
+      "local-e2e",
+      ...operatorArgs,
+    ],
+    {
+      cwd: new URL("../..", import.meta.url).pathname,
+      timeout: 180_000,
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+
+  return parseRecoveryBundle(await fs.readFile(outFile, "utf8"));
+}
+
+function fetchOperatorCertificate(port) {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({
+      host: "localhost",
+      port,
+      servername: "localhost",
+      rejectUnauthorized: false,
+    });
+    socket.once("secureConnect", () => {
+      const cert = socket.getPeerCertificate(true);
+      socket.destroy();
+      if (!cert?.raw) {
+        reject(new Error(`No TLS certificate returned by local operator ${port}`));
+        return;
+      }
+      resolve(toPem(cert.raw));
+    });
+    socket.once("error", reject);
+    socket.setTimeout(5_000, () => {
+      socket.destroy();
+      reject(new Error(`Timed out fetching TLS certificate from local operator ${port}`));
+    });
+  });
+}
+
+function toPem(der) {
+  const body = der.toString("base64").match(/.{1,64}/g).join("\n");
+  return `-----BEGIN CERTIFICATE-----\n${body}\n-----END CERTIFICATE-----\n`;
+}
+
+function assertBundleContainsLeaf(bundle, leaf, { requireBundledNodes = false } = {}) {
+  expect(bundle.leaves).toHaveLength(1);
+  expect(bundle.leaves[0]).toMatchObject({
+    id: leaf.id,
+    status: leaf.status,
+    valueSats: Number(leaf.value),
+  });
+  if (requireBundledNodes) {
+    expect(bundle.nodes?.length ?? 0).toBeGreaterThanOrEqual(1);
+  }
+  const decodedLeaf = TreeNode.decode(hexToBytes(bundle.leaves[0].treeNodeHex));
+  expect(decodedLeaf.id).toBe(leaf.id);
+  expect(decodedLeaf.value).toBe(leaf.value);
 }
 
 async function retry(fn, label, attempts = 8) {

@@ -1,0 +1,31 @@
+pub mod address;
+pub mod bitcoin;
+pub mod core;
+pub mod events;
+pub mod header_provider;
+pub mod operator;
+pub mod services;
+pub mod session_store;
+pub mod signer;
+pub mod ssp;
+pub mod token;
+pub mod tree;
+pub mod utils;
+
+pub use core::Network;
+pub use frost_secp256k1_tr::Identifier;
+pub use token::{bech32m_decode_token_id, bech32m_encode_token_id};
+
+#[allow(clippy::doc_markdown)]
+pub(crate) mod built_info {
+    // The file has been placed there by the build script.
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+pub(crate) fn default_user_agent() -> String {
+    format!(
+        "{}/{}",
+        crate::built_info::PKG_NAME,
+        crate::built_info::GIT_VERSION.unwrap_or(crate::built_info::PKG_VERSION),
+    )
+}

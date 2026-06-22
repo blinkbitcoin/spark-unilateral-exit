@@ -1,5 +1,5 @@
 {
-  "name": "@blinkbitcoin/spark-unilateral-exit",
+  "name": "spark-unilateral-exit",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,8 @@
     "test:unit": "vitest run",
     "test:e2e": "RUN_SPARK_E2E=1 vitest run test/e2e --testTimeout 180000",
     "plan": "node src/cli.js plan",
-    "refresh-bundle": "node src/cli.js refresh-bundle"
+    "refresh-bundle": "node src/cli.js refresh-bundle",
+    "refresh-recovery-bundle": "nix develop --command cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml --"
   },
   "dependencies": {
     "@buildonspark/spark-sdk": "^0.8.6",

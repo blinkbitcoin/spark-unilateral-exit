@@ -2,6 +2,7 @@
 import fs from "node:fs";
 
 import { parseRecoveryBundle } from "./bundle.js";
+import { loadSeed } from "./cli-input.js";
 import { parseCpfpUtxo, serializeForJson } from "./cpfp.js";
 import {
   assertSeedOnlyIsNotOfflineRecoverable,
@@ -48,7 +49,7 @@ async function main() {
   }
 
   if (command === "refresh-bundle") {
-    const seed = loadSeed(args);
+    const seed = await loadSeed(args);
     if (args.out === true) throw new Error("--out requires a path");
     const bundle = await exportRecoveryBundleFromSeed({
       seed,
@@ -99,15 +100,6 @@ function loadOptionalBundle(path) {
   return parseRecoveryBundle(fs.readFileSync(path, "utf8"));
 }
 
-function loadSeed(args) {
-  if (args.seed && args.seed !== true) return String(args.seed).trim();
-  if (args["seed-file"] && args["seed-file"] !== true) {
-    return fs.readFileSync(args["seed-file"], "utf8").trim();
-  }
-  if (process.env.SPARK_SEED) return process.env.SPARK_SEED.trim();
-  throw new Error("--seed, --seed-file, or SPARK_SEED is required");
-}
-
 function collect(value) {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : [value];
@@ -134,12 +126,16 @@ Required for offline recovery:
   --fee-rate <number>     Fee rate in sat/vbyte
   --cpfp-utxo <utxo>      txid:vout:value:script:publicKey, repeatable
 
-Required for refresh-bundle:
-  --seed-file <path>       File containing Spark seed or mnemonic
+Inputs for refresh-bundle:
+  --seed-file <path>       File containing Spark seed or mnemonic; prompts when omitted
   --seed <value>           Spark seed or mnemonic; prefer --seed-file
   --out <path>             Bundle output path; stdout when omitted
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
   --account-number <n>     Spark account number, default 0
+
+Optional provenance metadata for refresh-bundle:
+  --operator-set <label>   Operator-set label stored in the bundle
+  --app-version <version>  App version label stored in the bundle
 
 Seed-only mode is intentionally rejected for offline recovery.
 `);
