@@ -1,0 +1,317 @@
+# Spark recovery runbook
+
+This runbook covers the operator workflow from a Spark seed and saved recovery
+bundle to Bitcoin transactions on chain.
+
+Current status: this repo can refresh a recovery bundle, plan a recovery,
+construct Spark unilateral-exit packages, produce CPFP PSBTs, and construct
+signed sweep transactions from confirmed refund outputs to `DESTINATION`.
+
+## Tooling choice
+
+Use Bitcoin Core v29 or newer, or another node/RPC service that supports package
+broadcast equivalent to `submitpackage`, for the broadcast step. Bitcoin Core
+documents `submitpackage` as the RPC that submits a package of raw transactions
+to the local node; the package is validated against consensus and mempool
+policy, and the interface is still experimental:
+https://bitcoincore.org/en/doc/29.0.0/rpc/rawtransactions/submitpackage/
+
+Sparrow Wallet or Electrum can be useful for the CPFP signing step if the CPFP
+UTXO key is in that wallet or hardware signer. They are not enough for the
+current broadcast step unless they expose package relay or are paired with a
+Bitcoin Core node where you can call `submitpackage`. Electrum documents normal
+single-transaction signing and broadcast flows, but the Spark exit flow may need
+the parent transaction and fee-bump child submitted as one package:
+https://electrum.readthedocs.io/en/latest/coldstorage.html
+
+## 0. Prerequisites
+
+Install the repo dependencies:
+
+```sh
+nix develop
+npm install
+```
+
+Have these inputs ready:
+
+- Spark seed or mnemonic, preferably in a local file with mode `0600`.
+- Latest encrypted Spark recovery bundle, or live Spark operators so the bundle
+  can be refreshed.
+- Destination Bitcoin address for the eventual final sweep.
+- CPFP Bitcoin UTXO controlled by a signing wallet or hardware signer.
+- Bitcoin Core RPC access for package broadcast.
+
+The CPFP UTXO must be a normal L1 Bitcoin output, not a Spark leaf and not a
+Lightning payment. It must be unspent, on the same Bitcoin network, and
+controlled by a key that can sign the generated CPFP PSBT.
+
+## 1. Refresh the recovery bundle while operators are online
+
+Run this before an outage, and again after every event that can change Spark
+leaves.
+
+```sh
+make refresh-recovery-bundle \
+  SEED_FILE=../.spark-seed.txt \
+  BUNDLE=../recovery-bundle.json \
+  NETWORK=mainnet \
+  ACCOUNT_NUMBER=1 \
+  OPERATOR_SET=spark-mainnet \
+  APP_VERSION=example-app
+```
+
+If `SEED_FILE` is omitted, the Rust exporter prompts for the Spark seed with
+terminal echo disabled.
+
+Confirm the bundle has recoverable leaves:
+
+```sh
+jq '{schema, network, createdAt, leafCount: (.leaves | length), nodeCount: (.nodes | length), btcSats: .balances.btcSats}' ../recovery-bundle.json
+```
+
+Expected: `leafCount` is greater than zero. If it is zero, this bundle cannot
+recover Bitcoin leaves offline.
+
+Store the bundle encrypted. It does not contain private keys, but it does reveal
+wallet graph metadata and it is required for offline recovery.
+
+## 2. Prepare the CPFP UTXO
+
+The CLI expects this shape:
+
+```text
+txid:vout:value:script:publicKey
+```
+
+Field meanings:
+
+- `txid`: transaction id containing the fee UTXO.
+- `vout`: output index.
+- `value`: output value in sats.
+- `script`: output scriptPubKey hex.
+- `publicKey`: public key for the signer controlling that output.
+
+With Bitcoin Core, get candidate UTXOs from the fee wallet:
+
+```sh
+bitcoin-cli -rpcwallet=<fee-wallet> listunspent 1 9999999
+```
+
+For a selected output, convert BTC to sats and append the matching public key.
+Example:
+
+```text
+9f...:0:50000:0014...:02...
+```
+
+For wallet-specific export steps from Bitcoin Core, Electrum, and Sparrow, see
+[withdraw-guide.md#cpfp-utxo-input](withdraw-guide.md#cpfp-utxo-input).
+
+Make sure the same wallet or hardware signer can sign a PSBT spending this UTXO.
+
+## 3. Plan the recovery
+
+Run the dry plan first:
+
+```sh
+make plan \
+  BUNDLE=../recovery-bundle.json \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  CPFP_UTXO=<txid:vout:value:script:pubkey>
+```
+
+Check:
+
+- `network` matches the intended Bitcoin network.
+- `leafCount` matches the number of expected Bitcoin leaves.
+- `estimatedRecoverableBtcSats` is economically worth recovering.
+- `cpfpUtxoCount` is nonzero.
+- USDB, if present, is not treated as covered by Bitcoin unilateral exit.
+
+At 1 sat/vbyte, use about 10,000 sats for one leaf and 20,000 sats total for two
+leaves as the practical floor until package and sweep sizing are measured.
+
+## 4. Construct unilateral-exit packages
+
+Generate the package JSON:
+
+```sh
+make package \
+  BUNDLE=../recovery-bundle.json \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  CPFP_UTXO=<txid:vout:value:script:pubkey> \
+  > recovery-packages.json
+```
+
+The output shape is:
+
+```json
+{
+  "destination": "<bitcoin-address>",
+  "packages": [
+    {
+      "leafId": "<spark-leaf-id>",
+      "txPackages": [
+        {
+          "tx": "<raw-parent-or-refund-tx-hex>",
+          "feeBumpPsbt": "<unsigned-cpfp-psbt-hex>"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Process `packages[]` and each `txPackages[]` in order. Each `txPackages[]`
+entry contains the parent transaction hex and the CPFP PSBT that must be signed.
+The last `txPackages[]` entry for each leaf is the Spark refund transaction.
+
+## 5. Sign each CPFP PSBT
+
+The generated `feeBumpPsbt` is hex-encoded. Bitcoin Core wallet RPC expects a
+base64 PSBT, so convert before signing:
+
+```sh
+PSBT_HEX=<feeBumpPsbt-from-recovery-packages-json>
+PSBT_B64=$(node -e "process.stdout.write(Buffer.from(process.argv[1], 'hex').toString('base64'))" "$PSBT_HEX")
+```
+
+If the fee wallet is in Bitcoin Core, unlock it if needed and sign:
+
+```sh
+bitcoin-cli -rpcwallet=<fee-wallet> walletprocesspsbt "$PSBT_B64" true "DEFAULT" true true
+```
+
+Bitcoin Core documents `walletprocesspsbt` as updating a PSBT with wallet input
+information and signing inputs the wallet can sign:
+https://bitcoincore.org/en/doc/29.0.0/rpc/wallet/walletprocesspsbt/
+
+Expected result:
+
+```json
+{
+  "complete": true,
+  "hex": "<signed-cpfp-child-tx-hex>"
+}
+```
+
+If signing in Sparrow, Electrum, or a hardware signer, import the PSBT, sign it,
+finalize it, and export the final raw transaction hex. If the wallet only gives
+you a signed PSBT, finalize/extract it with Bitcoin Core:
+
+```sh
+bitcoin-cli finalizepsbt "$SIGNED_PSBT_B64"
+```
+
+Bitcoin Core documents `finalizepsbt` as extracting the network transaction hex
+when the PSBT is complete:
+https://bitcoincore.org/en/doc/29.0.0/rpc/rawtransactions/finalizepsbt/
+
+## 6. Broadcast each package
+
+For each `txPackages[]` entry, submit the Spark transaction and signed CPFP child
+as a package:
+
+```sh
+bitcoin-cli submitpackage '["<tx>","<signed-cpfp-child-tx-hex>"]'
+```
+
+Expected success has `package_msg` or `package-msg` equal to `success`, or each
+transaction result has no `error`.
+
+If the node rejects a package with missing-inputs and an earlier unconfirmed
+Spark transaction is its parent, include the unconfirmed parent transaction hex
+before the current transaction and signed child in topological order. Bitcoin
+Core requires the child to be last in the submitted package.
+
+Do not replace this step with ordinary single-transaction broadcast unless you
+have verified the parent transaction is independently acceptable to mempool
+policy. For Spark exits, the CPFP child is what pays the package fee.
+
+## 7. Wait for confirmations and timelocks
+
+Track each accepted transaction:
+
+```sh
+bitcoin-cli getrawmempool true
+bitcoin-cli gettransaction <txid>
+```
+
+Wait for required confirmations and relative timelocks before attempting the
+final spend. The exact wait depends on the Spark tree/refund transaction
+sequence and should be derived from the package transactions before automation
+marks the recovery complete.
+
+## 8. Sweep recovered funds to the destination
+
+After a refund transaction confirms and the required timelock has elapsed,
+construct a signed sweep transaction:
+
+```sh
+make sweep \
+  PACKAGES=recovery-packages.json \
+  SEED_FILE=../.spark-seed.txt \
+  NETWORK=mainnet \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  ACCOUNT_NUMBER=1 \
+  > sweep-transactions.json
+```
+
+The command:
+
+- reads the `package` output,
+- uses the last transaction for each leaf as the refund transaction,
+- derives Spark refund-key candidates from the seed,
+- verifies a candidate matches refund transaction output 0,
+- builds a one-input, one-output Taproot key-path spend to `DESTINATION`,
+- signs the sweep transaction, and
+- prints signed raw transaction hex.
+
+Output shape:
+
+```json
+{
+  "destination": "<bitcoin-address>",
+  "feeRateSatPerVbyte": 1,
+  "sweeps": [
+    {
+      "leafId": "<spark-leaf-id>",
+      "refundTxid": "<refund-txid>",
+      "refundVout": 0,
+      "refundValueSats": "10000",
+      "refundAddress": "<derived-refund-address>",
+      "derivationPath": "m/8797555'/1'/1'/...",
+      "sweepTxid": "<sweep-txid>",
+      "sweepTx": "<signed-raw-sweep-transaction-hex>",
+      "feeSats": "111",
+      "vsize": 111
+    }
+  ]
+}
+```
+
+Broadcast each `sweepTx` as a normal Bitcoin transaction:
+
+```sh
+bitcoin-cli sendrawtransaction "<sweepTx>"
+```
+
+Confirm the destination output on chain before considering recovery complete.
+
+After the sweep transaction is standard and no longer needs package relay, a
+normal Bitcoin wallet or single-transaction broadcast service can broadcast it.
+Bitcoin Core is still preferred for auditability.
+
+## Source of the sweep derivation
+
+The public Spark SDK unilateral-exit helper constructs node/refund transaction
+packages and fee-bump PSBTs; it does not expose a high-level "sweep to arbitrary
+destination" helper. The Breez SDK internal CLI contains the practical clue: for
+each refund transaction, it independently derives candidate paths from the seed,
+matches the refund output script, and prints a Taproot descriptor that can be
+swept by a Bitcoin wallet. This repo automates the same idea directly and emits
+the signed sweep transaction instead of a descriptor.

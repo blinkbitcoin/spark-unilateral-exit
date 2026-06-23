@@ -10,6 +10,7 @@ import {
 } from "./planner.js";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.js";
 import { constructSparkPackages } from "./spark-packages.js";
+import { constructSweepTransactions } from "./sweep.js";
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -45,6 +46,24 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
     });
     console.log(serializeForJson({ destination: args.destination, packages }));
+    return;
+  }
+
+  if (command === "sweep") {
+    const packages = JSON.parse(
+      fs.readFileSync(required(args.packages, "--packages"), "utf8"),
+    );
+    const seed = await loadSeed(args);
+    const sweeps = constructSweepTransactions({
+      seed,
+      passphrase: args.passphrase ?? "",
+      network: required(args.network, "--network"),
+      packages,
+      destination: args.destination,
+      feeRate: Number(required(args["fee-rate"], "--fee-rate")),
+      accountNumber: args["account-number"],
+    });
+    console.log(serializeForJson(sweeps));
     return;
   }
 
@@ -119,6 +138,7 @@ Commands:
   refresh-bundle  Query live Spark leaves from a seed and write a bundle
   plan            Validate a saved recovery bundle and print a recovery plan
   package         Construct Spark unilateral-exit packages using upstream Spark SDK
+  sweep           Spend confirmed refund outputs to a destination address
 
 Required for offline recovery:
   --bundle <path>          Saved Spark recovery bundle JSON
@@ -136,6 +156,14 @@ Inputs for refresh-bundle:
 Optional provenance metadata for refresh-bundle:
   --operator-set <label>   Operator-set label stored in the bundle
   --app-version <version>  App version label stored in the bundle
+
+Inputs for sweep:
+  --packages <path>         JSON produced by package
+  --seed-file <path>        File containing Spark seed or mnemonic; prompts when omitted
+  --network <network>       MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
+  --destination <address>   Destination; defaults to package JSON destination
+  --fee-rate <number>      Sweep fee rate in sat/vbyte
+  --account-number <n>     Spark account number used by the wallet
 
 Seed-only mode is intentionally rejected for offline recovery.
 `);

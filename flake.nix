@@ -27,6 +27,7 @@
             packages = [
               pkgs.cargo
               pkgs.clippy
+              pkgs.jq
               pkgs.nodejs_22
               pkgs.rustc
               pkgs.rustfmt

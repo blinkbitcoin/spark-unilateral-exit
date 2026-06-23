@@ -4,6 +4,8 @@
 
 Recover a user's Spark balance when Spark operators are unavailable by using state saved before the outage.
 
+For an operator checklist from seed and bundle through package broadcast and destination sweep, see [recovery-runbook.md](recovery-runbook.md).
+
 The user-facing target can be simple:
 
 1. Provide the Spark wallet seed or backup phrase.
@@ -94,6 +96,140 @@ The exporter lives in `tools/spark-recovery-bundle`, builds against the repo-loc
 
 `--account-number`, `--operator-set`, and `--app-version` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the vendored SDK default for the selected network.
 
+### Make targets
+
+The repo root `Makefile` wraps the common commands:
+
+```sh
+make refresh-recovery-bundle \
+  SEED_FILE=../.spark-seed.txt \
+  BUNDLE=../recovery-bundle.json \
+  NETWORK=mainnet \
+  ACCOUNT_NUMBER=1
+```
+
+```sh
+make plan \
+  BUNDLE=../recovery-bundle.json \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  CPFP_UTXO=<txid:vout:value:script:pubkey>
+```
+
+```sh
+make package \
+  BUNDLE=../recovery-bundle.json \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  CPFP_UTXO=<txid:vout:value:script:pubkey>
+```
+
+```sh
+make sweep \
+  PACKAGES=recovery-packages.json \
+  SEED_FILE=../.spark-seed.txt \
+  NETWORK=mainnet \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  ACCOUNT_NUMBER=1
+```
+
+For multiple fee inputs, pass repeated flags through `CPFP_ARGS`:
+
+```sh
+make package \
+  BUNDLE=../recovery-bundle.json \
+  DESTINATION=<bitcoin-address> \
+  FEE_RATE=1 \
+  CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'
+```
+
+## CPFP UTXO input
+
+The CPFP UTXO is not a Spark leaf and it is not a Lightning payment. It is an external L1 Bitcoin output that funds the child transaction used to fee-bump the unilateral-exit package. The recovery operator must be able to sign for this output.
+
+Provide it in this format:
+
+```text
+txid:vout:value:script:publicKey
+```
+
+Field meanings:
+
+- `txid`: transaction id containing the output, as 32-byte hex.
+- `vout`: output index in that transaction.
+- `value`: output value in sats.
+- `script`: output scriptPubKey hex.
+- `publicKey`: public key for the signer that controls the output.
+
+The UTXO must be unspent, confirmed or otherwise acceptable to the target mempool policy, on the same Bitcoin network as the recovery bundle, and large enough to pay the requested fee bump without becoming dust. Do not use a Spark deposit or Lightning invoice as this value; use a normal Bitcoin wallet UTXO whose private key or signing device is available during recovery.
+
+### Export from Bitcoin Core
+
+Bitcoin Core is the cleanest source when the fee wallet is loaded locally. The first four fields usually come from `listunspent`:
+
+```sh
+bitcoin-cli -rpcwallet=<fee-wallet> listunspent 1 9999999
+```
+
+```json
+{
+  "txid": "9f...32-byte-hex...",
+  "vout": 0,
+  "amount": 0.00050000,
+  "scriptPubKey": "0014..."
+}
+```
+
+Convert `amount` to sats, then get the public key for the output address:
+
+```sh
+bitcoin-cli -rpcwallet=<fee-wallet> getaddressinfo "<address-from-listunspent>"
+```
+
+For example, `0.00050000 BTC` becomes `50000`, so the CLI argument shape is:
+
+```text
+9f...:0:50000:0014...:02...
+```
+
+Use only outputs where `spendable` is true and `safe` is true unless you have reviewed the policy tradeoff. For descriptor wallets, `getaddressinfo` may show descriptor data instead of a direct `pubkey`; derive or inspect the concrete child public key for the selected address before building the CPFP input.
+
+### Export from Electrum
+
+Electrum can provide the UTXO and public key from the wallet, but the output script is often easiest to read from the funding transaction:
+
+```sh
+electrum listunspent
+electrum getpubkeys <address>
+```
+
+Use the selected UTXO's `prevout_hash` or `tx_hash` as `txid`, its `prevout_n` as `vout`, and convert the value to sats if Electrum reports it in BTC. Then fetch the exact output script from an Esplora-compatible API or your own node:
+
+```sh
+curl -s https://mempool.space/api/tx/<txid> \
+  | jq -r '.vout[<vout>] | "\(.value):\(.scriptpubkey)"'
+```
+
+The returned `value` is sats and `scriptpubkey` is the `script` field for the CPFP input. Append one public key returned by `electrum getpubkeys <address>` for a single-key output. Do not use this current CPFP input format for multisig unless the recovery tool explicitly supports signing that script type.
+
+### Export from Sparrow
+
+Sparrow is useful for coin selection and PSBT signing. In the `UTXOs` view, choose a confirmed spendable output and record:
+
+- outpoint as `txid:vout`;
+- value in sats;
+- receive or change address for that coin.
+
+Get the `script` from the funding transaction details in Sparrow, or from an Esplora-compatible API:
+
+```sh
+curl -s https://mempool.space/api/tx/<txid> \
+  | jq -r '.vout[<vout>] | "\(.value):\(.scriptpubkey)"'
+```
+
+For `publicKey`, use Sparrow's address or key details for the selected receive/change address. If Sparrow only shows the derivation path and xpub, derive the concrete child public key for that path or use another wallet/node to inspect it. After the package command emits the CPFP PSBT, Sparrow can sign it as long as the selected UTXO belongs to that Sparrow wallet or connected signer.
+
 ## High-level CLI flow
 
 1. Decrypt and validate the bundle.
@@ -103,7 +239,7 @@ The exporter lives in `tools/spark-recovery-bundle`, builds against the repo-loc
 5. Construct unilateral-exit packages from saved `TreeNode` data.
 6. Broadcast parent transactions and signed CPFP children in root-to-leaf order.
 7. Wait for required confirmations/timelocks.
-8. Sweep final spendable outputs to the user's destination address.
+8. Construct, broadcast, and confirm sweep transactions to the user's destination address.
 
 ## Current prototype commands
 
@@ -134,6 +270,18 @@ node src/cli.js package \
   --destination <bitcoin-address> \
   --fee-rate 10 \
   --cpfp-utxo <txid:vout:value:script:pubkey>
+```
+
+Sweep construction after refund transactions are confirmed and spendable:
+
+```sh
+node src/cli.js sweep \
+  --packages recovery-packages.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --destination <bitcoin-address> \
+  --fee-rate 10 \
+  --account-number <spark-account-number>
 ```
 
 ## Seed-only mode
@@ -168,5 +316,6 @@ The current local end-to-end test:
 3. Export the funded wallet's live leaves into a recovery bundle.
 4. Construct and broadcast unilateral-exit packages from the saved bundle.
 5. Confirm the package reaches local bitcoind policy through `submitpackage`.
+6. Construct, broadcast, and confirm the final sweep to a fresh destination address.
 
 This is now represented by the `Spark Local E2E` GitHub Actions workflow and the `test/e2e/local-spark-unilateral-exit.test.js` test. The workflow is intentionally separate from normal CI because it needs Docker and builds/runs the upstream Spark local stack.

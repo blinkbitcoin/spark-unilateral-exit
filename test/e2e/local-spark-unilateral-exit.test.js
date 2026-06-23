@@ -50,7 +50,7 @@ const LOCAL_OPERATORS = [
 ];
 
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
-  it("constructs and broadcasts a unilateral-exit package from a saved bundle", async () => {
+  it("constructs, broadcasts, and sweeps a unilateral-exit package from a saved bundle", async () => {
     const faucet = BitcoinFaucet.getInstance();
     const { Signer } = signerTypes[0];
     const { wallet, mnemonic } = await retry(
@@ -80,31 +80,32 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       });
 
       expect(chains).toHaveLength(1);
-      const firstPackage = chains[0]?.txPackages[0];
-      expect(firstPackage?.tx).toBeTruthy();
-      expect(firstPackage?.feeBumpPsbt).toBeTruthy();
+      expect(chains[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
 
-      const signedFeeBump = signPsbtWithKey(
-        firstPackage.feeBumpPsbt,
-        funding.privateKey,
-      );
-      const submitResult = await faucet.submitPackage([
-        firstPackage.tx,
-        signedFeeBump,
-      ]);
-
-      if (!packageSubmitSucceeded(submitResult)) {
-        console.error(
-          "submitpackage tx summary",
-          JSON.stringify(summarizePackage(firstPackage.tx, signedFeeBump), null, 2),
-        );
-        console.error(
-          "submitpackage result",
-          JSON.stringify(submitResult, null, 2),
-        );
+      for (const txPackage of chains[0].txPackages) {
+        await broadcastPackageAndMineTimelock(faucet, txPackage, funding.privateKey);
       }
-      expect(packageSubmitSucceeded(submitResult)).toBe(true);
-      await faucet.mineBlocksAndWaitForMiningToComplete(2000);
+
+      const destination = await faucet.getNewAddress();
+      const sweepResult = await sweepWithCli(mnemonic, {
+        destination,
+        packages: chains,
+      });
+
+      expect(sweepResult.destination).toBe(destination);
+      expect(sweepResult.sweeps).toHaveLength(1);
+      expect(sweepResult.sweeps[0]).toMatchObject({
+        leafId: leaf.id,
+        refundVout: 0,
+      });
+
+      const sweepTxid = await faucet.broadcastTx(sweepResult.sweeps[0].sweepTx);
+      expect(sweepTxid).toBe(sweepResult.sweeps[0].sweepTxid);
+      await faucet.mineBlocksAndWaitForMiningToComplete(1);
+
+      const sweepTxInfo = await faucet.getRawTransaction(sweepTxid);
+      expect(sweepTxInfo.confirmations).toBeGreaterThan(0);
+      assertSweepPaysDestination(sweepResult.sweeps[0], destination);
     } finally {
       await wallet.cleanup?.();
     }
@@ -179,6 +180,57 @@ async function exportBundleWithStandaloneTool(mnemonic) {
   );
 
   return parseRecoveryBundle(await fs.readFile(outFile, "utf8"));
+}
+
+async function sweepWithCli(mnemonic, packageJson) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-sweep-e2e-"));
+  const seedFile = path.join(tempDir, "seed.txt");
+  const packagesFile = path.join(tempDir, "packages.json");
+  await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
+  await fs.writeFile(packagesFile, JSON.stringify(packageJson, null, 2));
+
+  const { stdout } = await execFileAsync(
+    "node",
+    [
+      "src/cli.js",
+      "sweep",
+      "--packages",
+      packagesFile,
+      "--seed-file",
+      seedFile,
+      "--network",
+      "LOCAL",
+      "--account-number",
+      "1",
+      "--fee-rate",
+      "1",
+    ],
+    {
+      cwd: new URL("../..", import.meta.url).pathname,
+      timeout: 60_000,
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+
+  return JSON.parse(stdout);
+}
+
+async function broadcastPackageAndMineTimelock(faucet, txPackage, fundingPrivateKey) {
+  expect(txPackage?.tx).toBeTruthy();
+  expect(txPackage?.feeBumpPsbt).toBeTruthy();
+
+  const signedFeeBump = signPsbtWithKey(txPackage.feeBumpPsbt, fundingPrivateKey);
+  const submitResult = await faucet.submitPackage([txPackage.tx, signedFeeBump]);
+
+  if (!packageSubmitSucceeded(submitResult)) {
+    console.error(
+      "submitpackage tx summary",
+      JSON.stringify(summarizePackage(txPackage.tx, signedFeeBump), null, 2),
+    );
+    console.error("submitpackage result", JSON.stringify(submitResult, null, 2));
+  }
+  expect(packageSubmitSucceeded(submitResult)).toBe(true);
+  await faucet.mineBlocksAndWaitForMiningToComplete(2050);
 }
 
 function fetchOperatorCertificate(port) {
@@ -316,6 +368,23 @@ function summarizeTx(txHex) {
     inputs: tx.inputsLength,
     outputs,
   };
+}
+
+function assertSweepPaysDestination(sweep, destination) {
+  const sweepTx = Transaction.fromRaw(hexToBytes(sweep.sweepTx), {
+    allowUnknownOutputs: true,
+  });
+  const destinationScript = OutScript.encode(
+    Address(getNetwork(Network.LOCAL)).decode(destination),
+  );
+  expect(sweepTx.id).toBe(sweep.sweepTxid);
+  expect(sweepTx.inputsLength).toBe(1);
+  expect(bytesToHex(sweepTx.getInput(0).txid)).toBe(sweep.refundTxid);
+  expect(sweepTx.getInput(0).index).toBe(sweep.refundVout);
+  expect(sweepTx.outputsLength).toBe(1);
+  const output = sweepTx.getOutput(0);
+  expect(output.amount).toBeGreaterThan(0n);
+  expect(bytesToHex(output.script)).toBe(bytesToHex(destinationScript));
 }
 
 function getTransactionIdForDiagnostics(tx) {
