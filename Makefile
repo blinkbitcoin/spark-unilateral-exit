@@ -1,7 +1,7 @@
 NIX ?= nix develop --command
 NODE ?= node
 
-BUNDLE ?= recovery-bundle.json
+BUNDLE ?= ../recovery-bundle.json
 PACKAGES ?= recovery-packages.json
 SEED_FILE ?=
 NETWORK ?= mainnet
@@ -26,14 +26,24 @@ REFRESH_ARGS = \
 
 help:
 	@echo "Targets:"
-	@echo "  make refresh-recovery-bundle SEED_FILE=../.spark-seed.txt BUNDLE=../recovery-bundle.json NETWORK=mainnet"
+	@echo "  make refresh-recovery-bundle SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json NETWORK=mainnet"
 	@echo "  make plan BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make package BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
-	@echo "  make sweep PACKAGES=recovery-packages.json SEED_FILE=../.spark-seed.txt NETWORK=mainnet DESTINATION=<bitcoin-address> FEE_RATE=1"
+	@echo "  make sweep PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt NETWORK=mainnet DESTINATION=<bitcoin-address> FEE_RATE=1"
 	@echo ""
 	@echo "For multiple CPFP inputs, pass CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'."
 
 refresh-recovery-bundle:
+	@if [ -f "$(BUNDLE)" ]; then \
+		bundle="$(BUNDLE)"; \
+		timestamp="$$(date -u +%Y%m%dT%H%M%SZ)"; \
+		case "$$bundle" in \
+			*.json) backup="$${bundle%.json}.$$timestamp.backup.json" ;; \
+			*) backup="$$bundle.$$timestamp.backup.json" ;; \
+		esac; \
+		cp -p "$$bundle" "$$backup"; \
+		echo "Saved existing bundle to $$backup"; \
+	fi
 	@$(NIX) cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml -- $(REFRESH_ARGS)
 
 plan: require-destination require-cpfp-args

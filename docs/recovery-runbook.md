@@ -169,6 +169,15 @@ Process `packages[]` and each `txPackages[]` in order. Each `txPackages[]`
 entry contains the parent transaction hex and the CPFP PSBT that must be signed.
 The last `txPackages[]` entry for each leaf is the Spark refund transaction.
 
+Spark refund transactions use a block-based CSV relative timelock on their
+first input. Fresh leaves currently start at 2,000 blocks for the CPFP refund
+path, which is about 13.9 days at Bitcoin's 10-minute target block interval.
+The SDK direct-without-CPFP path adds a 50-block offset, but this tool's package
+broadcast flow uses the CPFP path. Renewed leaves can have shorter timelocks in
+100-block steps, so decode the generated refund transaction's input sequence if
+you need the exact wait for a specific package. The local E2E mines 2,050 blocks
+as a conservative regtest buffer.
+
 ## 5. Sign each CPFP PSBT
 
 The generated `feeBumpPsbt` is hex-encoded. Bitcoin Core wallet RPC expects a
@@ -241,13 +250,16 @@ bitcoin-cli gettransaction <txid>
 ```
 
 Wait for required confirmations and relative timelocks before attempting the
-final spend. The exact wait depends on the Spark tree/refund transaction
-sequence and should be derived from the package transactions before automation
-marks the recovery complete.
+next package or final spend. The last package entry for each leaf is the refund
+transaction; do not broadcast it until its input sequence has matured relative
+to the transaction it spends. For current fresh leaves, expect a 2,000-block
+wait, roughly two weeks on mainnet. Once the refund transaction itself is
+confirmed, the `make sweep` transaction spends the refund output as a normal
+Bitcoin transaction.
 
 ## 8. Sweep recovered funds to the destination
 
-After a refund transaction confirms and the required timelock has elapsed,
+After the timelock-gated refund transaction has been broadcast and confirmed,
 construct a signed sweep transaction:
 
 ```sh

@@ -319,3 +319,10 @@ The current local end-to-end test:
 6. Construct, broadcast, and confirm the final sweep to a fresh destination address.
 
 This is now represented by the `Spark Local E2E` GitHub Actions workflow and the `test/e2e/local-spark-unilateral-exit.test.js` test. The workflow is intentionally separate from normal CI because it needs Docker and builds/runs the upstream Spark local stack.
+
+Expect a long wait between package phases. Spark refund transactions use a
+block-based CSV relative timelock. Fresh leaves currently use 2,000 blocks on
+the CPFP refund path, which is about 13.9 days at Bitcoin's 10-minute target
+block interval. Renewed leaves can be shorter in 100-block steps, so operators
+should decode the generated refund transaction input sequence for exact timing.
+The local E2E mines 2,050 regtest blocks as a buffer before the next phase.
