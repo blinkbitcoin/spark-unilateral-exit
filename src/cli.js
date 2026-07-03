@@ -18,6 +18,16 @@ import { signPackages } from "./sign.js";
 import { constructSparkPackages } from "./spark-packages.js";
 import { constructSweepTransactions } from "./sweep.js";
 
+// The Spark SDK emits diagnostic logs through the global console.log, which
+// writes to stdout. This CLI's contract is that stdout carries only the
+// machine-readable JSON result, so redirect all incidental console.log output
+// to stderr and emit results explicitly via emitJson/process.stdout.
+console.log = (...args) => console.error(...args);
+
+function emitJson(value) {
+  process.stdout.write(`${serializeForJson(value)}\n`);
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
@@ -37,7 +47,7 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       cpfpUtxos: collect(args["cpfp-utxo"]),
     });
-    console.log(serializeForJson(plan));
+    emitJson(plan);
     return;
   }
 
@@ -51,7 +61,7 @@ async function main() {
       cpfpUtxos,
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
     });
-    console.log(serializeForJson({ destination: args.destination, packages }));
+    emitJson({ destination: args.destination, packages });
     return;
   }
 
@@ -70,7 +80,7 @@ async function main() {
         );
       },
     });
-    console.log(serializeForJson(results));
+    emitJson(results);
     return;
   }
 
@@ -84,7 +94,7 @@ async function main() {
       network,
       esploraUrl: args["esplora-url"],
     });
-    console.log(serializeForJson(results));
+    emitJson(results);
     return;
   }
 
@@ -96,7 +106,7 @@ async function main() {
       network,
       esploraUrl: args["esplora-url"],
     });
-    console.log(serializeForJson(status));
+    emitJson(status);
     return;
   }
 
@@ -118,7 +128,7 @@ async function main() {
     if (args.out) {
       fs.writeFileSync(args.out, `${output}\n`, { mode: 0o600 });
     } else {
-      console.log(output);
+      process.stdout.write(`${output}\n`);
     }
     return;
   }
@@ -137,7 +147,7 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
-    console.log(serializeForJson(sweeps));
+    emitJson(sweeps);
     return;
   }
 
@@ -206,7 +216,7 @@ function required(value, name) {
 }
 
 function printHelp() {
-  console.log(`spark-unilateral-exit
+  process.stdout.write(`spark-unilateral-exit
 
 Commands:
   refresh-bundle   Query live Spark leaves from a seed and write a bundle
