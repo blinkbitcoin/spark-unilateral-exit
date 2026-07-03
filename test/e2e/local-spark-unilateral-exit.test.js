@@ -21,6 +21,7 @@ import {
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
 import { parseRecoveryBundle } from "../../src/bundle.js";
+import { signPackages } from "../../src/sign.js";
 import { constructSparkPackages } from "../../src/spark-packages.js";
 
 const runE2e = process.env.RUN_SPARK_E2E === "1";
@@ -82,8 +83,15 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       expect(chains).toHaveLength(1);
       expect(chains[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
 
-      for (const txPackage of chains[0].txPackages) {
-        await broadcastPackageAndMineTimelock(faucet, txPackage, funding.privateKey);
+      const signedChains = signPackages({
+        packages: chains,
+        privateKey: funding.privateKey,
+      });
+
+      for (const signedLeaf of signedChains) {
+        for (const txPackage of signedLeaf.txPackages) {
+          await broadcastSignedPackageAndMineTimelock(faucet, txPackage);
+        }
       }
 
       const destination = await faucet.getNewAddress();
@@ -215,17 +223,16 @@ async function sweepWithCli(mnemonic, packageJson) {
   return JSON.parse(stdout);
 }
 
-async function broadcastPackageAndMineTimelock(faucet, txPackage, fundingPrivateKey) {
+async function broadcastSignedPackageAndMineTimelock(faucet, txPackage) {
   expect(txPackage?.tx).toBeTruthy();
-  expect(txPackage?.feeBumpPsbt).toBeTruthy();
+  expect(txPackage?.signedChildTx).toBeTruthy();
 
-  const signedFeeBump = signPsbtWithKey(txPackage.feeBumpPsbt, fundingPrivateKey);
-  const submitResult = await faucet.submitPackage([txPackage.tx, signedFeeBump]);
+  const submitResult = await faucet.submitPackage([txPackage.tx, txPackage.signedChildTx]);
 
   if (!packageSubmitSucceeded(submitResult)) {
     console.error(
       "submitpackage tx summary",
-      JSON.stringify(summarizePackage(txPackage.tx, signedFeeBump), null, 2),
+      JSON.stringify(summarizePackage(txPackage.tx, txPackage.signedChildTx), null, 2),
     );
     console.error("submitpackage result", JSON.stringify(submitResult, null, 2));
   }
@@ -321,28 +328,6 @@ async function makeCpfpFundingUtxo(faucet, amount) {
   };
 }
 
-function signPsbtWithKey(psbtHex, privateKey) {
-  const tx = Transaction.fromPSBT(hexToBytes(psbtHex), {
-    allowUnknown: true,
-    allowLegacyWitnessUtxo: true,
-    version: 3,
-  });
-
-  for (let i = 0; i < tx.inputsLength; i += 1) {
-    const input = tx.getInput(i);
-    if (isEphemeralAnchorOutput(input?.witnessUtxo?.script, input?.witnessUtxo?.amount)) {
-      continue;
-    }
-    tx.updateInput(i, {
-      witnessScript: input?.witnessUtxo?.script,
-    });
-    tx.signIdx(privateKey, i);
-    tx.finalizeIdx(i);
-  }
-
-  return bytesToHex(tx.toBytes(true, true));
-}
-
 function summarizePackage(parentHex, childHex) {
   return {
     parent: summarizeTx(parentHex),
@@ -426,24 +411,3 @@ function hash160(bytes) {
   return ripemd160(sha256(bytes));
 }
 
-function isEphemeralAnchorOutput(script, amount) {
-  return Boolean(
-    amount === 0n &&
-      script &&
-      ((script.length === 1 && script[0] === 0x51) ||
-        (script.length === 2 && script[0] === 0x01 && script[1] === 0x51) ||
-        (script.length === 7 &&
-          script[0] === 0x01 &&
-          script[1] === 0x51 &&
-          script[2] === 0x52 &&
-          script[3] === 0x01 &&
-          script[4] === 0x4e &&
-          script[5] === 0x01 &&
-          script[6] === 0x73) ||
-        (script.length === 4 &&
-          script[0] === 0x51 &&
-          script[1] === 0x02 &&
-          script[2] === 0x4e &&
-          script[3] === 0x73)),
-  );
-}

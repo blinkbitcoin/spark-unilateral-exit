@@ -14,6 +14,7 @@ import {
   createRecoveryPlan,
 } from "./planner.js";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.js";
+import { signPackages } from "./sign.js";
 import { constructSparkPackages } from "./spark-packages.js";
 import { constructSweepTransactions } from "./sweep.js";
 
@@ -96,6 +97,29 @@ async function main() {
       esploraUrl: args["esplora-url"],
     });
     console.log(serializeForJson(status));
+    return;
+  }
+
+  if (command === "sign-packages") {
+    const input = JSON.parse(
+      fs.readFileSync(required(args.packages, "--packages"), "utf8"),
+    );
+    const keyFile = args["key-file"];
+    const keyArg = args["private-key"];
+    if (!keyFile && !keyArg) {
+      throw new Error("--key-file or --private-key is required");
+    }
+    const privateKey = keyFile
+      ? fs.readFileSync(keyFile, "utf8").trim()
+      : keyArg;
+    const packages = input.packages ?? input;
+    const signed = signPackages({ packages, privateKey });
+    const output = serializeForJson({ ...input, packages: signed });
+    if (args.out) {
+      fs.writeFileSync(args.out, `${output}\n`, { mode: 0o600 });
+    } else {
+      console.log(output);
+    }
     return;
   }
 
@@ -191,6 +215,7 @@ Commands:
   broadcast        Submit signed packages via Esplora (replaces bitcoin-cli submitpackage)
   broadcast-sweep  Broadcast signed sweep transactions via Esplora
   tx-status        Check confirmation status of a transaction via Esplora
+  sign-packages    Sign all CPFP PSBTs in a package JSON with a private key
   sweep            Spend confirmed refund outputs to a destination address
 
 Required for offline recovery:
@@ -224,6 +249,12 @@ Inputs for tx-status:
   --txid <txid>            Transaction ID to check
   --network <network>      MAINNET, TESTNET, or SIGNET
   --esplora-url <url>      Custom Esplora API base URL (optional)
+
+Inputs for sign-packages:
+  --packages <path>        JSON produced by package
+  --key-file <path>        File containing CPFP private key hex (preferred)
+  --private-key <hex>      CPFP private key as 32-byte hex (use --key-file instead)
+  --out <path>             Output path for signed packages; stdout when omitted
 
 Inputs for sweep:
   --packages <path>         JSON produced by package
