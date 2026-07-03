@@ -2,6 +2,11 @@
 import fs from "node:fs";
 
 import { parseRecoveryBundle } from "./bundle.js";
+import {
+  broadcastPackages,
+  broadcastSweeps,
+  checkTransactionStatus,
+} from "./broadcast.js";
 import { loadSeed } from "./cli-input.js";
 import { parseCpfpUtxo, serializeForJson } from "./cpfp.js";
 import {
@@ -46,6 +51,51 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
     });
     console.log(serializeForJson({ destination: args.destination, packages }));
+    return;
+  }
+
+  if (command === "broadcast") {
+    const input = JSON.parse(
+      fs.readFileSync(required(args.packages, "--packages"), "utf8"),
+    );
+    const network = required(args.network, "--network");
+    const results = await broadcastPackages({
+      packages: input.packages ?? input,
+      network,
+      esploraUrl: args["esplora-url"],
+      onPackageSubmitted(entry) {
+        console.error(
+          `Submitted leaf ${entry.leafId} package ${entry.packageIndex}`,
+        );
+      },
+    });
+    console.log(serializeForJson(results));
+    return;
+  }
+
+  if (command === "broadcast-sweep") {
+    const input = JSON.parse(
+      fs.readFileSync(required(args.sweeps, "--sweeps"), "utf8"),
+    );
+    const network = required(args.network, "--network");
+    const results = await broadcastSweeps({
+      sweeps: input.sweeps ?? input,
+      network,
+      esploraUrl: args["esplora-url"],
+    });
+    console.log(serializeForJson(results));
+    return;
+  }
+
+  if (command === "tx-status") {
+    const txid = required(args.txid, "--txid");
+    const network = required(args.network, "--network");
+    const status = await checkTransactionStatus({
+      txid,
+      network,
+      esploraUrl: args["esplora-url"],
+    });
+    console.log(serializeForJson(status));
     return;
   }
 
@@ -135,10 +185,13 @@ function printHelp() {
   console.log(`spark-unilateral-exit
 
 Commands:
-  refresh-bundle  Query live Spark leaves from a seed and write a bundle
-  plan            Validate a saved recovery bundle and print a recovery plan
-  package         Construct Spark unilateral-exit packages using upstream Spark SDK
-  sweep           Spend confirmed refund outputs to a destination address
+  refresh-bundle   Query live Spark leaves from a seed and write a bundle
+  plan             Validate a saved recovery bundle and print a recovery plan
+  package          Construct Spark unilateral-exit packages using upstream Spark SDK
+  broadcast        Submit signed packages via Esplora (replaces bitcoin-cli submitpackage)
+  broadcast-sweep  Broadcast signed sweep transactions via Esplora
+  tx-status        Check confirmation status of a transaction via Esplora
+  sweep            Spend confirmed refund outputs to a destination address
 
 Required for offline recovery:
   --bundle <path>          Saved Spark recovery bundle JSON
@@ -156,6 +209,21 @@ Inputs for refresh-bundle:
 Optional provenance metadata for refresh-bundle:
   --operator-set <label>   Operator-set label stored in the bundle
   --app-version <version>  App version label stored in the bundle
+
+Inputs for broadcast:
+  --packages <path>        JSON produced by package, with signedChildTx added
+  --network <network>      MAINNET, TESTNET, or SIGNET
+  --esplora-url <url>      Custom Esplora API base URL (optional)
+
+Inputs for broadcast-sweep:
+  --sweeps <path>          JSON produced by sweep
+  --network <network>      MAINNET, TESTNET, or SIGNET
+  --esplora-url <url>      Custom Esplora API base URL (optional)
+
+Inputs for tx-status:
+  --txid <txid>            Transaction ID to check
+  --network <network>      MAINNET, TESTNET, or SIGNET
+  --esplora-url <url>      Custom Esplora API base URL (optional)
 
 Inputs for sweep:
   --packages <path>         JSON produced by package
