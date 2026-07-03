@@ -21,11 +21,10 @@ import {
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
 import { parseRecoveryBundle } from "../../src/bundle.js";
-import { signPackages } from "../../src/sign.js";
-import { constructSparkPackages } from "../../src/spark-packages.js";
 
 const runE2e = process.env.RUN_SPARK_E2E === "1";
 const execFileAsync = promisify(execFile);
+const repoRoot = new URL("../..", import.meta.url).pathname;
 const LOCAL_OPERATORS = [
   {
     id: 0,
@@ -51,7 +50,7 @@ const LOCAL_OPERATORS = [
 ];
 
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
-  it("constructs, broadcasts, and sweeps a unilateral-exit package from a saved bundle", async () => {
+  it("constructs, signs, broadcasts, and sweeps via CLI commands", async () => {
     const faucet = BitcoinFaucet.getInstance();
     const { Signer } = signerTypes[0];
     const { wallet, mnemonic } = await retry(
@@ -64,6 +63,8 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       "initialize Spark wallet",
     );
 
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-e2e-"));
+
     try {
       const leaf = await retry(
         () => claimSingleDeposit(wallet, faucet, 100_000n),
@@ -71,34 +72,84 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         20,
       );
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
-      const recoveryBundle = await exportBundleWithStandaloneTool(mnemonic);
+
+      // Step 1: refresh-bundle (via standalone Rust tool, same as make refresh-recovery-bundle)
+      const bundlePath = path.join(tempDir, "bundle.json");
+      await exportBundleWithStandaloneTool(mnemonic, tempDir, bundlePath);
+      const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
       assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
-      const chains = await constructSparkPackages({
-        bundle: recoveryBundle,
-        cpfpUtxos: [funding.utxo],
-        feeRate: 5,
-      });
+      // Step 2: package (equivalent to: make package)
+      const cpfpUtxoStr = [
+        funding.utxo.txid,
+        funding.utxo.vout,
+        funding.utxo.value.toString(),
+        funding.utxo.script,
+        funding.utxo.publicKey,
+      ].join(":");
+      const destination = await faucet.getNewAddress();
+      const packagesPath = path.join(tempDir, "packages.json");
+      const { stdout: packageOut } = await execFileAsync(
+        "node",
+        [
+          "src/cli.js", "package",
+          "--bundle", bundlePath,
+          "--destination", destination,
+          "--fee-rate", "5",
+          "--cpfp-utxo", cpfpUtxoStr,
+        ],
+        { cwd: repoRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      await fs.writeFile(packagesPath, packageOut);
+      const packageJson = JSON.parse(packageOut);
+      expect(packageJson.packages).toHaveLength(1);
+      expect(packageJson.packages[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
 
-      expect(chains).toHaveLength(1);
-      expect(chains[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
+      // Step 3: sign-packages (equivalent to: make sign-packages)
+      const keyFilePath = path.join(tempDir, "cpfp-key.hex");
+      await fs.writeFile(keyFilePath, bytesToHex(funding.privateKey), { mode: 0o600 });
+      const signedPath = path.join(tempDir, "packages-signed.json");
+      await execFileAsync(
+        "node",
+        [
+          "src/cli.js", "sign-packages",
+          "--packages", packagesPath,
+          "--key-file", keyFilePath,
+          "--out", signedPath,
+        ],
+        { cwd: repoRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      const signedJson = JSON.parse(await fs.readFile(signedPath, "utf8"));
+      expect(signedJson.packages).toHaveLength(1);
+      for (const txPkg of signedJson.packages[0].txPackages) {
+        expect(txPkg.signedChildTx).toBeTruthy();
+        expect(txPkg.tx).toBeTruthy();
+      }
 
-      const signedChains = signPackages({
-        packages: chains,
-        privateKey: funding.privateKey,
-      });
-
-      for (const signedLeaf of signedChains) {
-        for (const txPackage of signedLeaf.txPackages) {
-          await broadcastSignedPackageAndMineTimelock(faucet, txPackage);
+      // Step 4: broadcast signed packages (submitpackage to regtest bitcoind)
+      for (const leafPkg of signedJson.packages) {
+        for (const txPkg of leafPkg.txPackages) {
+          await broadcastSignedPackageAndMineTimelock(faucet, txPkg);
         }
       }
 
-      const destination = await faucet.getNewAddress();
-      const sweepResult = await sweepWithCli(mnemonic, {
-        destination,
-        packages: chains,
-      });
+      // Step 5: sweep (equivalent to: make sweep)
+      const seedFile = path.join(tempDir, "seed.txt");
+      await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
+      const { stdout: sweepOut } = await execFileAsync(
+        "node",
+        [
+          "src/cli.js", "sweep",
+          "--packages", packagesPath,
+          "--seed-file", seedFile,
+          "--network", "LOCAL",
+          "--destination", destination,
+          "--account-number", "1",
+          "--fee-rate", "1",
+        ],
+        { cwd: repoRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      const sweepResult = JSON.parse(sweepOut);
 
       expect(sweepResult.destination).toBe(destination);
       expect(sweepResult.sweeps).toHaveLength(1);
@@ -107,6 +158,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         refundVout: 0,
       });
 
+      // Step 6: broadcast sweep tx
       const sweepTxid = await faucet.broadcastTx(sweepResult.sweeps[0].sweepTx);
       expect(sweepTxid).toBe(sweepResult.sweeps[0].sweepTxid);
       await faucet.mineBlocksAndWaitForMiningToComplete(1);
@@ -138,10 +190,8 @@ async function claimSingleDeposit(wallet, faucet, amount) {
   );
 }
 
-async function exportBundleWithStandaloneTool(mnemonic) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-recovery-e2e-"));
+async function exportBundleWithStandaloneTool(mnemonic, tempDir, outFile) {
   const seedFile = path.join(tempDir, "seed.txt");
-  const outFile = path.join(tempDir, "bundle.json");
   await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
 
   const operatorArgs = [];
@@ -180,47 +230,8 @@ async function exportBundleWithStandaloneTool(mnemonic) {
       "local-e2e",
       ...operatorArgs,
     ],
-    {
-      cwd: new URL("../..", import.meta.url).pathname,
-      timeout: 180_000,
-      maxBuffer: 10 * 1024 * 1024,
-    },
+    { cwd: repoRoot, timeout: 180_000, maxBuffer: 10 * 1024 * 1024 },
   );
-
-  return parseRecoveryBundle(await fs.readFile(outFile, "utf8"));
-}
-
-async function sweepWithCli(mnemonic, packageJson) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-sweep-e2e-"));
-  const seedFile = path.join(tempDir, "seed.txt");
-  const packagesFile = path.join(tempDir, "packages.json");
-  await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
-  await fs.writeFile(packagesFile, JSON.stringify(packageJson, null, 2));
-
-  const { stdout } = await execFileAsync(
-    "node",
-    [
-      "src/cli.js",
-      "sweep",
-      "--packages",
-      packagesFile,
-      "--seed-file",
-      seedFile,
-      "--network",
-      "LOCAL",
-      "--account-number",
-      "1",
-      "--fee-rate",
-      "1",
-    ],
-    {
-      cwd: new URL("../..", import.meta.url).pathname,
-      timeout: 60_000,
-      maxBuffer: 10 * 1024 * 1024,
-    },
-  );
-
-  return JSON.parse(stdout);
 }
 
 async function broadcastSignedPackageAndMineTimelock(faucet, txPackage) {
@@ -410,4 +421,3 @@ function packageSubmitSucceeded(result) {
 function hash160(bytes) {
   return ripemd160(sha256(bytes));
 }
-
