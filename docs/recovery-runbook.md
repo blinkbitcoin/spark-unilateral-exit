@@ -221,6 +221,22 @@ https://bitcoincore.org/en/doc/29.0.0/rpc/rawtransactions/finalizepsbt/
 
 ## 6. Broadcast each package
 
+### Option A: Blockstream Esplora (no local node required)
+
+Add the signed CPFP child hex to each `txPackages[]` entry as `signedChildTx`,
+then broadcast all packages with the built-in CLI:
+
+```sh
+node src/cli.js broadcast \
+  --packages recovery-packages-signed.json \
+  --network MAINNET
+```
+
+This submits each package to Blockstream's Esplora `POST /txs/package` endpoint.
+Use `--esplora-url <url>` to point at a self-hosted Esplora instance instead.
+
+### Option B: Bitcoin Core RPC
+
 For each `txPackages[]` entry, submit the Spark transaction and signed CPFP child
 as a package:
 
@@ -230,6 +246,8 @@ bitcoin-cli submitpackage '["<tx>","<signed-cpfp-child-tx-hex>"]'
 
 Expected success has `package_msg` or `package-msg` equal to `success`, or each
 transaction result has no `error`.
+
+### Notes
 
 If the node rejects a package with missing-inputs and an earlier unconfirmed
 Spark transaction is its parent, include the unconfirmed parent transaction hex
@@ -306,10 +324,24 @@ Output shape:
 }
 ```
 
-Broadcast each `sweepTx` as a normal Bitcoin transaction:
+Broadcast each `sweepTx` as a normal Bitcoin transaction. With the CLI:
+
+```sh
+node src/cli.js broadcast-sweep \
+  --sweeps sweep-transactions.json \
+  --network MAINNET
+```
+
+Or with Bitcoin Core:
 
 ```sh
 bitcoin-cli sendrawtransaction "<sweepTx>"
+```
+
+Check confirmation status:
+
+```sh
+node src/cli.js tx-status --txid <txid> --network MAINNET
 ```
 
 Confirm the destination output on chain before considering recovery complete.
