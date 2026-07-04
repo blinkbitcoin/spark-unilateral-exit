@@ -51,8 +51,22 @@ const LOCAL_OPERATORS = [
 
 describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
   it("constructs, signs, broadcasts, and sweeps via CLI commands", async () => {
+    // Progress markers so CI shows which phase is running and how long each
+    // took (this test has no per-step output otherwise, so a slow phase looks
+    // like a hang). Emitted on stderr, which vitest streams live.
+    const startedAt = Date.now();
+    let lastStepAt = startedAt;
+    const step = (label) => {
+      const now = Date.now();
+      const total = ((now - startedAt) / 1000).toFixed(1);
+      const delta = ((now - lastStepAt) / 1000).toFixed(1);
+      lastStepAt = now;
+      console.error(`[e2e +${total}s Δ${delta}s] ${label}`);
+    };
+
     const faucet = BitcoinFaucet.getInstance();
     const { Signer } = signerTypes[0];
+    step("initializing Spark wallet");
     const { wallet, mnemonic } = await retry(
       () =>
         SparkWalletTesting.initialize({
@@ -66,20 +80,24 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-e2e-"));
 
     try {
+      step("claiming Spark deposit leaf");
       const leaf = await retry(
         () => claimSingleDeposit(wallet, faucet, 100_000n),
         "claim Spark deposit leaf",
         20,
       );
+      step("creating CPFP funding utxo");
       const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
 
       // Step 1: refresh-bundle (via standalone Rust tool, same as make refresh-recovery-bundle)
+      step("refresh-bundle (standalone Rust tool)");
       const bundlePath = path.join(tempDir, "bundle.json");
       await exportBundleWithStandaloneTool(mnemonic, tempDir, bundlePath);
       const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
       assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
       // Step 2: package (equivalent to: make package)
+      step("package (CLI)");
       const cpfpUtxoStr = [
         funding.utxo.txid,
         funding.utxo.vout,
@@ -106,6 +124,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       expect(packageJson.packages[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
 
       // Step 3: sign-packages (equivalent to: make sign-packages)
+      step("sign-packages (CLI)");
       const keyFilePath = path.join(tempDir, "cpfp-key.hex");
       await fs.writeFile(keyFilePath, bytesToHex(funding.privateKey), { mode: 0o600 });
       const signedPath = path.join(tempDir, "packages-signed.json");
@@ -127,6 +146,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       }
 
       // Step 4: broadcast signed packages (submitpackage to regtest bitcoind)
+      step("broadcast packages + mine CPFP timelock");
       for (const leafPkg of signedJson.packages) {
         for (const txPkg of leafPkg.txPackages) {
           await broadcastSignedPackageAndMineTimelock(faucet, txPkg);
@@ -134,6 +154,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       }
 
       // Step 5: sweep (equivalent to: make sweep)
+      step("sweep (CLI)");
       const seedFile = path.join(tempDir, "seed.txt");
       await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
       const { stdout: sweepOut } = await execFileAsync(
@@ -159,6 +180,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       });
 
       // Step 6: broadcast sweep tx
+      step("broadcast sweep tx + mine");
       const sweepTxid = await faucet.broadcastTx(sweepResult.sweeps[0].sweepTx);
       expect(sweepTxid).toBe(sweepResult.sweeps[0].sweepTxid);
       await faucet.mineBlocksAndWaitForMiningToComplete(1);
@@ -166,6 +188,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       const sweepTxInfo = await faucet.getRawTransaction(sweepTxid);
       expect(sweepTxInfo.confirmations).toBeGreaterThan(0);
       assertSweepPaysDestination(sweepResult.sweeps[0], destination);
+      step("done");
     } finally {
       await wallet.cleanup?.();
     }
@@ -248,7 +271,12 @@ async function broadcastSignedPackageAndMineTimelock(faucet, txPackage) {
     console.error("submitpackage result", JSON.stringify(submitResult, null, 2));
   }
   expect(packageSubmitSucceeded(submitResult)).toBe(true);
+  const mineStart = Date.now();
+  console.error("[e2e] mining 2050 blocks to clear the CPFP relative timelock...");
   await faucet.mineBlocksAndWaitForMiningToComplete(2050);
+  console.error(
+    `[e2e] mined 2050 blocks in ${((Date.now() - mineStart) / 1000).toFixed(1)}s`,
+  );
 }
 
 function fetchOperatorCertificate(port) {
