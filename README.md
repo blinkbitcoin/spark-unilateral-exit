@@ -104,7 +104,9 @@ Sweep construction derives the Spark refund key from the seed, verifies it match
 
 ## Minimum Practical Balance
 
-The CLI does not currently enforce a minimum recoverable balance. As conservative operator guidance at 1 sat/vbyte, treat about 10,000 sats for one Bitcoin leaf or about 20,000 sats total for two Bitcoin leaves as the practical floor. This is not a protocol limit; it is a planning threshold for package fees, CPFP fees, final sweep fees, dust, and margin. See [docs/withdraw-guide.md](docs/withdraw-guide.md#minimum-practical-balance) for details.
+The CLI does not currently enforce a minimum recoverable balance. As conservative operator guidance at 1 sat/vbyte, treat about 10,000 sats for one Bitcoin leaf or about 20,000 sats total for two Bitcoin leaves as the practical floor. This is not a protocol limit; it is a planning threshold for package fees, CPFP fees, final sweep fees, dust, and margin.
+
+These floors are roughly an order of magnitude above Spark's published [cooperative "Exit to L1" fee](https://docs.spark.money/learn/faq#what-are-the-fees-on-spark) of `250 × sats_per_vbyte + 750` (about 1,000 sats at 1 sat/vbyte). That cooperative fee is flat and applies only while Spark operators are online; unilateral exit is the offline fallback and costs more because the user broadcasts the full exit tree plus CPFP bumps and a final sweep rather than one operator-assisted transaction. See [docs/withdraw-guide.md](docs/withdraw-guide.md#minimum-practical-balance) for details.
 
 ## Test
 

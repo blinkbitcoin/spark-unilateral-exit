@@ -26,6 +26,14 @@ For this reason, a Spark wallet should save an encrypted recovery bundle while S
 
 The current CLI does not enforce a minimum recoverable Bitcoin balance. It validates that the bundle has at least one leaf, that the fee rate is positive, and that at least one CPFP UTXO is provided. It does not yet estimate package vsize, subtract L1 fees, or reject economically uneconomic recoveries.
 
+### How Spark's published fees relate to this
+
+Spark's [published fee schedule](https://docs.spark.money/learn/faq#what-are-the-fees-on-spark) lists a **cooperative** "Exit to L1" fee of `250 × sats_per_vbyte + 750` (about 1,000 sats at 1 sat/vbyte, 2,000 sats at 5 sat/vbyte). That fee is flat and does not scale with the amount withdrawn, so for small balances it is already a large percentage. Crucially, it applies only while Spark operators are online and process the exit for the user: it prices a single ~250-vbyte on-chain transaction plus a 750-sat service fee.
+
+Unilateral exit — the path this tool implements — is the fallback when operators are unavailable, and it is materially more expensive than the cooperative fee. Instead of one operator-assisted transaction, the user broadcasts the full exit tree themselves: each node transaction in the leaf's ancestor chain, the refund transaction, a CPFP fee-bump child for each of those, and a final sweep. The practical floors below (~10,000 sats for one leaf at 1 sat/vbyte) are therefore roughly an order of magnitude above Spark's flat cooperative exit fee, and the "flat fee is a higher percentage for small balances" caveat applies even more strongly here.
+
+The takeaway for planning: Spark's `250 × sats_per_vbyte + 750` is the best-case exit cost while operators are online; treat the floors in this section as the worst-case cost of exiting without them. If a balance is uneconomic to exit cooperatively, it is uneconomic to recover unilaterally.
+
 Use this conservative planning floor until package and sweep sizing are measured from production-like Spark packages:
 
 | Scenario | Practical floor at 1 sat/vbyte | Notes |
