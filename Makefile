@@ -24,7 +24,7 @@ REFRESH_ARGS = \
 	$(if $(OPERATOR_SET),--operator-set $(OPERATOR_SET),) \
 	$(if $(APP_VERSION),--app-version $(APP_VERSION),)
 
-.PHONY: help refresh-recovery-bundle plan package sign-packages sweep
+.PHONY: help refresh-recovery-bundle plan package sign-packages sweep test-e2e
 
 help:
 	@echo "Targets:"
@@ -33,8 +33,12 @@ help:
 	@echo "  make package BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make sign-packages PACKAGES=recovery-packages.json KEY_FILE=cpfp-key.hex"
 	@echo "  make sweep PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt NETWORK=mainnet DESTINATION=<bitcoin-address> FEE_RATE=1"
+	@echo "  make test-e2e   # run the local unilateral-exit E2E against a running Spark stack"
 	@echo ""
 	@echo "For multiple CPFP inputs, pass CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'."
+
+test-e2e:
+	@./scripts/run-e2e.sh
 
 refresh-recovery-bundle:
 	@if [ -f "$(BUNDLE)" ]; then \

@@ -36,35 +36,8 @@ jobs:
       - name: Install dependencies
         run: nix develop --command npm ci
 
-      - name: Build and start Spark local stack
-        working-directory: upstream-spark
-        run: |
-          docker compose \
-            -f docker-compose.yml \
-            -f ../scripts/spark-local-bitcoind29.override.yml \
-            up -d --build postgres bitcoind bitcoin-init spark-operator-0 spark-operator-1 spark-operator-2
-          docker compose ps
-
-      - name: Wait for Spark operators
-        run: |
-          nix develop --command node scripts/wait-for-spark-local.mjs
-          sleep 15
-
+      # make test-e2e starts the Spark local stack (auto-detected at
+      # ./upstream-spark), waits for the operators, runs the E2E suite, dumps
+      # logs on failure, and tears the stack down.
       - name: Run local unilateral-exit E2E
-        env:
-          SPARK_DANGEROUSLY_DISABLE_TLS_VERIFICATION: "true"
-        run: nix develop --command npm run test:e2e
-
-      - name: Dump Spark logs on failure
-        if: failure()
-        working-directory: upstream-spark
-        run: docker compose logs --no-color --tail=300
-
-      - name: Stop Spark local stack
-        if: always()
-        working-directory: upstream-spark
-        run: |
-          docker compose \
-            -f docker-compose.yml \
-            -f ../scripts/spark-local-bitcoind29.override.yml \
-            down -v
+        run: nix develop --command make test-e2e
