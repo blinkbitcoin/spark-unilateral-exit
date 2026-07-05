@@ -12,6 +12,23 @@ See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and 
 
 ## Current CLI
 
+The CLI (`node src/cli.js <command>`, run `help` for full flags) exposes:
+
+| Command | Purpose |
+|---------|---------|
+| `refresh-bundle` | Query live Spark leaves from a seed and write a bundle |
+| `plan` | Validate a saved bundle and print a recovery plan |
+| `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
+| `watch-cpfp` | Watch the funding address for an incoming UTXO and emit it as `--cpfp-utxo` |
+| `package` | Construct unilateral-exit packages via the upstream Spark SDK |
+| `sign-packages` | Sign the CPFP fee-bump PSBTs (key from seed, key-file, or hex) |
+| `broadcast` | Submit signed packages via Esplora |
+| `tx-status` | Check confirmation status of a transaction via Esplora |
+| `sweep` | Spend confirmed refund outputs to a destination address |
+| `broadcast-sweep` | Broadcast signed sweep transactions via Esplora |
+
+`watch-cpfp`, `broadcast`, `broadcast-sweep`, and `tx-status` use Esplora and support only MAINNET/TESTNET/SIGNET by default; on REGTEST/LOCAL pass `--esplora-url` or use `bitcoin-cli`.
+
 Install dependencies:
 
 ```sh
@@ -75,6 +92,26 @@ make sweep \
   FEE_RATE=1 \
   ACCOUNT_NUMBER=1
 ```
+
+Derive a CPFP funding address from the seed and estimate the sats to send it, then watch for the funds and capture the ready-to-use `--cpfp-utxo` value:
+
+```sh
+node src/cli.js cpfp-address \
+  --bundle recovery-bundle.json \
+  --seed-file /path/to/spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 10
+
+# send at least the printed requiredSats to the printed cpfpAddress, then:
+
+node src/cli.js watch-cpfp \
+  --bundle recovery-bundle.json \
+  --seed-file /path/to/spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 10
+```
+
+`cpfp-address` derives a dedicated P2WPKH funding key from the seed (BIP32 purpose `8797556'`, one above the Spark wallet purpose) and prints `cpfpAddress`, `script`, `publicKey`, and `requiredSats` (summed fee-bump fees plus `--buffer-sats`, default 1000). `watch-cpfp` polls until a UTXO of at least `requiredSats` (from `--bundle` + `--fee-rate`, or `--min-sats`) reaches that address and emits the `cpfpUtxo` string for `package --cpfp-utxo`. It requires `--min-sats` or `--bundle` so it never accepts an underfunded UTXO. This seed-derived path replaces manually exporting a fee UTXO from Bitcoin Core/Electrum/Sparrow (still documented in the withdraw guide), and the same seed signs the CPFP PSBTs via `sign-packages --seed-file`.
 
 Create a dry-run recovery plan from a saved bundle:
 

@@ -78,7 +78,8 @@ wallet graph metadata and it is required for offline recovery.
 
 ## 2. Prepare the CPFP UTXO
 
-The CLI expects this shape:
+The `package` command needs an external L1 Bitcoin UTXO to fund the fee bumps, in
+this shape:
 
 ```text
 txid:vout:value:script:publicKey
@@ -92,7 +93,41 @@ Field meanings:
 - `script`: output scriptPubKey hex.
 - `publicKey`: public key for the signer controlling that output.
 
-With Bitcoin Core, get candidate UTXOs from the fee wallet:
+### Recommended: seed-derived funding
+
+When the recovery seed is available, let the CLI derive a dedicated funding
+address (BIP32 purpose `8797556'`, isolated from Spark's own keys), tell you the
+amount to send, and assemble the string for you. This is the primary path for
+mobile/programmatic recovery and avoids manual `listunspent` export.
+
+```sh
+node src/cli.js cpfp-address \
+  --bundle ../recovery-bundle.json \
+  --seed-file ../.spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 1
+```
+
+Send at least the printed `requiredSats` to the printed `cpfpAddress`, then:
+
+```sh
+node src/cli.js watch-cpfp \
+  --bundle ../recovery-bundle.json \
+  --seed-file ../.spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 1
+```
+
+`watch-cpfp` polls Esplora until a UTXO of at least `requiredSats` (auto-computed
+from `--bundle` + `--fee-rate`, or set `--min-sats`) confirms at the funding
+address, then prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo`
+below. It requires `--min-sats` or `--bundle` so it never accepts an underfunded
+UTXO. On REGTEST/LOCAL, pass `--esplora-url` (Esplora has no default there).
+Because the key is seed-derived, step 5 Option A can sign with `--seed-file`.
+
+### Alternative: external fee wallet
+
+With Bitcoin Core, get candidate UTXOs from a separate fee wallet:
 
 ```sh
 bitcoin-cli -rpcwallet=<fee-wallet> listunspent 1 9999999
@@ -182,8 +217,20 @@ as a conservative regtest buffer.
 
 ### Option A: Automated signing with the CLI (recommended for mobile/programmatic use)
 
-If the CPFP UTXO private key is available as hex (e.g. an app-managed key),
-sign all packages in one step:
+If the funding address came from the seed-derived path in step 2, sign with the
+same seed — no separate key file needed:
+
+```sh
+node src/cli.js sign-packages \
+  --packages recovery-packages.json \
+  --seed-file ../.spark-seed.txt \
+  --network MAINNET \
+  --out recovery-packages-signed.json
+```
+
+`sign-packages` re-derives the CPFP key (`--account-number` defaults to 0, match
+whatever you passed to `cpfp-address`). Alternatively, if the CPFP private key is
+available as hex (e.g. an app-managed key), pass it directly:
 
 ```sh
 node src/cli.js sign-packages \
@@ -191,6 +238,11 @@ node src/cli.js sign-packages \
   --key-file cpfp-key.hex \
   --out recovery-packages-signed.json
 ```
+
+Prefer `--seed-file` or `--key-file` over `--private-key <hex>`, which exposes
+the key in shell history and `ps`. If you do keep a `cpfp-key.hex`, write it with
+`chmod 0600` and delete it after recovery. (The CLI already writes its own
+outputs with mode `0600`.)
 
 This signs every `feeBumpPsbt` in the package JSON and adds `signedChildTx` to
 each entry. The output is ready for broadcast. The SDK chains the CPFP UTXO
