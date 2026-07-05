@@ -73,6 +73,36 @@ export async function getTransaction(txid, baseUrl) {
   return response.json();
 }
 
+export async function getAddressUtxos(address, baseUrl) {
+  const url = `${baseUrl}/address/${address}/utxo`;
+  const response = await fetchWithTimeout(url, { method: "GET" });
+  if (!response.ok) {
+    const body = await safeText(response);
+    throw new EsploraError(
+      `Failed to fetch address UTXOs (HTTP ${response.status}): ${body}`,
+      { status: response.status, body, url },
+    );
+  }
+  return response.json();
+}
+
+export async function getTipHeight(baseUrl) {
+  const url = `${baseUrl}/blocks/tip/height`;
+  const response = await fetchWithTimeout(url, { method: "GET" });
+  if (!response.ok) {
+    const body = await safeText(response);
+    throw new EsploraError(
+      `Failed to fetch tip height (HTTP ${response.status}): ${body}`,
+      { status: response.status, body, url },
+    );
+  }
+  const height = Number((await response.text()).trim());
+  if (!Number.isInteger(height)) {
+    throw new EsploraError(`Esplora returned a non-integer tip height`, { url });
+  }
+  return height;
+}
+
 async function handlePackageResponse(response, url) {
   const body = await safeText(response);
   if (!response.ok) {
