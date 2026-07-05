@@ -6,8 +6,39 @@ import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { NETWORK, TEST_NETWORK, Transaction, p2tr } from "@scure/btc-signer";
 
-const REGTEST_NETWORK = { ...TEST_NETWORK, bech32: "bcrt" };
-const NETWORKS = new Map([
+import type {
+  AccountNumberInput,
+  LeafPackage,
+  LeafSweep,
+  PackageFile,
+  SweepResult,
+  TxPackage,
+} from "./types.ts";
+
+type BtcNetwork = typeof NETWORK;
+
+interface NetworkConfig {
+  btc: BtcNetwork;
+  coinType: number;
+  defaultAccounts: number[];
+}
+
+interface RefundKeyCandidate {
+  path: string;
+  label: string;
+  privateKey: Uint8Array;
+  xonlyPublicKey: Uint8Array;
+  address: string | undefined;
+  script: Uint8Array;
+}
+
+interface RefundOutput {
+  amount: bigint;
+  script: Uint8Array;
+}
+
+const REGTEST_NETWORK: BtcNetwork = { ...TEST_NETWORK, bech32: "bcrt" };
+const NETWORKS = new Map<string, NetworkConfig>([
   ["MAINNET", { btc: NETWORK, coinType: 0, defaultAccounts: [1] }],
   ["TESTNET", { btc: TEST_NETWORK, coinType: 1, defaultAccounts: [1] }],
   ["SIGNET", { btc: TEST_NETWORK, coinType: 1, defaultAccounts: [1] }],
@@ -16,10 +47,21 @@ const NETWORKS = new Map([
 ]);
 
 export class SweepError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "SweepError";
   }
+}
+
+interface ConstructSweepTransactionsOptions {
+  seed: string;
+  passphrase?: string;
+  network: string;
+  packages: unknown;
+  destination?: string;
+  feeRate: number;
+  accountNumber?: AccountNumberInput;
+  dustLimitSats?: bigint | number;
 }
 
 export function constructSweepTransactions({
@@ -31,7 +73,7 @@ export function constructSweepTransactions({
   feeRate,
   accountNumber,
   dustLimitSats = 330n,
-}) {
+}: ConstructSweepTransactionsOptions): SweepResult {
   const networkConfig = networkConfigFor(network);
   const packageJson = validatePackageJson(packages);
   const destinationAddress = destination ?? packageJson.destination;
@@ -44,7 +86,7 @@ export function constructSweepTransactions({
   const root = HDKey.fromMasterSeed(seedBytes);
   const accounts = candidateAccounts(accountNumber, networkConfig.defaultAccounts);
 
-  const sweeps = [];
+  const sweeps: LeafSweep[] = [];
   for (const leafPackage of packageJson.packages) {
     const refundTxHex = lastTxPackage(leafPackage)?.tx;
     if (!refundTxHex) {
@@ -71,11 +113,20 @@ export function constructSweepTransactions({
   };
 }
 
-export function parseSeed(input, passphrase = "") {
+export function parseSeed(input: string, passphrase = ""): Uint8Array {
   const value = String(input ?? "").trim();
   if (!value) throw new SweepError("Spark seed or mnemonic is required");
   if (validateMnemonic(value, wordlist)) {
-    return mnemonicToSeedSync(value, passphrase, wordlist);
+    // NOTE: @scure/bip39's mnemonicToSeedSync takes only (mnemonic, passphrase);
+    // the original code passes a third `wordlist` argument that the API ignores.
+    // Preserved as-is (runtime behavior unchanged) via a widened call signature.
+    return (
+      mnemonicToSeedSync as (
+        mnemonic: string,
+        passphrase?: string,
+        wordlist?: unknown,
+      ) => Uint8Array
+    )(value, passphrase, wordlist);
   }
   const hex = value.startsWith("0x") ? value.slice(2) : value;
   if (!/^[0-9a-fA-F]+$/.test(hex)) {
@@ -88,7 +139,17 @@ export function parseSeed(input, passphrase = "") {
   return seed;
 }
 
-export function deriveRefundKeyCandidates({ seed, network, leafId, accountNumber }) {
+export function deriveRefundKeyCandidates({
+  seed,
+  network,
+  leafId,
+  accountNumber,
+}: {
+  seed: string;
+  network: string;
+  leafId: string;
+  accountNumber?: AccountNumberInput;
+}): RefundKeyCandidate[] {
   const networkConfig = networkConfigFor(network);
   const root = HDKey.fromMasterSeed(parseSeed(seed));
   return refundKeyCandidates({
@@ -109,7 +170,16 @@ function constructLeafSweep({
   destination,
   feeRate,
   dustLimitSats,
-}) {
+}: {
+  leafId: string | null | undefined;
+  refundTxHex: string;
+  root: HDKey;
+  accounts: number[];
+  networkConfig: NetworkConfig;
+  destination: string;
+  feeRate: number;
+  dustLimitSats: bigint;
+}): LeafSweep {
   const refundTx = Transaction.fromRaw(hexToBytes(refundTxHex), {
     allowUnknownOutputs: true,
   });
@@ -117,10 +187,14 @@ function constructLeafSweep({
   if (!refundOutput?.script || refundOutput.amount === undefined) {
     throw new SweepError(`Refund tx for leaf ${leafId} has no output 0`);
   }
+  const output: RefundOutput = {
+    amount: refundOutput.amount,
+    script: refundOutput.script,
+  };
   const matchingKey = findMatchingRefundKey({
     root,
     leafId,
-    script: refundOutput.script,
+    script: output.script,
     accounts,
     coinType: networkConfig.coinType,
     btcNetwork: networkConfig.btc,
@@ -133,7 +207,7 @@ function constructLeafSweep({
 
   const firstPass = buildSignedSweepTx({
     refundTxid: refundTx.id,
-    refundOutput,
+    refundOutput: output,
     destination,
     feeSats: 1n,
     privateKey: matchingKey.privateKey,
@@ -141,14 +215,14 @@ function constructLeafSweep({
     btcNetwork: networkConfig.btc,
   });
   const feeSats = BigInt(Math.ceil(Number(firstPass.vsize) * feeRate));
-  if (refundOutput.amount <= feeSats + dustLimitSats) {
+  if (output.amount <= feeSats + dustLimitSats) {
     throw new SweepError(
-      `Refund output for leaf ${leafId} is too small to sweep: value=${refundOutput.amount} fee=${feeSats} dustLimit=${dustLimitSats}`,
+      `Refund output for leaf ${leafId} is too small to sweep: value=${output.amount} fee=${feeSats} dustLimit=${dustLimitSats}`,
     );
   }
   const finalSweep = buildSignedSweepTx({
     refundTxid: refundTx.id,
-    refundOutput,
+    refundOutput: output,
     destination,
     feeSats,
     privateKey: matchingKey.privateKey,
@@ -160,7 +234,7 @@ function constructLeafSweep({
     leafId,
     refundTxid: refundTx.id,
     refundVout: 0,
-    refundValueSats: refundOutput.amount.toString(),
+    refundValueSats: output.amount.toString(),
     refundAddress: matchingKey.address,
     derivationPath: matchingKey.path,
     sweepTxid: finalSweep.txid,
@@ -178,7 +252,15 @@ function buildSignedSweepTx({
   privateKey,
   tapInternalKey,
   btcNetwork,
-}) {
+}: {
+  refundTxid: string;
+  refundOutput: RefundOutput;
+  destination: string;
+  feeSats: bigint;
+  privateKey: Uint8Array;
+  tapInternalKey: Uint8Array;
+  btcNetwork: BtcNetwork;
+}): { txid: string; hex: string; fee: bigint; vsize: number } {
   const outputAmount = refundOutput.amount - feeSats;
   if (outputAmount <= 0n) {
     throw new SweepError("Sweep fee is greater than or equal to refund output value");
@@ -199,15 +281,41 @@ function buildSignedSweepTx({
   return { txid: tx.id, hex: tx.hex, fee: tx.fee, vsize: tx.vsize };
 }
 
-function findMatchingRefundKey({ root, leafId, script, accounts, coinType, btcNetwork }) {
+function findMatchingRefundKey({
+  root,
+  leafId,
+  script,
+  accounts,
+  coinType,
+  btcNetwork,
+}: {
+  root: HDKey;
+  leafId: string | null | undefined;
+  script: Uint8Array;
+  accounts: number[];
+  coinType: number;
+  btcNetwork: BtcNetwork;
+}): RefundKeyCandidate | undefined {
   return refundKeyCandidates({ root, leafId, accounts, coinType, btcNetwork }).find(
     (candidate) => bytesToHex(candidate.script) === bytesToHex(script),
   );
 }
 
-function refundKeyCandidates({ root, leafId, accounts, coinType, btcNetwork }) {
+function refundKeyCandidates({
+  root,
+  leafId,
+  accounts,
+  coinType,
+  btcNetwork,
+}: {
+  root: HDKey;
+  leafId: string | null | undefined;
+  accounts: number[];
+  coinType: number;
+  btcNetwork: BtcNetwork;
+}): RefundKeyCandidate[] {
   const signingChildIndex = leafSigningChildIndex(leafId);
-  const paths = [];
+  const paths: Array<{ path: string; label: string }> = [];
   for (const account of accounts) {
     paths.push(
       { path: `m/8797555'/${account}'/0'`, label: "identity key" },
@@ -239,34 +347,38 @@ function refundKeyCandidates({ root, leafId, accounts, coinType, btcNetwork }) {
   });
 }
 
-function leafSigningChildIndex(leafId) {
+function leafSigningChildIndex(leafId: string | null | undefined): number {
   const hash = sha256(new TextEncoder().encode(String(leafId)));
   return (
-    ((hash[0] << 24) | (hash[1] << 16) | (hash[2] << 8) | hash[3]) >>> 0
+    ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0
   ) % 0x80000000;
 }
 
-function validatePackageJson(packages) {
+function validatePackageJson(packages: unknown): PackageFile {
   if (!packages || typeof packages !== "object" || Array.isArray(packages)) {
     throw new SweepError("Package JSON must be an object");
   }
-  if (!Array.isArray(packages.packages) || packages.packages.length === 0) {
+  const record = packages as Record<string, unknown>;
+  if (!Array.isArray(record.packages) || record.packages.length === 0) {
     throw new SweepError("Package JSON must include at least one package");
   }
-  for (const leafPackage of packages.packages) {
+  for (const leafPackage of record.packages) {
     if (!leafPackage?.leafId || !Array.isArray(leafPackage.txPackages)) {
       throw new SweepError("Each package must include leafId and txPackages");
     }
   }
-  return packages;
+  return record as PackageFile;
 }
 
-function lastTxPackage(leafPackage) {
-  return leafPackage.txPackages[leafPackage.txPackages.length - 1];
+function lastTxPackage(leafPackage: LeafPackage): TxPackage | undefined {
+  return leafPackage.txPackages![leafPackage.txPackages!.length - 1];
 }
 
-function candidateAccounts(accountNumber, defaults) {
-  const values = [];
+function candidateAccounts(
+  accountNumber: AccountNumberInput,
+  defaults: number[],
+): number[] {
+  const values: number[] = [];
   if (accountNumber !== undefined && accountNumber !== null && accountNumber !== "") {
     const parsed = Number(accountNumber);
     if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -280,14 +392,14 @@ function candidateAccounts(accountNumber, defaults) {
   return values;
 }
 
-function networkConfigFor(network) {
+function networkConfigFor(network: string): NetworkConfig {
   const normalized = String(network ?? "").toUpperCase();
   const config = NETWORKS.get(normalized);
   if (!config) throw new SweepError(`Unsupported network for sweep: ${network}`);
   return config;
 }
 
-function validateFeeRate(feeRate) {
+function validateFeeRate(feeRate: number): number {
   const value = Number(feeRate);
   if (!Number.isFinite(value) || value <= 0) {
     throw new SweepError("--fee-rate must be a positive number");
@@ -295,11 +407,11 @@ function validateFeeRate(feeRate) {
   return value;
 }
 
-function validateAddress(address, btcNetwork) {
+function validateAddress(address: string, btcNetwork: BtcNetwork): void {
   try {
     const tx = new Transaction({ allowUnknownOutputs: true });
     tx.addOutputAddress(address, 1n, btcNetwork);
   } catch (error) {
-    throw new SweepError(`Invalid destination address for network: ${error.message}`);
+    throw new SweepError(`Invalid destination address for network: ${(error as Error).message}`);
   }
 }

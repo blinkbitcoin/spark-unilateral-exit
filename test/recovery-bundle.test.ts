@@ -4,7 +4,8 @@ import {
   RecoveryBundleExportError,
   exportRecoveryBundleFromSeed,
   exportRecoveryBundleFromWallet,
-} from "../src/recovery-bundle.js";
+} from "../src/recovery-bundle.ts";
+import type { SparkWalletLike } from "../src/types.ts";
 
 describe("recovery bundle export", () => {
   it("exports live wallet leaves into the recovery bundle schema", async () => {
@@ -121,7 +122,11 @@ describe("recovery bundle export", () => {
   });
 });
 
-function fakeWallet({ leaves }) {
+function fakeWallet({ leaves }: { leaves: any[] }): SparkWalletLike & {
+  synced: boolean;
+  cleaned: boolean;
+  reads: number;
+} {
   return {
     synced: false,
     cleaned: false,

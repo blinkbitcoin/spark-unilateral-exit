@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadSeed, readHiddenLine } from "../src/cli-input.js";
+import { loadSeed, readHiddenLine } from "../src/cli-input.ts";
 
 describe("CLI seed input", () => {
   afterEach(() => {
@@ -46,7 +46,12 @@ describe("CLI seed input", () => {
 });
 
 function createTtyInput() {
-  const input = new PassThrough();
+  const input = new PassThrough() as PassThrough & {
+    isTTY?: boolean;
+    isRaw?: boolean;
+    rawModes: boolean[];
+    setRawMode?: (mode: boolean) => unknown;
+  };
   input.isTTY = true;
   input.isRaw = false;
   input.rawModes = [];
@@ -59,7 +64,11 @@ function createTtyInput() {
 }
 
 function createTtyOutput() {
-  const output = new PassThrough();
+  const output = new PassThrough() as PassThrough & {
+    isTTY?: boolean;
+    write: (chunk: any) => boolean;
+    text: () => string;
+  };
   let written = "";
   output.isTTY = true;
   output.write = (chunk) => {

@@ -6,7 +6,7 @@ import {
   SweepError,
   constructSweepTransactions,
   deriveRefundKeyCandidates,
-} from "../src/sweep.js";
+} from "../src/sweep.ts";
 
 const SEED =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -22,12 +22,12 @@ describe("sweep construction", () => {
       accountNumber: 1,
     }).find((candidate) => candidate.label === "node signing key");
 
-    const refundTx = createSignedRefundTx(refundKey.script, 10_000n);
+    const refundTx = createSignedRefundTx(refundKey!.script, 10_000n);
     const result = constructSweepTransactions({
       seed: SEED,
       network: "REGTEST",
       packages: {
-        destination: refundKey.address,
+        destination: refundKey!.address,
         packages: [{ leafId, txPackages: [{ tx: refundTx.hex }] }],
       },
       feeRate: 1,
@@ -40,17 +40,17 @@ describe("sweep construction", () => {
       refundTxid: refundTx.id,
       refundVout: 0,
       refundValueSats: "10000",
-      refundAddress: refundKey.address,
+      refundAddress: refundKey!.address,
       derivationPath: "m/8797555'/1'/1'/1094762254'",
       feeSats: "111",
       vsize: 111,
     });
 
     const sweepTx = Transaction.fromRaw(
-      Uint8Array.from(Buffer.from(result.sweeps[0].sweepTx, "hex")),
+      Uint8Array.from(Buffer.from(result.sweeps[0]!.sweepTx, "hex")),
       { allowUnknownOutputs: true },
     );
-    expect(sweepTx.id).toBe(result.sweeps[0].sweepTxid);
+    expect(sweepTx.id).toBe(result.sweeps[0]!.sweepTxid);
   });
 
   it("fails closed when the seed does not match the refund output", () => {
@@ -60,7 +60,7 @@ describe("sweep construction", () => {
       leafId: "leaf-1",
       accountNumber: 1,
     }).find((candidate) => candidate.label === "node signing key");
-    const refundTx = createSignedRefundTx(refundKey.script, 10_000n);
+    const refundTx = createSignedRefundTx(refundKey!.script, 10_000n);
 
     expect(() =>
       constructSweepTransactions({
@@ -68,7 +68,7 @@ describe("sweep construction", () => {
           "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
         network: "REGTEST",
         packages: {
-          destination: refundKey.address,
+          destination: refundKey!.address,
           packages: [{ leafId: "leaf-1", txPackages: [{ tx: refundTx.hex }] }],
         },
         feeRate: 1,
@@ -78,7 +78,7 @@ describe("sweep construction", () => {
   });
 });
 
-function createSignedRefundTx(refundScript, amount) {
+function createSignedRefundTx(refundScript: Uint8Array, amount: bigint) {
   const fundingPrivateKey = new Uint8Array(32).fill(2);
   const fundingXonly = secp256k1.getPublicKey(fundingPrivateKey, true).slice(1);
   const fundingOutput = p2tr(fundingXonly, undefined, REGTEST);

@@ -1,8 +1,33 @@
 import fs from "node:fs";
 
-export async function loadSeed(args, options = {}) {
+import type { CliArgs } from "./types.ts";
+
+interface HiddenLineInput {
+  isTTY?: boolean;
+  isRaw?: boolean;
+  setRawMode?: (mode: boolean) => unknown;
+  on(event: "data", listener: (chunk: Buffer) => void): unknown;
+  off(event: "data", listener: (chunk: Buffer) => void): unknown;
+  pause(): unknown;
+  resume(): unknown;
+}
+
+interface HiddenLineOutput {
+  isTTY?: boolean;
+  write(chunk: string): unknown;
+}
+
+export interface SeedPromptOptions {
+  input?: HiddenLineInput;
+  output?: HiddenLineOutput;
+}
+
+export async function loadSeed(
+  args: CliArgs,
+  options: SeedPromptOptions = {},
+): Promise<string> {
   if (args["seed-file"] && args["seed-file"] !== true) {
-    return fs.readFileSync(args["seed-file"], "utf8").trim();
+    return fs.readFileSync(args["seed-file"] as string, "utf8").trim();
   }
   if (args.seed && args.seed !== true) return String(args.seed).trim();
   if (process.env.SPARK_SEED) return process.env.SPARK_SEED.trim();
@@ -10,22 +35,25 @@ export async function loadSeed(args, options = {}) {
 }
 
 export function readHiddenLine(
-  prompt,
-  { input = process.stdin, output = process.stderr } = {},
-) {
+  prompt: string,
+  {
+    input = process.stdin as unknown as HiddenLineInput,
+    output = process.stderr as unknown as HiddenLineOutput,
+  }: SeedPromptOptions = {},
+): Promise<string> {
   if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
     throw new Error(
       "--seed-file, --seed, SPARK_SEED, or an interactive terminal is required",
     );
   }
 
-  return new Promise((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let value = "";
     const wasRaw = input.isRaw;
 
     const cleanup = () => {
       input.off("data", onData);
-      input.setRawMode(Boolean(wasRaw));
+      input.setRawMode!(Boolean(wasRaw));
       input.pause();
     };
 
@@ -40,7 +68,7 @@ export function readHiddenLine(
       resolve(seed);
     };
 
-    const onData = (chunk) => {
+    const onData = (chunk: Buffer) => {
       for (const char of chunk.toString("utf8")) {
         if (char === "\u0003") {
           cleanup();
@@ -60,7 +88,7 @@ export function readHiddenLine(
       }
     };
 
-    input.setRawMode(true);
+    input.setRawMode!(true);
     input.resume();
     input.on("data", onData);
     output.write(prompt);

@@ -1,11 +1,13 @@
+import type { CpfpUtxo } from "./types.ts";
+
 export class CpfpUtxoParseError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "CpfpUtxoParseError";
   }
 }
 
-export function parseCpfpUtxo(input) {
+export function parseCpfpUtxo(input: string): CpfpUtxo {
   const parts = input.split(":");
   if (parts.length !== 5) {
     throw new CpfpUtxoParseError(
@@ -13,7 +15,13 @@ export function parseCpfpUtxo(input) {
     );
   }
 
-  const [txid, voutRaw, valueRaw, script, publicKey] = parts;
+  const [txid, voutRaw, valueRaw, script, publicKey] = parts as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
   if (!isHex(txid) || txid.length !== 64) {
     throw new CpfpUtxoParseError("CPFP UTXO txid must be 32-byte hex");
   }
@@ -21,7 +29,7 @@ export function parseCpfpUtxo(input) {
   if (!Number.isSafeInteger(vout) || vout < 0) {
     throw new CpfpUtxoParseError("CPFP UTXO vout must be a non-negative integer");
   }
-  let value;
+  let value: bigint;
   try {
     value = BigInt(valueRaw);
   } catch {
@@ -40,14 +48,15 @@ export function parseCpfpUtxo(input) {
   return { txid, vout, value, script, publicKey };
 }
 
-export function serializeForJson(value) {
+export function serializeForJson(value: unknown): string {
   return JSON.stringify(
     value,
-    (_key, item) => (typeof item === "bigint" ? item.toString() : item),
+    (_key: string, item: unknown) =>
+      typeof item === "bigint" ? item.toString() : item,
     2,
   );
 }
 
-function isHex(value) {
+function isHex(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && /^[0-9a-fA-F]+$/.test(value);
 }

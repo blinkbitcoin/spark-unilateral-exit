@@ -5,7 +5,7 @@ import {
   submitPackage,
   broadcastTransaction,
   getTransaction,
-} from "../src/esplora.js";
+} from "../src/esplora.ts";
 
 describe("esploraBaseUrl", () => {
   it("returns default mainnet URL", () => {
@@ -51,7 +51,7 @@ describe("esploraBaseUrl", () => {
 });
 
 describe("submitPackage", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
@@ -80,7 +80,7 @@ describe("submitPackage", () => {
     await submitPackage(["aabb", "ccdd"], "https://blockstream.info/api");
 
     expect(globalThis.fetch).toHaveBeenCalledOnce();
-    const [url, options] = globalThis.fetch.mock.calls[0];
+    const [url, options] = (globalThis.fetch as any).mock.calls[0];
     expect(url).toBe("https://blockstream.info/api/txs/package");
     expect(options.method).toBe("POST");
     expect(options.headers["Content-Type"]).toBe("application/json");
@@ -137,7 +137,7 @@ describe("submitPackage", () => {
 });
 
 describe("broadcastTransaction", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
@@ -163,7 +163,7 @@ describe("broadcastTransaction", () => {
     const txid = await broadcastTransaction("deadbeef", "https://example.com");
     expect(txid).toBe("abc123def456");
 
-    const [url, options] = globalThis.fetch.mock.calls[0];
+    const [url, options] = (globalThis.fetch as any).mock.calls[0];
     expect(url).toBe("https://example.com/tx");
     expect(options.method).toBe("POST");
     expect(options.headers["Content-Type"]).toBe("text/plain");
@@ -188,7 +188,7 @@ describe("broadcastTransaction", () => {
 });
 
 describe("getTransaction", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;

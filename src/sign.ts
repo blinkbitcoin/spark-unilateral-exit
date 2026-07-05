@@ -1,16 +1,26 @@
 import { hexToBytes, bytesToHex } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 
+import type { LeafPackage } from "./types.ts";
+
 export class SignError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "SignError";
   }
 }
 
-export function signPackages({ packages, privateKey }) {
+interface SignPackagesOptions {
+  packages: LeafPackage[];
+  privateKey: string | Uint8Array;
+}
+
+export function signPackages({
+  packages,
+  privateKey,
+}: SignPackagesOptions): LeafPackage[] {
   const keyBytes = parsePrivateKey(privateKey);
-  const signed = [];
+  const signed: LeafPackage[] = [];
 
   for (const leafPackage of packages) {
     if (!leafPackage?.leafId || !Array.isArray(leafPackage.txPackages)) {
@@ -33,7 +43,10 @@ export function signPackages({ packages, privateKey }) {
   return signed;
 }
 
-export function signPsbt(psbtHex, privateKey) {
+export function signPsbt(
+  psbtHex: string,
+  privateKey: string | Uint8Array,
+): string {
   const keyBytes =
     typeof privateKey === "string" ? parsePrivateKey(privateKey) : privateKey;
 
@@ -58,7 +71,7 @@ export function signPsbt(psbtHex, privateKey) {
   return bytesToHex(tx.toBytes(true, true));
 }
 
-function parsePrivateKey(input) {
+function parsePrivateKey(input: string | Uint8Array): Uint8Array {
   if (input instanceof Uint8Array) return input;
   const hex = String(input).trim();
   if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
@@ -67,7 +80,10 @@ function parsePrivateKey(input) {
   return hexToBytes(hex);
 }
 
-function isEphemeralAnchorOutput(script, amount) {
+function isEphemeralAnchorOutput(
+  script: Uint8Array | undefined,
+  amount: bigint | undefined,
+): boolean {
   return Boolean(
     amount === 0n &&
       script &&

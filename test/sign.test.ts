@@ -4,9 +4,9 @@ import { secp256k1 } from "@noble/curves/secp256k1";
 import { ripemd160 } from "@noble/hashes/legacy";
 import { sha256 } from "@noble/hashes/sha2";
 import { Address, OutScript, Transaction, p2wpkh } from "@scure/btc-signer";
-import { signPackages, signPsbt, SignError } from "../src/sign.js";
+import { signPackages, signPsbt, SignError } from "../src/sign.ts";
 
-function makeTestPsbt(privateKey) {
+function makeTestPsbt(privateKey: Uint8Array) {
   const publicKey = secp256k1.getPublicKey(privateKey, true);
   const hash = ripemd160(sha256(publicKey));
   const payment = p2wpkh(publicKey);
@@ -86,13 +86,13 @@ describe("signPackages", () => {
     });
 
     expect(signed).toHaveLength(1);
-    expect(signed[0].leafId).toBe("leaf-1");
-    expect(signed[0].txPackages).toHaveLength(2);
+    expect(signed[0]!.leafId).toBe("leaf-1");
+    expect(signed[0]!.txPackages).toHaveLength(2);
 
-    for (const txPkg of signed[0].txPackages) {
+    for (const txPkg of signed[0]!.txPackages!) {
       expect(txPkg.signedChildTx).toBeDefined();
       expect(typeof txPkg.signedChildTx).toBe("string");
-      expect(txPkg.signedChildTx.length).toBeGreaterThan(0);
+      expect(txPkg.signedChildTx!.length).toBeGreaterThan(0);
       expect(txPkg.tx).toBeDefined();
       expect(txPkg.feeBumpPsbt).toBeDefined();
     }
@@ -117,9 +117,9 @@ describe("signPackages", () => {
       privateKey: bytesToHex(privateKey),
     });
 
-    expect(signed[0].extraField).toBe("preserved");
-    expect(signed[0].txPackages[0].someOtherField).toBe(42);
-    expect(signed[0].txPackages[0].tx).toBe("aabb");
+    expect(signed[0]!.extraField).toBe("preserved");
+    expect(signed[0]!.txPackages![0]!.someOtherField).toBe(42);
+    expect(signed[0]!.txPackages![0]!.tx).toBe("aabb");
   });
 
   it("handles multiple leaves", () => {
@@ -147,10 +147,10 @@ describe("signPackages", () => {
     });
 
     expect(signed).toHaveLength(2);
-    expect(signed[0].txPackages).toHaveLength(1);
-    expect(signed[1].txPackages).toHaveLength(3);
+    expect(signed[0]!.txPackages).toHaveLength(1);
+    expect(signed[1]!.txPackages).toHaveLength(3);
     for (const leaf of signed) {
-      for (const txPkg of leaf.txPackages) {
+      for (const txPkg of leaf.txPackages!) {
         expect(txPkg.signedChildTx).toBeDefined();
       }
     }
@@ -201,6 +201,6 @@ describe("signPackages", () => {
       privateKey,
     });
 
-    expect(signed[0].txPackages[0].signedChildTx).toBeDefined();
+    expect(signed[0]!.txPackages![0]!.signedChildTx).toBeDefined();
   });
 });
