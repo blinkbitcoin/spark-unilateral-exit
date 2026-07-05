@@ -1,13 +1,26 @@
-import { parseCpfpUtxo } from "./cpfp.js";
+import { parseCpfpUtxo } from "./cpfp.ts";
+import type { CliArgValue, RecoveryBundle, UsdbBalance } from "./types.ts";
 
 export class RecoveryPlanError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "RecoveryPlanError";
   }
 }
 
-export function createRecoveryPlan({ bundle, destination, feeRate, cpfpUtxos }) {
+interface CreateRecoveryPlanOptions {
+  bundle: RecoveryBundle;
+  destination: string;
+  feeRate: number;
+  cpfpUtxos: string[];
+}
+
+export function createRecoveryPlan({
+  bundle,
+  destination,
+  feeRate,
+  cpfpUtxos,
+}: CreateRecoveryPlanOptions) {
   validateDestination(destination);
   validateFeeRate(feeRate);
 
@@ -42,7 +55,13 @@ export function createRecoveryPlan({ bundle, destination, feeRate, cpfpUtxos }) 
   };
 }
 
-export function assertSeedOnlyIsNotOfflineRecoverable({ seed, bundle }) {
+export function assertSeedOnlyIsNotOfflineRecoverable({
+  seed,
+  bundle,
+}: {
+  seed: CliArgValue;
+  bundle: RecoveryBundle | null | undefined;
+}) {
   if (seed && !bundle) {
     throw new RecoveryPlanError(
       "Seed-only recovery cannot discover Spark leaves while operators are offline. Provide the latest saved recovery bundle.",
@@ -50,19 +69,19 @@ export function assertSeedOnlyIsNotOfflineRecoverable({ seed, bundle }) {
   }
 }
 
-function validateDestination(destination) {
+function validateDestination(destination: string) {
   if (typeof destination !== "string" || destination.trim().length < 14) {
     throw new RecoveryPlanError("Destination Bitcoin address is required");
   }
 }
 
-function validateFeeRate(feeRate) {
+function validateFeeRate(feeRate: number) {
   if (!Number.isFinite(feeRate) || feeRate <= 0) {
     throw new RecoveryPlanError("Fee rate must be a positive number");
   }
 }
 
-function describeUsdb(usdb) {
+function describeUsdb(usdb: UsdbBalance | undefined) {
   if (!usdb) {
     return {
       detected: false,

@@ -4,14 +4,15 @@
   "private": true,
   "type": "module",
   "bin": {
-    "spark-unilateral-exit": "./src/cli.js"
+    "spark-unilateral-exit": "./src/cli.ts"
   },
   "scripts": {
     "test": "vitest run --coverage",
     "test:unit": "vitest run",
     "test:e2e": "RUN_SPARK_E2E=1 vitest run test/e2e --testTimeout 300000",
-    "plan": "node src/cli.js plan",
-    "refresh-bundle": "node src/cli.js refresh-bundle",
+    "typecheck": "tsc --noEmit",
+    "plan": "node src/cli.ts plan",
+    "refresh-bundle": "node src/cli.ts refresh-bundle",
     "refresh-recovery-bundle": "nix develop --command cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml --"
   },
   "dependencies": {
@@ -23,10 +24,12 @@
     "@scure/btc-signer": "^1.5.0"
   },
   "devDependencies": {
+    "@types/node": "^22.15.0",
     "@vitest/coverage-v8": "^4.1.9",
+    "typescript": "^5.7.0",
     "vitest": "^4.1.9"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   }
 }

@@ -101,7 +101,7 @@ amount to send, and assemble the string for you. This is the primary path for
 mobile/programmatic recovery and avoids manual `listunspent` export.
 
 ```sh
-node src/cli.js cpfp-address \
+node src/cli.ts cpfp-address \
   --bundle ../recovery-bundle.json \
   --seed-file ../.spark-seed.txt \
   --network MAINNET \
@@ -111,7 +111,7 @@ node src/cli.js cpfp-address \
 Send at least the printed `requiredSats` to the printed `cpfpAddress`, then:
 
 ```sh
-node src/cli.js watch-cpfp \
+node src/cli.ts watch-cpfp \
   --bundle ../recovery-bundle.json \
   --seed-file ../.spark-seed.txt \
   --network MAINNET \
@@ -221,7 +221,7 @@ If the funding address came from the seed-derived path in step 2, sign with the
 same seed — no separate key file needed:
 
 ```sh
-node src/cli.js sign-packages \
+node src/cli.ts sign-packages \
   --packages recovery-packages.json \
   --seed-file ../.spark-seed.txt \
   --network MAINNET \
@@ -233,7 +233,7 @@ whatever you passed to `cpfp-address`). Alternatively, if the CPFP private key i
 available as hex (e.g. an app-managed key), pass it directly:
 
 ```sh
-node src/cli.js sign-packages \
+node src/cli.ts sign-packages \
   --packages recovery-packages.json \
   --key-file cpfp-key.hex \
   --out recovery-packages-signed.json
@@ -297,7 +297,7 @@ Add the signed CPFP child hex to each `txPackages[]` entry as `signedChildTx`,
 then broadcast all packages with the built-in CLI:
 
 ```sh
-node src/cli.js broadcast \
+node src/cli.ts broadcast \
   --packages recovery-packages-signed.json \
   --network MAINNET
 ```
@@ -397,7 +397,7 @@ Output shape:
 Broadcast each `sweepTx` as a normal Bitcoin transaction. With the CLI:
 
 ```sh
-node src/cli.js broadcast-sweep \
+node src/cli.ts broadcast-sweep \
   --sweeps sweep-transactions.json \
   --network MAINNET
 ```
@@ -411,7 +411,7 @@ bitcoin-cli sendrawtransaction "<sweepTx>"
 Check confirmation status:
 
 ```sh
-node src/cli.js tx-status --txid <txid> --network MAINNET
+node src/cli.ts tx-status --txid <txid> --network MAINNET
 ```
 
 Confirm the destination output on chain before considering recovery complete.

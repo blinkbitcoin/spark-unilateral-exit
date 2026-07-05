@@ -6,6 +6,7 @@ import path from "node:path";
 import tls from "node:tls";
 import http from "node:http";
 import { execFile } from "node:child_process";
+import type { AddressInfo } from "node:net";
 import { promisify } from "node:util";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
@@ -18,14 +19,14 @@ import {
 } from "@buildonspark/spark-sdk/test-utils";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
-import { parseRecoveryBundle } from "../../src/bundle.js";
+import { parseRecoveryBundle } from "../../src/bundle.ts";
 
 const runE2e = process.env.RUN_SPARK_E2E === "1";
 const execFileAsync = promisify(execFile);
 const repoRoot = new URL("../..", import.meta.url).pathname;
 
-function runCli(args) {
-  return execFileAsync("node", ["src/cli.js", ...args], {
+function runCli(args: string[]) {
+  return execFileAsync("node", ["src/cli.ts", ...args], {
     cwd: repoRoot,
     timeout: 60_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -35,12 +36,19 @@ function runCli(args) {
 // Minimal Esplora stand-in: the local stack has no Esplora, so this serves the
 // real funding UTXO for the address-utxo and tip-height endpoints watch-cpfp
 // polls, letting the actual CLI + Esplora client run end to end.
-async function startMockEsplora({ utxo, tipHeight }) {
+async function startMockEsplora({
+  utxo,
+  tipHeight,
+}: {
+  utxo: unknown;
+  tipHeight: number;
+}) {
   const server = http.createServer((req, res) => {
-    if (req.url.endsWith("/blocks/tip/height")) {
+    const url = req.url ?? "";
+    if (url.endsWith("/blocks/tip/height")) {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end(String(tipHeight));
-    } else if (req.url.includes("/address/") && req.url.endsWith("/utxo")) {
+    } else if (url.includes("/address/") && url.endsWith("/utxo")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify([utxo]));
     } else {
@@ -48,8 +56,10 @@ async function startMockEsplora({ utxo, tipHeight }) {
       res.end("[]");
     }
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
     close: () => new Promise((resolve) => server.close(resolve)),
@@ -86,7 +96,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     // like a hang). Emitted on stderr, which vitest streams live.
     const startedAt = Date.now();
     let lastStepAt = startedAt;
-    const step = (label) => {
+    const step = (label: string) => {
       const now = Date.now();
       const total = ((now - startedAt) / 1000).toFixed(1);
       const delta = ((now - lastStepAt) / 1000).toFixed(1);
@@ -95,7 +105,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
     };
 
     const faucet = BitcoinFaucet.getInstance();
-    const { Signer } = signerTypes[0];
+    const { Signer } = signerTypes[0]!;
     step("initializing Spark wallet");
     const { wallet, mnemonic } = await retry(
       () =>
@@ -124,7 +134,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       // Step 1: refresh-bundle (via standalone Rust tool, same as make refresh-recovery-bundle)
       step("refresh-bundle (standalone Rust tool)");
       const bundlePath = path.join(tempDir, "bundle.json");
-      await exportBundleWithStandaloneTool(mnemonic, tempDir, bundlePath);
+      await exportBundleWithStandaloneTool(mnemonic!, tempDir, bundlePath);
       const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
       assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
@@ -237,7 +247,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       const { stdout: sweepOut } = await execFileAsync(
         "node",
         [
-          "src/cli.js", "sweep",
+          "src/cli.ts", "sweep",
           "--packages", packagesPath,
           "--seed-file", seedFile,
           "--network", "LOCAL",
@@ -272,7 +282,11 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
   });
 });
 
-async function claimSingleDeposit(wallet, faucet, amount) {
+async function claimSingleDeposit(
+  wallet: SparkWalletTesting,
+  faucet: BitcoinFaucet,
+  amount: bigint,
+) {
   const leafId = randomUUID();
   await createNewTree(wallet, leafId, faucet, amount);
 
@@ -283,14 +297,18 @@ async function claimSingleDeposit(wallet, faucet, amount) {
       if (leaves.length !== 1) {
         throw new Error(`Expected one claimed leaf, got ${leaves.length}`);
       }
-      return leaves[0];
+      return leaves[0]!;
     },
     "wait for claimed Spark leaf",
     20,
   );
 }
 
-async function exportBundleWithStandaloneTool(mnemonic, tempDir, outFile) {
+async function exportBundleWithStandaloneTool(
+  mnemonic: string,
+  tempDir: string,
+  outFile: string,
+) {
   const seedFile = path.join(tempDir, "seed.txt");
   await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
 
@@ -334,7 +352,10 @@ async function exportBundleWithStandaloneTool(mnemonic, tempDir, outFile) {
   );
 }
 
-async function broadcastSignedPackageAndMineTimelock(faucet, txPackage) {
+async function broadcastSignedPackageAndMineTimelock(
+  faucet: BitcoinFaucet,
+  txPackage: { tx: string; signedChildTx: string },
+) {
   expect(txPackage?.tx).toBeTruthy();
   expect(txPackage?.signedChildTx).toBeTruthy();
 
@@ -356,8 +377,8 @@ async function broadcastSignedPackageAndMineTimelock(faucet, txPackage) {
   );
 }
 
-function fetchOperatorCertificate(port) {
-  return new Promise((resolve, reject) => {
+function fetchOperatorCertificate(port: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     const socket = tls.connect({
       host: "localhost",
       port,
@@ -381,12 +402,16 @@ function fetchOperatorCertificate(port) {
   });
 }
 
-function toPem(der) {
-  const body = der.toString("base64").match(/.{1,64}/g).join("\n");
+function toPem(der: Buffer) {
+  const body = der.toString("base64").match(/.{1,64}/g)!.join("\n");
   return `-----BEGIN CERTIFICATE-----\n${body}\n-----END CERTIFICATE-----\n`;
 }
 
-function assertBundleContainsLeaf(bundle, leaf, { requireBundledNodes = false } = {}) {
+function assertBundleContainsLeaf(
+  bundle: { leaves: any[]; nodes?: unknown[] },
+  leaf: { id: string; status: unknown; value: number | bigint },
+  { requireBundledNodes = false }: { requireBundledNodes?: boolean } = {},
+) {
   expect(bundle.leaves).toHaveLength(1);
   expect(bundle.leaves[0]).toMatchObject({
     id: leaf.id,
@@ -401,16 +426,21 @@ function assertBundleContainsLeaf(bundle, leaf, { requireBundledNodes = false } 
   expect(decodedLeaf.value).toBe(leaf.value);
 }
 
-async function retry(fn, label, attempts = 8) {
-  let lastError;
+async function retry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  attempts = 8,
+): Promise<T> {
+  let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await fn();
     } catch (error) {
       lastError = error;
       if (attempt === attempts) break;
+      const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `${label} failed on attempt ${attempt}/${attempts}; retrying: ${error.message}`,
+        `${label} failed on attempt ${attempt}/${attempts}; retrying: ${message}`,
       );
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
@@ -418,14 +448,14 @@ async function retry(fn, label, attempts = 8) {
   throw lastError;
 }
 
-function summarizePackage(parentHex, childHex) {
+function summarizePackage(parentHex: string, childHex: string) {
   return {
     parent: summarizeTx(parentHex),
     child: summarizeTx(childHex),
   };
 }
 
-function summarizeTx(txHex) {
+function summarizeTx(txHex: string) {
   const tx = Transaction.fromRaw(hexToBytes(txHex), {
     allowUnknownOutputs: true,
   });
@@ -445,7 +475,10 @@ function summarizeTx(txHex) {
   };
 }
 
-function assertSweepPaysDestination(sweep, destination) {
+function assertSweepPaysDestination(
+  sweep: { sweepTx: string; sweepTxid: string; refundTxid: string; refundVout: number },
+  destination: string,
+) {
   const sweepTx = Transaction.fromRaw(hexToBytes(sweep.sweepTx), {
     allowUnknownOutputs: true,
   });
@@ -454,15 +487,15 @@ function assertSweepPaysDestination(sweep, destination) {
   );
   expect(sweepTx.id).toBe(sweep.sweepTxid);
   expect(sweepTx.inputsLength).toBe(1);
-  expect(bytesToHex(sweepTx.getInput(0).txid)).toBe(sweep.refundTxid);
+  expect(bytesToHex(sweepTx.getInput(0).txid!)).toBe(sweep.refundTxid);
   expect(sweepTx.getInput(0).index).toBe(sweep.refundVout);
   expect(sweepTx.outputsLength).toBe(1);
   const output = sweepTx.getOutput(0);
   expect(output.amount).toBeGreaterThan(0n);
-  expect(bytesToHex(output.script)).toBe(bytesToHex(destinationScript));
+  expect(bytesToHex(output.script!)).toBe(bytesToHex(destinationScript));
 }
 
-function getTransactionIdForDiagnostics(tx) {
+function getTransactionIdForDiagnostics(tx: Transaction) {
   try {
     return tx.id;
   } catch {
@@ -470,12 +503,13 @@ function getTransactionIdForDiagnostics(tx) {
   }
 }
 
-function findOutputIndex(tx, script, amount) {
+function findOutputIndex(tx: Transaction, script: Uint8Array, amount: bigint) {
   for (let i = 0; i < tx.outputsLength; i += 1) {
     const output = tx.getOutput(i);
     if (
-      output?.amount === amount &&
-      bytesToHex(output.script) === bytesToHex(script)
+      output &&
+      output.amount === amount &&
+      bytesToHex(output.script!) === bytesToHex(script)
     ) {
       return i;
     }
@@ -483,16 +517,17 @@ function findOutputIndex(tx, script, amount) {
   throw new Error("Could not find CPFP funding output");
 }
 
-function packageSubmitSucceeded(result) {
+function packageSubmitSucceeded(result: unknown) {
   if (!result || typeof result !== "object") return false;
+  const record = result as Record<string, unknown>;
   const packageMsg = String(
-    result["package-msg"] ?? result.package_msg ?? "",
+    record["package-msg"] ?? record.package_msg ?? "",
   ).toLowerCase();
   if (packageMsg === "success") return true;
-  const txResults = result["tx-results"];
+  const txResults = record["tx-results"];
   if (!txResults || typeof txResults !== "object") return false;
   return Object.values(txResults).every((value) => {
-    const error = value?.error;
+    const error = (value as { error?: unknown } | null)?.error;
     return error === undefined || error === null || error === "";
   });
 }

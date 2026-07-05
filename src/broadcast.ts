@@ -4,18 +4,38 @@ import {
   submitPackage,
   broadcastTransaction,
   getTransaction,
-} from "./esplora.js";
+} from "./esplora.ts";
+import type { LeafPackage, SweepBroadcastInput } from "./types.ts";
 
 export { EsploraError };
+
+interface PackageSubmitEntry {
+  leafId: string;
+  packageIndex: number;
+  parentTx: string;
+  result: unknown;
+}
+
+interface BroadcastPackagesResult {
+  leafId: string;
+  packages: PackageSubmitEntry[];
+}
+
+interface BroadcastPackagesOptions {
+  packages: LeafPackage[];
+  network: string;
+  esploraUrl?: string;
+  onPackageSubmitted?: (entry: PackageSubmitEntry) => void;
+}
 
 export async function broadcastPackages({
   packages,
   network,
   esploraUrl,
   onPackageSubmitted,
-}) {
+}: BroadcastPackagesOptions): Promise<BroadcastPackagesResult[]> {
   const baseUrl = esploraBaseUrl(network, esploraUrl);
-  const results = [];
+  const results: BroadcastPackagesResult[] = [];
 
   for (const leafPackage of packages) {
     const leafId = leafPackage.leafId;
@@ -23,7 +43,7 @@ export async function broadcastPackages({
       throw new EsploraError(`Invalid package: missing leafId or txPackages`);
     }
 
-    const leafResults = [];
+    const leafResults: PackageSubmitEntry[] = [];
     for (let i = 0; i < leafPackage.txPackages.length; i += 1) {
       const txPkg = leafPackage.txPackages[i];
       if (!txPkg?.tx) {
@@ -43,7 +63,7 @@ export async function broadcastPackages({
         baseUrl,
       );
 
-      const entry = {
+      const entry: PackageSubmitEntry = {
         leafId,
         packageIndex: i,
         parentTx: txPkg.tx.slice(0, 16) + "...",
@@ -57,9 +77,26 @@ export async function broadcastPackages({
   return results;
 }
 
-export async function broadcastSweeps({ sweeps, network, esploraUrl }) {
+interface BroadcastSweepsOptions {
+  sweeps: SweepBroadcastInput[];
+  network: string;
+  esploraUrl?: string;
+}
+
+interface BroadcastSweepResult {
+  leafId: string | undefined;
+  sweepTxid: string;
+  expectedTxid: string | undefined;
+  match: boolean;
+}
+
+export async function broadcastSweeps({
+  sweeps,
+  network,
+  esploraUrl,
+}: BroadcastSweepsOptions): Promise<BroadcastSweepResult[]> {
   const baseUrl = esploraBaseUrl(network, esploraUrl);
-  const results = [];
+  const results: BroadcastSweepResult[] = [];
 
   for (const sweep of sweeps) {
     if (!sweep?.sweepTx) {
@@ -78,7 +115,25 @@ export async function broadcastSweeps({ sweeps, network, esploraUrl }) {
   return results;
 }
 
-export async function checkTransactionStatus({ txid, network, esploraUrl }) {
+interface CheckTransactionStatusOptions {
+  txid: string;
+  network: string;
+  esploraUrl?: string;
+}
+
+interface TransactionStatus {
+  txid: string;
+  found: boolean;
+  confirmed: boolean;
+  blockHeight?: number | null;
+  blockHash?: string | null;
+}
+
+export async function checkTransactionStatus({
+  txid,
+  network,
+  esploraUrl,
+}: CheckTransactionStatusOptions): Promise<TransactionStatus> {
   const baseUrl = esploraBaseUrl(network, esploraUrl);
   const tx = await getTransaction(txid, baseUrl);
   if (!tx) return { txid, found: false, confirmed: false };

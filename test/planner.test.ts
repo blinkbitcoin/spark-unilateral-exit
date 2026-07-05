@@ -4,7 +4,7 @@ import {
   RecoveryPlanError,
   assertSeedOnlyIsNotOfflineRecoverable,
   createRecoveryPlan,
-} from "../src/planner.js";
+} from "../src/planner.ts";
 
 const bundle = {
   schema: "spark.unilateral-exit-bundle.v1",

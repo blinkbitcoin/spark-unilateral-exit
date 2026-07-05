@@ -69,7 +69,7 @@ The bundle is sensitive even without private keys because it reveals wallet grap
 Refresh the bundle while Spark operators are online, after wallet startup and after any event that can change leaves: deposit claim, incoming Spark transfer, outgoing Spark transfer, swap, receive, optimization, or token/output sync.
 
 ```sh
-node src/cli.js refresh-bundle \
+node src/cli.ts refresh-bundle \
   --seed-file ../.spark-seed.txt \
   --network MAINNET \
   --out ../recovery-bundle.json \
@@ -179,7 +179,7 @@ When the recovery seed is available, the CLI can derive a dedicated CPFP funding
 First derive the address and required amount:
 
 ```sh
-node src/cli.js cpfp-address \
+node src/cli.ts cpfp-address \
   --bundle recovery-bundle.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -191,7 +191,7 @@ This prints `cpfpAddress`, `script`, `publicKey`, `derivationPath`, and `require
 Then watch for the funds to arrive and capture the ready-to-use CPFP input:
 
 ```sh
-node src/cli.js watch-cpfp \
+node src/cli.ts watch-cpfp \
   --bundle recovery-bundle.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -286,7 +286,7 @@ For `publicKey`, use Sparrow's address or key details for the selected receive/c
 Bundle refresh:
 
 ```sh
-node src/cli.js refresh-bundle \
+node src/cli.ts refresh-bundle \
   --seed-file <spark-seed-file> \
   --network MAINNET \
   --out recovery-bundle.json
@@ -295,7 +295,7 @@ node src/cli.js refresh-bundle \
 Dry run:
 
 ```sh
-node src/cli.js plan \
+node src/cli.ts plan \
   --bundle examples/recovery-bundle.example.json \
   --destination <bitcoin-address> \
   --fee-rate 10 \
@@ -305,7 +305,7 @@ node src/cli.js plan \
 Derive a CPFP funding address and estimate the sats to send it (seed-derived path):
 
 ```sh
-node src/cli.js cpfp-address \
+node src/cli.ts cpfp-address \
   --bundle recovery-bundle.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -315,7 +315,7 @@ node src/cli.js cpfp-address \
 Watch the funding address and emit the `--cpfp-utxo` value once it is funded:
 
 ```sh
-node src/cli.js watch-cpfp \
+node src/cli.ts watch-cpfp \
   --bundle recovery-bundle.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -325,7 +325,7 @@ node src/cli.js watch-cpfp \
 Package construction:
 
 ```sh
-node src/cli.js package \
+node src/cli.ts package \
   --bundle examples/recovery-bundle.example.json \
   --destination <bitcoin-address> \
   --fee-rate 10 \
@@ -335,7 +335,7 @@ node src/cli.js package \
 Sign the CPFP fee-bump PSBTs (from the seed, or `--key-file`/`--private-key`):
 
 ```sh
-node src/cli.js sign-packages \
+node src/cli.ts sign-packages \
   --packages recovery-packages.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -345,14 +345,14 @@ node src/cli.js sign-packages \
 Broadcast the signed packages, then check confirmations (Esplora networks only: MAINNET/TESTNET/SIGNET):
 
 ```sh
-node src/cli.js broadcast --packages recovery-packages-signed.json --network MAINNET
-node src/cli.js tx-status --txid <parent-or-child-txid> --network MAINNET
+node src/cli.ts broadcast --packages recovery-packages-signed.json --network MAINNET
+node src/cli.ts tx-status --txid <parent-or-child-txid> --network MAINNET
 ```
 
 Sweep construction after refund transactions are confirmed and spendable:
 
 ```sh
-node src/cli.js sweep \
+node src/cli.ts sweep \
   --packages recovery-packages.json \
   --seed-file <spark-seed-file> \
   --network MAINNET \
@@ -364,7 +364,7 @@ node src/cli.js sweep \
 Broadcast the signed sweep transactions (Esplora networks only):
 
 ```sh
-node src/cli.js broadcast-sweep --sweeps sweeps.json --network MAINNET
+node src/cli.ts broadcast-sweep --sweeps sweeps.json --network MAINNET
 ```
 
 ## Seed-only mode

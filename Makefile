@@ -54,27 +54,27 @@ refresh-recovery-bundle:
 	@$(NIX) cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml -- $(REFRESH_ARGS)
 
 plan: require-destination require-cpfp-args
-	@$(NODE) src/cli.js plan \
+	@$(NODE) src/cli.ts plan \
 		--bundle $(BUNDLE) \
 		--destination $(DESTINATION) \
 		--fee-rate $(FEE_RATE) \
 		$(CPFP_ARGS)
 
 package: require-destination require-cpfp-args
-	@$(NODE) src/cli.js package \
+	@$(NODE) src/cli.ts package \
 		--bundle $(BUNDLE) \
 		--destination $(DESTINATION) \
 		--fee-rate $(FEE_RATE) \
 		$(CPFP_ARGS)
 
 sign-packages: require-key-file
-	@$(NODE) src/cli.js sign-packages \
+	@$(NODE) src/cli.ts sign-packages \
 		--packages $(PACKAGES) \
 		--key-file $(KEY_FILE) \
 		--out $(SIGNED_PACKAGES)
 
 sweep: require-destination
-	@$(NODE) src/cli.js sweep \
+	@$(NODE) src/cli.ts sweep \
 		--packages $(PACKAGES) \
 		$(if $(SEED_FILE),--seed-file $(SEED_FILE),) \
 		--network $(NETWORK) \

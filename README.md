@@ -12,7 +12,7 @@ See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and 
 
 ## Current CLI
 
-The CLI (`node src/cli.js <command>`, run `help` for full flags) exposes:
+The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 
 | Command | Purpose |
 |---------|---------|
@@ -39,7 +39,7 @@ npm install
 Refresh the recovery bundle while Spark operators are online:
 
 ```sh
-node src/cli.js refresh-bundle \
+node src/cli.ts refresh-bundle \
   --seed-file /path/to/spark-seed.txt \
   --network MAINNET \
   --out recovery-bundle.json \
@@ -96,7 +96,7 @@ make sweep \
 Derive a CPFP funding address from the seed and estimate the sats to send it, then watch for the funds and capture the ready-to-use `--cpfp-utxo` value:
 
 ```sh
-node src/cli.js cpfp-address \
+node src/cli.ts cpfp-address \
   --bundle recovery-bundle.json \
   --seed-file /path/to/spark-seed.txt \
   --network MAINNET \
@@ -104,7 +104,7 @@ node src/cli.js cpfp-address \
 
 # send at least the printed requiredSats to the printed cpfpAddress, then:
 
-node src/cli.js watch-cpfp \
+node src/cli.ts watch-cpfp \
   --bundle recovery-bundle.json \
   --seed-file /path/to/spark-seed.txt \
   --network MAINNET \
@@ -116,7 +116,7 @@ node src/cli.js watch-cpfp \
 Create a dry-run recovery plan from a saved bundle:
 
 ```sh
-node src/cli.js plan \
+node src/cli.ts plan \
   --bundle examples/recovery-bundle.example.json \
   --destination bc1qexampledestination000000000000000000000000 \
   --fee-rate 10 \
@@ -126,7 +126,7 @@ node src/cli.js plan \
 Generate transaction packages with the upstream Spark SDK:
 
 ```sh
-node src/cli.js package \
+node src/cli.ts package \
   --bundle examples/recovery-bundle.example.json \
   --destination bc1qexampledestination000000000000000000000000 \
   --fee-rate 10 \

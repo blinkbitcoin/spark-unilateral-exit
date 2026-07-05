@@ -1,11 +1,23 @@
-const DEFAULT_URLS = new Map([
+import type { EsploraTransaction, EsploraUtxo } from "./types.ts";
+
+const DEFAULT_URLS = new Map<string, string>([
   ["MAINNET", "https://blockstream.info/api"],
   ["TESTNET", "https://blockstream.info/testnet/api"],
   ["SIGNET", "https://mempool.space/signet/api"],
 ]);
 
+interface EsploraErrorOptions {
+  status?: number;
+  body?: string;
+  url?: string;
+}
+
 export class EsploraError extends Error {
-  constructor(message, { status, body, url } = {}) {
+  status: number | null;
+  body: string | null;
+  url: string | null;
+
+  constructor(message: string, { status, body, url }: EsploraErrorOptions = {}) {
     super(message);
     this.name = "EsploraError";
     this.status = status ?? null;
@@ -14,7 +26,7 @@ export class EsploraError extends Error {
   }
 }
 
-export function esploraBaseUrl(network, customBaseUrl) {
+export function esploraBaseUrl(network: string, customBaseUrl?: string): string {
   if (customBaseUrl) return customBaseUrl.replace(/\/+$/, "");
   const url = DEFAULT_URLS.get(String(network).toUpperCase());
   if (!url) {
@@ -25,7 +37,10 @@ export function esploraBaseUrl(network, customBaseUrl) {
   return url;
 }
 
-export async function submitPackage(txHexArray, baseUrl) {
+export async function submitPackage(
+  txHexArray: unknown,
+  baseUrl: string,
+): Promise<unknown> {
   if (!Array.isArray(txHexArray) || txHexArray.length < 2) {
     throw new EsploraError("submitPackage requires an array of at least 2 raw tx hex strings");
   }
@@ -38,7 +53,10 @@ export async function submitPackage(txHexArray, baseUrl) {
   return handlePackageResponse(response, url);
 }
 
-export async function broadcastTransaction(txHex, baseUrl) {
+export async function broadcastTransaction(
+  txHex: string,
+  baseUrl: string,
+): Promise<string> {
   if (typeof txHex !== "string" || txHex.length === 0) {
     throw new EsploraError("broadcastTransaction requires a non-empty raw tx hex string");
   }
@@ -59,7 +77,10 @@ export async function broadcastTransaction(txHex, baseUrl) {
   return txid;
 }
 
-export async function getTransaction(txid, baseUrl) {
+export async function getTransaction(
+  txid: string,
+  baseUrl: string,
+): Promise<EsploraTransaction | null> {
   const url = `${baseUrl}/tx/${txid}`;
   const response = await fetchWithTimeout(url, { method: "GET" });
   if (response.status === 404) return null;
@@ -70,10 +91,13 @@ export async function getTransaction(txid, baseUrl) {
       { status: response.status, body, url },
     );
   }
-  return response.json();
+  return response.json() as Promise<EsploraTransaction>;
 }
 
-export async function getAddressUtxos(address, baseUrl) {
+export async function getAddressUtxos(
+  address: string,
+  baseUrl: string,
+): Promise<EsploraUtxo[]> {
   const url = `${baseUrl}/address/${address}/utxo`;
   const response = await fetchWithTimeout(url, { method: "GET" });
   if (!response.ok) {
@@ -83,10 +107,10 @@ export async function getAddressUtxos(address, baseUrl) {
       { status: response.status, body, url },
     );
   }
-  return response.json();
+  return response.json() as Promise<EsploraUtxo[]>;
 }
 
-export async function getTipHeight(baseUrl) {
+export async function getTipHeight(baseUrl: string): Promise<number> {
   const url = `${baseUrl}/blocks/tip/height`;
   const response = await fetchWithTimeout(url, { method: "GET" });
   if (!response.ok) {
@@ -103,7 +127,10 @@ export async function getTipHeight(baseUrl) {
   return height;
 }
 
-async function handlePackageResponse(response, url) {
+async function handlePackageResponse(
+  response: Response,
+  url: string,
+): Promise<unknown> {
   const body = await safeText(response);
   if (!response.ok) {
     throw new EsploraError(
@@ -118,22 +145,27 @@ async function handlePackageResponse(response, url) {
   }
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 30_000) {
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs = 30_000,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
-    if (error.name === "AbortError") {
+    const err = error as Error;
+    if (err.name === "AbortError") {
       throw new EsploraError(`Request timed out after ${timeoutMs}ms`, { url });
     }
-    throw new EsploraError(`Network error: ${error.message}`, { url });
+    throw new EsploraError(`Network error: ${err.message}`, { url });
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function safeText(response) {
+async function safeText(response: Response): Promise<string> {
   try {
     return await response.text();
   } catch {

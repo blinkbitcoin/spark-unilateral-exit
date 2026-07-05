@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CpfpUtxoParseError, parseCpfpUtxo } from "../src/cpfp.js";
+import { CpfpUtxoParseError, parseCpfpUtxo } from "../src/cpfp.ts";
 
 describe("CPFP UTXO parsing", () => {
   it("parses txid:vout:value:script:publicKey", () => {
