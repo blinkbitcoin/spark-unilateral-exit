@@ -122,6 +122,63 @@ The bundle should be encrypted before writing to local user-visible storage,
 cloud backup targets, or any backend storage. Treat it as sensitive metadata
 even though it should not contain private keys.
 
+## CPFP Fee Funding Strategy
+
+The unilateral exit flow requires a Bitcoin UTXO to pay fees via CPFP (child
+pays for parent). The SDK chains this UTXO automatically — one initial UTXO
+feeds all packages via change outputs, so the user does not need to provide a
+separate UTXO per leaf.
+
+### Recommended: App-managed CPFP hot key
+
+The app generates a dedicated P2WPKH keypair for CPFP fee bumping during wallet
+setup or first recovery attempt. This key is stored alongside the wallet seed
+(same security boundary) and used exclusively for CPFP signing.
+
+Recovery flow:
+
+1. App detects recovery is needed (operators unreachable, user-triggered).
+2. App prompts user to fund the CPFP address with a small on-chain amount
+   (e.g. send from an exchange, another wallet, or Blink's own on-chain
+   balance if available).
+3. Once funded, the app constructs all exit packages using the recovery
+   bundle and the funded UTXO.
+4. App signs all CPFP PSBTs in-process using `signPackages()` from
+   `src/sign.js` — no external wallet or Bitcoin Core node needed.
+5. App broadcasts signed packages sequentially via Esplora
+   (`POST /txs/package`).
+6. App polls for confirmations and timelock maturity.
+7. App constructs and broadcasts sweep transactions to the destination.
+
+The CPFP key holds only fee funds (not recovered funds), so the risk profile
+is low. The signing code is ~30 lines using `@scure/btc-signer` which the
+Spark SDK already depends on.
+
+### Alternative: Backend fee-sponsor service
+
+Blink runs a service with a hot wallet that signs CPFP PSBTs on behalf of
+users. The app sends unsigned packages, the backend signs and returns them.
+
+Pro: user does not need any on-chain Bitcoin to start recovery.
+Con: adds a backend dependency to a recovery flow designed for operator
+outage scenarios. If Blink's backend is also unavailable, this path fails.
+
+### Alternative: Pre-funded custodial CPFP pool
+
+Blink pre-funds a pool of UTXOs for emergency exits. When a user triggers
+recovery, the backend allocates a UTXO and handles signing/broadcasting.
+
+Pro: fully turnkey for the user.
+Con: same centralization concern as the backend sponsor.
+
+### Recommendation
+
+Use the app-managed CPFP hot key for the primary flow. It works without any
+backend, aligns with the self-sovereign recovery model, and the implementation
+is straightforward (the E2E test demonstrates the complete flow). Consider the
+backend fee-sponsor as an optional convenience layer for users who cannot
+source an on-chain UTXO independently.
+
 ## Release Gate
 
 Before enabling in-app broadcast, define and test the chain-service boundary for

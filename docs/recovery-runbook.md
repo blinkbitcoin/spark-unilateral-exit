@@ -180,6 +180,24 @@ as a conservative regtest buffer.
 
 ## 5. Sign each CPFP PSBT
 
+### Option A: Automated signing with the CLI (recommended for mobile/programmatic use)
+
+If the CPFP UTXO private key is available as hex (e.g. an app-managed key),
+sign all packages in one step:
+
+```sh
+node src/cli.js sign-packages \
+  --packages recovery-packages.json \
+  --key-file cpfp-key.hex \
+  --out recovery-packages-signed.json
+```
+
+This signs every `feeBumpPsbt` in the package JSON and adds `signedChildTx` to
+each entry. The output is ready for broadcast. The SDK chains the CPFP UTXO
+automatically — one initial UTXO feeds all packages via change outputs.
+
+### Option B: Manual signing with Bitcoin Core or hardware wallet
+
 The generated `feeBumpPsbt` is hex-encoded. Bitcoin Core wallet RPC expects a
 base64 PSBT, so convert before signing:
 

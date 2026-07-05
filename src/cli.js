@@ -14,8 +14,19 @@ import {
   createRecoveryPlan,
 } from "./planner.js";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.js";
+import { signPackages } from "./sign.js";
 import { constructSparkPackages } from "./spark-packages.js";
 import { constructSweepTransactions } from "./sweep.js";
+
+// The Spark SDK emits diagnostic logs through the global console.log, which
+// writes to stdout. This CLI's contract is that stdout carries only the
+// machine-readable JSON result, so redirect all incidental console.log output
+// to stderr and emit results explicitly via emitJson/process.stdout.
+console.log = (...args) => console.error(...args);
+
+function emitJson(value) {
+  process.stdout.write(`${serializeForJson(value)}\n`);
+}
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -36,7 +47,7 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       cpfpUtxos: collect(args["cpfp-utxo"]),
     });
-    console.log(serializeForJson(plan));
+    emitJson(plan);
     return;
   }
 
@@ -50,7 +61,7 @@ async function main() {
       cpfpUtxos,
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
     });
-    console.log(serializeForJson({ destination: args.destination, packages }));
+    emitJson({ destination: args.destination, packages });
     return;
   }
 
@@ -69,7 +80,7 @@ async function main() {
         );
       },
     });
-    console.log(serializeForJson(results));
+    emitJson(results);
     return;
   }
 
@@ -83,7 +94,7 @@ async function main() {
       network,
       esploraUrl: args["esplora-url"],
     });
-    console.log(serializeForJson(results));
+    emitJson(results);
     return;
   }
 
@@ -95,7 +106,30 @@ async function main() {
       network,
       esploraUrl: args["esplora-url"],
     });
-    console.log(serializeForJson(status));
+    emitJson(status);
+    return;
+  }
+
+  if (command === "sign-packages") {
+    const input = JSON.parse(
+      fs.readFileSync(required(args.packages, "--packages"), "utf8"),
+    );
+    const keyFile = args["key-file"];
+    const keyArg = args["private-key"];
+    if (!keyFile && !keyArg) {
+      throw new Error("--key-file or --private-key is required");
+    }
+    const privateKey = keyFile
+      ? fs.readFileSync(keyFile, "utf8").trim()
+      : keyArg;
+    const packages = input.packages ?? input;
+    const signed = signPackages({ packages, privateKey });
+    const output = serializeForJson({ ...input, packages: signed });
+    if (args.out) {
+      fs.writeFileSync(args.out, `${output}\n`, { mode: 0o600 });
+    } else {
+      process.stdout.write(`${output}\n`);
+    }
     return;
   }
 
@@ -113,7 +147,7 @@ async function main() {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
-    console.log(serializeForJson(sweeps));
+    emitJson(sweeps);
     return;
   }
 
@@ -182,7 +216,7 @@ function required(value, name) {
 }
 
 function printHelp() {
-  console.log(`spark-unilateral-exit
+  process.stdout.write(`spark-unilateral-exit
 
 Commands:
   refresh-bundle   Query live Spark leaves from a seed and write a bundle
@@ -191,6 +225,7 @@ Commands:
   broadcast        Submit signed packages via Esplora (replaces bitcoin-cli submitpackage)
   broadcast-sweep  Broadcast signed sweep transactions via Esplora
   tx-status        Check confirmation status of a transaction via Esplora
+  sign-packages    Sign all CPFP PSBTs in a package JSON with a private key
   sweep            Spend confirmed refund outputs to a destination address
 
 Required for offline recovery:
@@ -224,6 +259,12 @@ Inputs for tx-status:
   --txid <txid>            Transaction ID to check
   --network <network>      MAINNET, TESTNET, or SIGNET
   --esplora-url <url>      Custom Esplora API base URL (optional)
+
+Inputs for sign-packages:
+  --packages <path>        JSON produced by package
+  --key-file <path>        File containing CPFP private key hex (preferred)
+  --private-key <hex>      CPFP private key as 32-byte hex (use --key-file instead)
+  --out <path>             Output path for signed packages; stdout when omitted
 
 Inputs for sweep:
   --packages <path>         JSON produced by package

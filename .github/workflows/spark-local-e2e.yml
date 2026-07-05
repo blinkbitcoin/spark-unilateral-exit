@@ -1,9 +1,13 @@
 name: Spark Local E2E
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * *"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: spark-local-e2e-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -23,43 +27,17 @@ jobs:
           repository: buildonspark/spark
           path: upstream-spark
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Install recovery tool dependencies
-        run: npm ci
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Build and start Spark local stack
-        working-directory: upstream-spark
-        run: |
-          docker compose \
-            -f docker-compose.yml \
-            -f ../scripts/spark-local-bitcoind29.override.yml \
-            up -d --build postgres bitcoind bitcoin-init spark-operator-0 spark-operator-1 spark-operator-2
-          docker compose ps
+      - name: Install dependencies
+        run: nix develop --command npm ci
 
-      - name: Wait for Spark operators
-        run: |
-          node scripts/wait-for-spark-local.mjs
-          sleep 15
-
+      # make test-e2e starts the Spark local stack (auto-detected at
+      # ./upstream-spark), waits for the operators, runs the E2E suite, dumps
+      # logs on failure, and tears the stack down.
       - name: Run local unilateral-exit E2E
-        env:
-          SPARK_DANGEROUSLY_DISABLE_TLS_VERIFICATION: "true"
-        run: npm run test:e2e
-
-      - name: Dump Spark logs on failure
-        if: failure()
-        working-directory: upstream-spark
-        run: docker compose logs --no-color --tail=300
-
-      - name: Stop Spark local stack
-        if: always()
-        working-directory: upstream-spark
-        run: |
-          docker compose \
-            -f docker-compose.yml \
-            -f ../scripts/spark-local-bitcoind29.override.yml \
-            down -v
+        run: nix develop --command make test-e2e

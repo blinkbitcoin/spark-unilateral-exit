@@ -9,7 +9,7 @@
   "scripts": {
     "test": "vitest run --coverage",
     "test:unit": "vitest run",
-    "test:e2e": "RUN_SPARK_E2E=1 vitest run test/e2e --testTimeout 180000",
+    "test:e2e": "RUN_SPARK_E2E=1 vitest run test/e2e --testTimeout 300000",
     "plan": "node src/cli.js plan",
     "refresh-bundle": "node src/cli.js refresh-bundle",
     "refresh-recovery-bundle": "nix develop --command cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml --"
