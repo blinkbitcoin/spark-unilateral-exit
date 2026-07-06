@@ -79,7 +79,7 @@ async function main(): Promise<void> {
     const results = await broadcastPackages({
       packages: input.packages ?? input,
       network,
-      esploraUrl: args["esplora-url"] as string | undefined,
+      esploraUrl: optionalValue(args["esplora-url"]),
       onPackageSubmitted(entry) {
         console.error(
           `Submitted leaf ${entry.leafId} package ${entry.packageIndex}`,
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     const results = await broadcastSweeps({
       sweeps: input.sweeps ?? input,
       network,
-      esploraUrl: args["esplora-url"] as string | undefined,
+      esploraUrl: optionalValue(args["esplora-url"]),
     });
     emitJson(results);
     return;
@@ -110,7 +110,7 @@ async function main(): Promise<void> {
     const status = await checkTransactionStatus({
       txid,
       network,
-      esploraUrl: args["esplora-url"] as string | undefined,
+      esploraUrl: optionalValue(args["esplora-url"]),
     });
     emitJson(status);
     return;
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     const bundle = loadOptionalBundle(args.bundle);
     if (!bundle) throw new Error("--bundle is required to estimate CPFP funding");
     const seed = await loadSeed(args);
-    const network = (args.network ?? bundle.network) as string;
+    const network = optionalValue(args.network) ?? bundle.network;
     const feeRate = Number(required(args["fee-rate"], "--fee-rate"));
     const key = deriveCpfpFundingKey({
       seed,
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
       script,
       publicKey,
       network,
-      esploraUrl: args["esplora-url"] as string | undefined,
+      esploraUrl: optionalValue(args["esplora-url"]),
       minSats,
       minConfirmations: optionalNumber(args["min-confirmations"], 1, "--min-confirmations"),
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
@@ -214,8 +214,10 @@ async function main(): Promise<void> {
     const packages = input.packages ?? input;
     const signed = signPackages({ packages, privateKey });
     const output = serializeForJson({ ...input, packages: signed });
-    if (args.out) {
-      fs.writeFileSync(args.out as string, `${output}\n`, { mode: 0o600 });
+    if (args.out === true) throw new Error("--out requires a path");
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      fs.writeFileSync(outPath, `${output}\n`, { mode: 0o600 });
     } else {
       process.stdout.write(`${output}\n`);
     }
@@ -229,10 +231,10 @@ async function main(): Promise<void> {
     const seed = await loadSeed(args);
     const sweeps = constructSweepTransactions({
       seed,
-      passphrase: (args.passphrase ?? "") as string,
+      passphrase: optionalValue(args.passphrase) ?? "",
       network: required(args.network, "--network"),
       packages,
-      destination: args.destination as string | undefined,
+      destination: optionalValue(args.destination),
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
@@ -246,13 +248,14 @@ async function main(): Promise<void> {
     const bundle = await exportRecoveryBundleFromSeed({
       seed,
       accountNumber: args["account-number"] ?? 0,
-      network: (args.network ?? "MAINNET") as string,
-      operatorSet: (args["operator-set"] ?? "spark-sdk") as string,
-      appVersion: (args["app-version"] ?? "unknown") as string,
+      network: optionalValue(args.network) ?? "MAINNET",
+      operatorSet: optionalValue(args["operator-set"]) ?? "spark-sdk",
+      appVersion: optionalValue(args["app-version"]) ?? "unknown",
     });
     const output = `${serializeForJson(bundle)}\n`;
-    if (args.out) {
-      fs.writeFileSync(args.out as string, output, { mode: 0o600 });
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      fs.writeFileSync(outPath, output, { mode: 0o600 });
     } else {
       process.stdout.write(output);
     }
@@ -271,16 +274,18 @@ function parseArgs(argv: string[]): CliArgs {
     }
     const key = token.slice(2);
     const value = argv[i + 1];
+    const existing = args[key];
     if (!value || value.startsWith("--")) {
       args[key] = true;
-    } else if (args[key] === undefined) {
+    } else if (existing === undefined) {
       args[key] = value;
       i += 1;
-    } else if (Array.isArray(args[key])) {
-      (args[key] as string[]).push(value);
+    } else if (Array.isArray(existing)) {
+      existing.push(value);
       i += 1;
     } else {
-      args[key] = [args[key] as string, value];
+      // `existing` is a scalar: a string, or `true` from an earlier bare flag.
+      args[key] = [String(existing), value];
       i += 1;
     }
   }
@@ -288,25 +293,31 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 function loadOptionalBundle(path: CliArgValue): RecoveryBundle | null {
-  if (!path) return null;
-  return parseRecoveryBundle(fs.readFileSync(path as string, "utf8"));
+  const resolved = optionalValue(path);
+  if (!resolved) return null;
+  return parseRecoveryBundle(fs.readFileSync(resolved, "utf8"));
 }
 
 function collect(value: CliArgValue): string[] {
-  if (value === undefined) return [];
-  return Array.isArray(value) ? value : [value as string];
+  if (Array.isArray(value)) return value;
+  const single = optionalValue(value);
+  return single === undefined ? [] : [single];
 }
 
 function required(value: CliArgValue, name: string): string {
-  if (value === undefined || value === true || value === "") {
+  const raw = optionalValue(value);
+  if (raw === undefined || raw === "") {
     throw new Error(`${name} is required`);
   }
-  return value as string;
+  return raw;
 }
 
-// A flag passed without a value parses to `true`; treat that as absent.
+// A flag passed without a value parses to `true` and a repeated flag parses to
+// a string[]; neither is a usable scalar, so treat both as absent. This is the
+// single narrowing point from CliArgValue to string — read scalar args through
+// it (or required()) instead of casting at each use site.
 function optionalValue(value: CliArgValue): string | undefined {
-  return value === undefined || value === true ? undefined : (value as string);
+  return typeof value === "string" ? value : undefined;
 }
 
 function optionalNumber(

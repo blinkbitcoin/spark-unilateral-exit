@@ -141,6 +141,7 @@ export interface EsploraTransaction {
 export interface EsploraUtxo {
   txid: string;
   vout: number;
+  /** Sats as a JSON number from Esplora; convert to bigint for arithmetic. */
   value: number;
   status?: EsploraTxStatus;
 }

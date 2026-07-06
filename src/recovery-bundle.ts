@@ -21,6 +21,8 @@ const DEFAULT_OPERATOR_SET = "spark-sdk";
 // production they call into the Spark SDK (dynamically imported, unchecked
 // under skipLibCheck); in tests they are replaced by fakes. `any` here reflects
 // the deliberately dynamic shape at these boundaries.
+// TODO: narrow these to concrete SDK types once @buildonspark/spark-sdk ships
+// stable public typings for the wallet and TreeNode shapes.
 type WalletFactory = (params: WalletFactoryParams) => Promise<any>;
 type EncodeTreeNode = (leaf: any) => string;
 

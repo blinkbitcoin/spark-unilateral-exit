@@ -117,16 +117,7 @@ export function parseSeed(input: string, passphrase = ""): Uint8Array {
   const value = String(input ?? "").trim();
   if (!value) throw new SweepError("Spark seed or mnemonic is required");
   if (validateMnemonic(value, wordlist)) {
-    // NOTE: @scure/bip39's mnemonicToSeedSync takes only (mnemonic, passphrase);
-    // the original code passes a third `wordlist` argument that the API ignores.
-    // Preserved as-is (runtime behavior unchanged) via a widened call signature.
-    return (
-      mnemonicToSeedSync as (
-        mnemonic: string,
-        passphrase?: string,
-        wordlist?: unknown,
-      ) => Uint8Array
-    )(value, passphrase, wordlist);
+    return mnemonicToSeedSync(value, passphrase);
   }
   const hex = value.startsWith("0x") ? value.slice(2) : value;
   if (!/^[0-9a-fA-F]+$/.test(hex)) {

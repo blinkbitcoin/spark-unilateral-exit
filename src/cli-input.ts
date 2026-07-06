@@ -51,6 +51,9 @@ export function readHiddenLine(
     let value = "";
     const wasRaw = input.isRaw;
 
+    // The `setRawMode!` assertions below are safe: the guard at the top of
+    // this function rejects inputs without a setRawMode function, but TS
+    // cannot carry that narrowing into these closures.
     const cleanup = () => {
       input.off("data", onData);
       input.setRawMode!(Boolean(wasRaw));
