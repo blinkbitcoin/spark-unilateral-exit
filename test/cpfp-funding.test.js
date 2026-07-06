@@ -124,7 +124,7 @@ describe("watchCpfpFunding", () => {
       script: "0014deadbeef",
       publicKey: "02abc",
     });
-    expect(utxo.value).toBe(20000n);
+    expect(utxo.value).toBe("20000");
     expect(call).toBe(3);
   });
 

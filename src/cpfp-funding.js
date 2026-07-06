@@ -81,6 +81,11 @@ export async function estimateCpfpFunding({
     feeRate: normalizedFeeRate,
     sparkClient,
   });
+  if (packages.length === 0) {
+    throw new CpfpFundingError(
+      "Bundle contains no packages; nothing to estimate funding for",
+    );
+  }
 
   let feeBumpTxCount = 0;
   let totalFeeSats = 0n;
@@ -145,7 +150,8 @@ export async function watchCpfpFunding({
       return {
         txid: match.txid,
         vout: match.vout,
-        value: BigInt(match.value),
+        // String for consistency with estimateCpfpFunding's BigInt fields.
+        value: match.value.toString(),
         script,
         publicKey,
         confirmations: match.confirmations,
@@ -160,6 +166,9 @@ export async function watchCpfpFunding({
   }
 }
 
+// Assumes the user funds the address with a single UTXO covering minValue, as
+// the docs instruct: this returns the first individually sufficient UTXO and
+// never combines smaller ones, so a split deposit is not matched.
 export function pickFundingUtxo({ utxos, minValue, minConfirmations, tipHeight }) {
   if (!Array.isArray(utxos)) return null;
   for (const utxo of utxos) {
@@ -189,7 +198,15 @@ function feeBumpTxFee(psbtHex) {
   });
   let inputSum = 0n;
   for (let i = 0; i < tx.inputsLength; i += 1) {
-    inputSum += tx.getInput(i)?.witnessUtxo?.amount ?? 0n;
+    // Spark is all-segwit, so every input must carry a witnessUtxo; treating a
+    // missing one as 0 would silently misestimate the fee.
+    const amount = tx.getInput(i)?.witnessUtxo?.amount;
+    if (amount === undefined || amount === null) {
+      throw new CpfpFundingError(
+        `Fee-bump PSBT input ${i} has no witnessUtxo; cannot estimate funding`,
+      );
+    }
+    inputSum += amount;
   }
   let outputSum = 0n;
   for (let i = 0; i < tx.outputsLength; i += 1) {
