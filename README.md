@@ -29,6 +29,48 @@ The CLI (`node src/cli.js <command>`, run `help` for full flags) exposes:
 
 `watch-cpfp`, `broadcast`, `broadcast-sweep`, and `tx-status` use Esplora and support only MAINNET/TESTNET/SIGNET by default; on REGTEST/LOCAL pass `--esplora-url` or use `bitcoin-cli`.
 
+## Recovery Flow
+
+```mermaid
+flowchart TD
+    seed[("Spark seed")]
+
+    subgraph prep["Preparation — Spark operators online"]
+        refresh["refresh-bundle"]
+        bundle[("recovery-bundle.json<br/>store encrypted, keep fresh")]
+        refresh --> bundle
+    end
+
+    subgraph funding["CPFP fee funding"]
+        addr["cpfp-address<br/>prints cpfpAddress + requiredSats"]
+        send["send ≥ requiredSats to cpfpAddress<br/>(single on-chain UTXO)"]
+        watch["watch-cpfp<br/>emits cpfpUtxo"]
+        addr --> send --> watch
+    end
+
+    subgraph exit["Unilateral exit — operators offline"]
+        plan["plan<br/>optional dry run"]
+        pkg["package<br/>unilateral-exit tx packages"]
+        sign["sign-packages<br/>sign CPFP fee-bump PSBTs"]
+        bcast["broadcast<br/>submit packages via Esplora"]
+        status["tx-status<br/>wait for refund confirmation + timelock"]
+        sweep["sweep<br/>spend refund outputs to destination"]
+        bsweep["broadcast-sweep"]
+        done[("BTC at destination address")]
+        plan --> pkg --> sign --> bcast --> status --> sweep --> bsweep --> done
+    end
+
+    seed --> refresh
+    bundle --> addr
+    bundle --> pkg
+    watch -- "--cpfp-utxo" --> plan
+    seed -.-> addr
+    seed -.-> sign
+    seed -.-> sweep
+```
+
+Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere). The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only.
+
 Install dependencies:
 
 ```sh
