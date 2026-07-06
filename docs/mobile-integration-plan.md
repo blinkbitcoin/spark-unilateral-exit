@@ -1,7 +1,10 @@
 # App Integration Plan
 
 **Status:** Proposed integration boundary
-**Updated:** 2026-06-22
+**Updated:** 2026-07-06
+
+For the designer-facing screen flow built on this plan, see
+[mobile-ux-flow.md](mobile-ux-flow.md).
 
 ## Decision
 
@@ -75,19 +78,48 @@ Expose a narrow adapter to the app, regardless of whether the implementation is
 provided directly by an SDK, this repo's tooling, or a future upstream recovery
 API.
 
-Suggested app-facing states:
+Suggested app-facing states, grouped by lifecycle phase to match the
+[recovery flow](../README.md#recovery-flow) (`cpfp-address`/`watch-cpfp` →
+`plan` → `package` → `sign-packages` → `broadcast` → `tx-status` → `sweep` →
+`broadcast-sweep`):
+
+Preparation (operators online):
 
 - `notReady`
+- `bundleMissing`
 - `bundleStale`
+- `bundleFresh`
+
+Recovery setup (operators offline, works against Bitcoin only):
+
 - `noRecoverableLeaves`
-- `waitingForTimelock`
+- `belowEconomicFloor`
+- `needsDestination`
 - `needsFeeInput`
+- `awaitingFeeFunding` — funding address derived, waiting for the user to send
+  `requiredSats`
+- `watchingFeeFunding` — polling the chain service for the funding UTXO and its
+  confirmations (`watch-cpfp`)
+
+Exit execution:
+
 - `readyToPlan`
 - `planned`
 - `packaging`
 - `readyToBroadcast`
 - `broadcasting`
-- `complete`
+- `awaitingExitConfirmations` — exit packages accepted, waiting for
+  confirmations
+- `waitingForTimelock` — refund CSV timelocks maturing; days to weeks, see
+  [Recovery Timeline](#recovery-timeline-and-resumability)
+
+Sweep:
+
+- `readyToSweep`
+- `sweeping`
+- `awaitingSweepConfirmations`
+- `complete` — destination outputs confirmed on chain
+- `partiallyComplete` — some leaves swept, others failed or unrecoverable
 - `failed`
 
 The adapter should return typed, user-safe failure classes:
@@ -95,13 +127,23 @@ The adapter should return typed, user-safe failure classes:
 - `bundle-invalid`
 - `bundle-stale`
 - `bundle-seed-mismatch`
+- `no-recoverable-leaves`
+- `below-economic-floor`
 - `timelock-not-expired`
 - `fee-input-missing`
 - `fee-input-insufficient`
+- `fee-funding-underfunded` — a UTXO arrived at the funding address but below
+  `requiredSats`
 - `package-construction-failed`
 - `broadcast-rejected`
+- `sweep-construction-failed`
+- `sweep-broadcast-rejected`
 - `chain-service-unavailable`
 - `sdk-internal-error`
+
+Every state from `broadcasting` onward must be derivable from persisted
+session data plus chain lookups, never from in-memory state alone (see
+[Recovery Timeline](#recovery-timeline-and-resumability)).
 
 ## Bundle Refresh
 
@@ -154,8 +196,12 @@ Recovery flow:
    wallet, key file, or Bitcoin Core node needed.
 5. App broadcasts signed packages sequentially via Esplora
    (`POST /txs/package`).
-6. App polls for confirmations and timelock maturity.
-7. App constructs and broadcasts sweep transactions to the destination.
+6. App polls for confirmations and timelock maturity. This phase lasts days to
+   weeks (fresh leaves: 2,000-block CSV, roughly two weeks), so it must survive
+   app restarts and should notify the user rather than expect a foreground
+   session.
+7. App constructs and broadcasts sweep transactions to the destination, then
+   confirms the destination outputs on chain.
 
 The CPFP key holds only fee funds (not recovered funds), so the risk profile
 is low. The signing code is ~30 lines using `@scure/btc-signer` which the
@@ -185,6 +231,81 @@ backend, aligns with the self-sovereign recovery model, and the implementation
 is straightforward (the E2E test demonstrates the complete flow). Consider the
 backend fee-sponsor as an optional convenience layer for users who cannot
 source an on-chain UTXO independently.
+
+## Recovery Timeline and Resumability
+
+Unilateral exit is not a single-session flow. Spark refund transactions carry a
+block-based CSV relative timelock: fresh leaves currently use 2,000 blocks on
+the CPFP refund path (about 13.9 days at the 10-minute block target); renewed
+leaves can be shorter in 100-block steps. Decode the refund transaction input
+sequence for exact per-leaf timing rather than assuming a constant.
+
+Consequences for the app:
+
+- The app must persist a recovery session: bundle reference, destination
+  address, fee rate, funding UTXO, per-leaf package txids, and per-leaf phase.
+  None of this is secret material, but treat it with the same sensitivity as
+  the bundle (it reveals wallet graph metadata).
+- On every app start, if a recovery session exists, reconcile it against chain
+  state (`tx-status`-equivalent lookups) and resume the correct adapter state.
+- Use local notifications for the milestones the user is otherwise waiting on:
+  fee funding confirmed, exit packages confirmed, timelock matured
+  (sweep possible), sweep confirmed.
+- Progress is per leaf. Leaves can confirm and mature at different heights, so
+  the session model and UI must support partial completion rather than a
+  single global state.
+
+## Economic Viability
+
+Unilateral exit costs roughly an order of magnitude more than Spark's
+cooperative exit fee, because the user broadcasts the full exit tree plus CPFP
+bumps and a final sweep. Until package and sweep sizing are measured from
+production-like packages, use the planning floors from
+[withdraw-guide.md](withdraw-guide.md#minimum-practical-balance): about
+10,000 sats for one Bitcoin leaf at 1 sat/vbyte, scaling roughly linearly with
+fee rate and leaf count.
+
+The adapter should expose the estimated recoverable amount and estimated total
+fees so the app can:
+
+- warn when the recoverable balance is near the floor, and
+- block (or require explicit advanced confirmation) when recovery would be
+  uneconomic, surfacing `below-economic-floor` instead of letting the user burn
+  fee funds for dust.
+
+## USDB / Dollar Balance
+
+The Bitcoin unilateral-exit path recovers Bitcoin leaves only. USDB/Dollar
+(stable) balance recovery is not validated for this path. Because Blink's
+self-custodial wallet exposes a Dollar balance, the app must label it as
+"detected but not covered by Bitcoin unilateral exit" in every recovery
+estimate, and never imply that the displayed total wallet balance is
+recoverable. See the open questions in
+[withdraw-guide.md](withdraw-guide.md#usdb--dollar-balance).
+
+## Blink Mobile Mapping
+
+Blink mobile's self-custodial mode uses the Breez Spark SDK
+(`@breeztech/breez-sdk-spark-react-native`), which does not expose leaves
+through the upstream `@buildonspark/spark-sdk` wallet API. Bundle export for
+Blink therefore follows the Rust exporter path (`tools/spark-recovery-bundle`,
+built against `vendor/breez-spark-sdk`); the open integration question is
+whether that exporter logic ships as a Breez SDK API, a mobile binding of this
+repo's tooling, or a Blink-owned native module.
+
+Integration anchors that already exist in the app:
+
+- Encrypted cloud/manual backup infrastructure (iCloud, Google Drive, file
+  export) from self-custodial onboarding — the recovery bundle should ride the
+  same rails, encrypted client-side, alongside rather than inside the seed
+  backup.
+- A backup-status provider that drives home-screen nudges — bundle freshness
+  can reuse this pattern for `bundleStale`/`bundleMissing`.
+- On-chain send components (address entry and validation, QR scan, fee-tier
+  selection) and long-running progress patterns reusable for the recovery
+  screens.
+
+The screen-level mapping lives in [mobile-ux-flow.md](mobile-ux-flow.md).
 
 ## Release Gate
 
