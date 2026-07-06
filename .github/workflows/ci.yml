@@ -25,7 +25,7 @@ jobs:
       - run: npm test
       - name: CLI smoke test
         run: |
-          node src/cli.js plan \
+          node src/cli.ts plan \
             --bundle examples/recovery-bundle.example.json \
             --destination bc1qexampledestination0000 \
             --fee-rate 10 \
