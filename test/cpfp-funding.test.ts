@@ -5,7 +5,7 @@ import {
   pickFundingUtxo,
   watchCpfpFunding,
   CpfpFundingError,
-} from "../src/cpfp-funding.js";
+} from "../src/cpfp-funding.ts";
 
 const SEED =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -66,7 +66,7 @@ describe("pickFundingUtxo", () => {
       tipHeight: 105,
     });
     expect(match).toMatchObject({ txid: confirmed.txid, vout: 0, confirmations: 6 });
-    expect(match.value).toBe(5000n);
+    expect(match!.value).toBe(5000n);
   });
 
   it("skips UTXOs below the minimum value", () => {
@@ -114,7 +114,7 @@ describe("watchCpfpFunding", () => {
       esploraUrl: "http://localhost/api",
       minSats: 10000,
       minConfirmations: 1,
-      fetchUtxos: async () => responses[Math.min(call++, responses.length - 1)],
+      fetchUtxos: async () => responses[Math.min(call++, responses.length - 1)]!,
       fetchTipHeight: async () => 12,
       sleep: async () => {},
     });

@@ -4,10 +4,10 @@ import {
   broadcastSweeps,
   checkTransactionStatus,
   EsploraError,
-} from "../src/broadcast.js";
+} from "../src/broadcast.ts";
 
 describe("broadcastPackages", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
@@ -18,7 +18,7 @@ describe("broadcastPackages", () => {
   });
 
   it("submits each txPackage as a 2-element package", async () => {
-    const calls = [];
+    const calls: Array<{ url: unknown; body: any }> = [];
     globalThis.fetch = vi.fn().mockImplementation((url, options) => {
       calls.push({ url, body: JSON.parse(options.body) });
       return Promise.resolve({
@@ -44,11 +44,11 @@ describe("broadcastPackages", () => {
     });
 
     expect(calls).toHaveLength(2);
-    expect(calls[0].body).toEqual(["parenthex1", "childhex1"]);
-    expect(calls[1].body).toEqual(["parenthex2", "childhex2"]);
+    expect(calls[0]!.body).toEqual(["parenthex1", "childhex1"]);
+    expect(calls[1]!.body).toEqual(["parenthex2", "childhex2"]);
     expect(results).toHaveLength(1);
-    expect(results[0].leafId).toBe("leaf-1");
-    expect(results[0].packages).toHaveLength(2);
+    expect(results[0]!.leafId).toBe("leaf-1");
+    expect(results[0]!.packages).toHaveLength(2);
   });
 
   it("calls onPackageSubmitted callback for each submission", async () => {
@@ -58,7 +58,7 @@ describe("broadcastPackages", () => {
       text: () => Promise.resolve("{}"),
     });
 
-    const submitted = [];
+    const submitted: Array<{ leafId: string; packageIndex: number }> = [];
     await broadcastPackages({
       packages: [
         {
@@ -71,8 +71,8 @@ describe("broadcastPackages", () => {
     });
 
     expect(submitted).toHaveLength(1);
-    expect(submitted[0].leafId).toBe("leaf-1");
-    expect(submitted[0].packageIndex).toBe(0);
+    expect(submitted[0]!.leafId).toBe("leaf-1");
+    expect(submitted[0]!.packageIndex).toBe(0);
   });
 
   it("throws when signedChildTx is missing", async () => {
@@ -130,7 +130,7 @@ describe("broadcastPackages", () => {
       esploraUrl: "http://localhost:3000",
     });
 
-    expect(globalThis.fetch.mock.calls[0][0]).toBe(
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]![0]).toBe(
       "http://localhost:3000/txs/package",
     );
   });
@@ -157,7 +157,7 @@ describe("broadcastPackages", () => {
 });
 
 describe("broadcastSweeps", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
@@ -187,12 +187,12 @@ describe("broadcastSweeps", () => {
     });
 
     expect(results).toHaveLength(2);
-    expect(results[0]).toMatchObject({
+    expect(results[0]!).toMatchObject({
       leafId: "leaf-1",
       sweepTxid: "txid-1",
       match: true,
     });
-    expect(results[1]).toMatchObject({
+    expect(results[1]!).toMatchObject({
       leafId: "leaf-2",
       sweepTxid: "txid-2",
       match: false,
@@ -210,7 +210,7 @@ describe("broadcastSweeps", () => {
 });
 
 describe("checkTransactionStatus", () => {
-  let originalFetch;
+  let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;

@@ -3,12 +3,20 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { HDKey } from "@scure/bip32";
 import { NETWORK, TEST_NETWORK, Transaction, p2wpkh } from "@scure/btc-signer";
 
-import { esploraBaseUrl, getAddressUtxos, getTipHeight } from "./esplora.js";
-import { constructSparkPackages } from "./spark-packages.js";
-import { parseSeed } from "./sweep.js";
+import { esploraBaseUrl, getAddressUtxos, getTipHeight } from "./esplora.ts";
+import { constructSparkPackages } from "./spark-packages.ts";
+import { parseSeed } from "./sweep.ts";
+import type {
+  AccountNumberInput,
+  CpfpUtxo,
+  EsploraUtxo,
+  RecoveryBundle,
+} from "./types.ts";
 
-const REGTEST_NETWORK = { ...TEST_NETWORK, bech32: "bcrt" };
-const BTC_NETWORKS = new Map([
+type BtcNetwork = typeof NETWORK;
+
+const REGTEST_NETWORK: BtcNetwork = { ...TEST_NETWORK, bech32: "bcrt" };
+const BTC_NETWORKS = new Map<string, BtcNetwork>([
   ["MAINNET", NETWORK],
   ["TESTNET", TEST_NETWORK],
   ["SIGNET", TEST_NETWORK],
@@ -31,13 +39,30 @@ const PLACEHOLDER_TXID = "11".repeat(32);
 const DEFAULT_BUFFER_SATS = 1000n;
 
 export class CpfpFundingError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "CpfpFundingError";
   }
 }
 
-export function deriveCpfpFundingKey({ seed, network, accountNumber = 0 }) {
+export interface CpfpFundingKey {
+  privateKey: Uint8Array;
+  privateKeyHex: string;
+  publicKey: string;
+  address: string | undefined;
+  script: string;
+  derivationPath: string;
+}
+
+export function deriveCpfpFundingKey({
+  seed,
+  network,
+  accountNumber = 0,
+}: {
+  seed: string;
+  network: string;
+  accountNumber?: AccountNumberInput;
+}): CpfpFundingKey {
   const btcNetwork = btcNetworkFor(network);
   const account = normalizeAccountNumber(accountNumber);
   const path = `m/${CPFP_FUNDING_PURPOSE}'/${account}'/0'`;
@@ -59,6 +84,15 @@ export function deriveCpfpFundingKey({ seed, network, accountNumber = 0 }) {
   };
 }
 
+interface EstimateCpfpFundingOptions {
+  bundle: RecoveryBundle;
+  feeRate: number;
+  fundingScript: string;
+  fundingPublicKey: string;
+  bufferSats?: bigint | number | string;
+  sparkClient?: unknown;
+}
+
 export async function estimateCpfpFunding({
   bundle,
   feeRate,
@@ -66,9 +100,9 @@ export async function estimateCpfpFunding({
   fundingPublicKey,
   bufferSats = DEFAULT_BUFFER_SATS,
   sparkClient,
-}) {
+}: EstimateCpfpFundingOptions) {
   const normalizedFeeRate = validateFeeRate(feeRate);
-  const placeholderUtxo = {
+  const placeholderUtxo: CpfpUtxo = {
     txid: PLACEHOLDER_TXID,
     vout: 0,
     value: PLACEHOLDER_VALUE_SATS,
@@ -89,7 +123,11 @@ export async function estimateCpfpFunding({
 
   let feeBumpTxCount = 0;
   let totalFeeSats = 0n;
-  const perLeaf = [];
+  const perLeaf: Array<{
+    leafId: string | null | undefined;
+    feeBumpTxCount: number;
+    feeSats: string;
+  }> = [];
   for (const leafPackage of packages) {
     let leafFee = 0n;
     let leafCount = 0;
@@ -119,6 +157,34 @@ export async function estimateCpfpFunding({
   };
 }
 
+interface FundingUtxoMatch {
+  txid: string;
+  vout: number;
+  value: bigint;
+  confirmations: number;
+}
+
+interface WatchCpfpFundingOptions {
+  address?: string;
+  script?: string;
+  publicKey?: string;
+  network: string;
+  esploraUrl?: string;
+  minSats?: bigint | number | string;
+  minConfirmations?: number;
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  onPoll?: (info: {
+    attempt: number;
+    utxos: EsploraUtxo[];
+    match: FundingUtxoMatch | null;
+  }) => void;
+  fetchUtxos?: (address: string, baseUrl: string) => Promise<EsploraUtxo[]>;
+  fetchTipHeight?: (baseUrl: string) => Promise<number>;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
 export async function watchCpfpFunding({
   address,
   script,
@@ -133,9 +199,9 @@ export async function watchCpfpFunding({
   // Injectable for tests; default to the real Esplora client.
   fetchUtxos = getAddressUtxos,
   fetchTipHeight = getTipHeight,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now(),
-} = {}) {
+}: WatchCpfpFundingOptions) {
   if (!address) throw new CpfpFundingError("watchCpfpFunding requires an address");
   const baseUrl = esploraBaseUrl(network, esploraUrl);
   const minValue = BigInt(minSats ?? 0);
@@ -169,7 +235,17 @@ export async function watchCpfpFunding({
 // Assumes the user funds the address with a single UTXO covering minValue, as
 // the docs instruct: this returns the first individually sufficient UTXO and
 // never combines smaller ones, so a split deposit is not matched.
-export function pickFundingUtxo({ utxos, minValue, minConfirmations, tipHeight }) {
+export function pickFundingUtxo({
+  utxos,
+  minValue,
+  minConfirmations,
+  tipHeight,
+}: {
+  utxos: EsploraUtxo[];
+  minValue: bigint;
+  minConfirmations: number;
+  tipHeight: number | null;
+}): FundingUtxoMatch | null {
   if (!Array.isArray(utxos)) return null;
   for (const utxo of utxos) {
     const value = BigInt(utxo?.value ?? 0);
@@ -181,16 +257,19 @@ export function pickFundingUtxo({ utxos, minValue, minConfirmations, tipHeight }
   return null;
 }
 
-function utxoConfirmations(utxo, tipHeight) {
+function utxoConfirmations(
+  utxo: EsploraUtxo,
+  tipHeight: number | null | undefined,
+): number {
   if (!utxo?.status?.confirmed) return 0;
   const blockHeight = utxo.status.block_height;
   if (tipHeight === null || tipHeight === undefined || !Number.isInteger(blockHeight)) {
     return 1;
   }
-  return Math.max(0, tipHeight - blockHeight + 1);
+  return Math.max(0, tipHeight - blockHeight! + 1);
 }
 
-function feeBumpTxFee(psbtHex) {
+function feeBumpTxFee(psbtHex: string): bigint {
   const tx = Transaction.fromPSBT(hexToBytes(psbtHex), {
     allowUnknown: true,
     allowLegacyWitnessUtxo: true,
@@ -219,7 +298,7 @@ function feeBumpTxFee(psbtHex) {
   return fee;
 }
 
-function btcNetworkFor(network) {
+function btcNetworkFor(network: string): BtcNetwork {
   const config = BTC_NETWORKS.get(String(network ?? "").toUpperCase());
   if (!config) {
     throw new CpfpFundingError(`Unsupported network for CPFP funding: ${network}`);
@@ -227,7 +306,7 @@ function btcNetworkFor(network) {
   return config;
 }
 
-function normalizeAccountNumber(value) {
+function normalizeAccountNumber(value: AccountNumberInput): number {
   if (value === undefined || value === null || value === "") return 0;
   const account = Number(value);
   if (!Number.isSafeInteger(account) || account < 0) {
@@ -236,7 +315,7 @@ function normalizeAccountNumber(value) {
   return account;
 }
 
-function validateFeeRate(feeRate) {
+function validateFeeRate(feeRate: number): number {
   const value = Number(feeRate);
   if (!Number.isFinite(value) || value <= 0) {
     throw new CpfpFundingError("--fee-rate must be a positive number");

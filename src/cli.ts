@@ -1,39 +1,40 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 
-import { parseRecoveryBundle } from "./bundle.js";
+import { parseRecoveryBundle } from "./bundle.ts";
 import {
   broadcastPackages,
   broadcastSweeps,
   checkTransactionStatus,
-} from "./broadcast.js";
-import { loadSeed } from "./cli-input.js";
-import { parseCpfpUtxo, serializeForJson } from "./cpfp.js";
+} from "./broadcast.ts";
+import { loadSeed } from "./cli-input.ts";
+import { parseCpfpUtxo, serializeForJson } from "./cpfp.ts";
 import {
   assertSeedOnlyIsNotOfflineRecoverable,
   createRecoveryPlan,
-} from "./planner.js";
-import { exportRecoveryBundleFromSeed } from "./recovery-bundle.js";
-import { signPackages } from "./sign.js";
-import { constructSparkPackages } from "./spark-packages.js";
+} from "./planner.ts";
+import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
+import { signPackages } from "./sign.ts";
+import { constructSparkPackages } from "./spark-packages.ts";
 import {
   deriveCpfpFundingKey,
   estimateCpfpFunding,
   watchCpfpFunding,
-} from "./cpfp-funding.js";
-import { constructSweepTransactions } from "./sweep.js";
+} from "./cpfp-funding.ts";
+import { constructSweepTransactions } from "./sweep.ts";
+import type { CliArgs, CliArgValue, RecoveryBundle } from "./types.ts";
 
 // The Spark SDK emits diagnostic logs through the global console.log, which
 // writes to stdout. This CLI's contract is that stdout carries only the
 // machine-readable JSON result, so redirect all incidental console.log output
 // to stderr and emit results explicitly via emitJson/process.stdout.
-console.log = (...args) => console.error(...args);
+console.log = (...args: unknown[]) => console.error(...args);
 
-function emitJson(value) {
+function emitJson(value: unknown): void {
   process.stdout.write(`${serializeForJson(value)}\n`);
 }
 
-async function main() {
+async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
 
@@ -78,7 +79,7 @@ async function main() {
     const results = await broadcastPackages({
       packages: input.packages ?? input,
       network,
-      esploraUrl: args["esplora-url"],
+      esploraUrl: optionalValue(args["esplora-url"]),
       onPackageSubmitted(entry) {
         console.error(
           `Submitted leaf ${entry.leafId} package ${entry.packageIndex}`,
@@ -97,7 +98,7 @@ async function main() {
     const results = await broadcastSweeps({
       sweeps: input.sweeps ?? input,
       network,
-      esploraUrl: args["esplora-url"],
+      esploraUrl: optionalValue(args["esplora-url"]),
     });
     emitJson(results);
     return;
@@ -109,7 +110,7 @@ async function main() {
     const status = await checkTransactionStatus({
       txid,
       network,
-      esploraUrl: args["esplora-url"],
+      esploraUrl: optionalValue(args["esplora-url"]),
     });
     emitJson(status);
     return;
@@ -119,7 +120,7 @@ async function main() {
     const bundle = loadOptionalBundle(args.bundle);
     if (!bundle) throw new Error("--bundle is required to estimate CPFP funding");
     const seed = await loadSeed(args);
-    const network = args.network ?? bundle.network;
+    const network = optionalValue(args.network) ?? bundle.network;
     const feeRate = Number(required(args["fee-rate"], "--fee-rate"));
     const key = deriveCpfpFundingKey({
       seed,
@@ -178,8 +179,8 @@ async function main() {
       const estimate = await estimateCpfpFunding({
         bundle,
         feeRate: Number(required(args["fee-rate"], "--fee-rate")),
-        fundingScript: script,
-        fundingPublicKey: publicKey,
+        fundingScript: script!,
+        fundingPublicKey: publicKey!,
         bufferSats: optionalValue(args["buffer-sats"]),
       });
       minSats = estimate.requiredSats;
@@ -190,7 +191,7 @@ async function main() {
       script,
       publicKey,
       network,
-      esploraUrl: args["esplora-url"],
+      esploraUrl: optionalValue(args["esplora-url"]),
       minSats,
       minConfirmations: optionalNumber(args["min-confirmations"], 1, "--min-confirmations"),
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
@@ -213,8 +214,10 @@ async function main() {
     const packages = input.packages ?? input;
     const signed = signPackages({ packages, privateKey });
     const output = serializeForJson({ ...input, packages: signed });
-    if (args.out) {
-      fs.writeFileSync(args.out, `${output}\n`, { mode: 0o600 });
+    if (args.out === true) throw new Error("--out requires a path");
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      fs.writeFileSync(outPath, `${output}\n`, { mode: 0o600 });
     } else {
       process.stdout.write(`${output}\n`);
     }
@@ -228,10 +231,10 @@ async function main() {
     const seed = await loadSeed(args);
     const sweeps = constructSweepTransactions({
       seed,
-      passphrase: args.passphrase ?? "",
+      passphrase: optionalValue(args.passphrase) ?? "",
       network: required(args.network, "--network"),
       packages,
-      destination: args.destination,
+      destination: optionalValue(args.destination),
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
@@ -245,13 +248,14 @@ async function main() {
     const bundle = await exportRecoveryBundleFromSeed({
       seed,
       accountNumber: args["account-number"] ?? 0,
-      network: args.network ?? "MAINNET",
-      operatorSet: args["operator-set"] ?? "spark-sdk",
-      appVersion: args["app-version"] ?? "unknown",
+      network: optionalValue(args.network) ?? "MAINNET",
+      operatorSet: optionalValue(args["operator-set"]) ?? "spark-sdk",
+      appVersion: optionalValue(args["app-version"]) ?? "unknown",
     });
     const output = `${serializeForJson(bundle)}\n`;
-    if (args.out) {
-      fs.writeFileSync(args.out, output, { mode: 0o600 });
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      fs.writeFileSync(outPath, output, { mode: 0o600 });
     } else {
       process.stdout.write(output);
     }
@@ -261,54 +265,66 @@ async function main() {
   throw new Error(`Unknown command: ${command}`);
 }
 
-function parseArgs(argv) {
-  const args = {};
+function parseArgs(argv: string[]): CliArgs {
+  const args: CliArgs = {};
   for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
+    const token = argv[i]!;
     if (!token.startsWith("--")) {
       throw new Error(`Unexpected positional argument: ${token}`);
     }
     const key = token.slice(2);
     const value = argv[i + 1];
+    const existing = args[key];
     if (!value || value.startsWith("--")) {
       args[key] = true;
-    } else if (args[key] === undefined) {
+    } else if (existing === undefined) {
       args[key] = value;
       i += 1;
-    } else if (Array.isArray(args[key])) {
-      args[key].push(value);
+    } else if (Array.isArray(existing)) {
+      existing.push(value);
       i += 1;
     } else {
-      args[key] = [args[key], value];
+      // `existing` is a scalar: a string, or `true` from an earlier bare flag.
+      args[key] = [String(existing), value];
       i += 1;
     }
   }
   return args;
 }
 
-function loadOptionalBundle(path) {
-  if (!path) return null;
-  return parseRecoveryBundle(fs.readFileSync(path, "utf8"));
+function loadOptionalBundle(path: CliArgValue): RecoveryBundle | null {
+  const resolved = optionalValue(path);
+  if (!resolved) return null;
+  return parseRecoveryBundle(fs.readFileSync(resolved, "utf8"));
 }
 
-function collect(value) {
-  if (value === undefined) return [];
-  return Array.isArray(value) ? value : [value];
+function collect(value: CliArgValue): string[] {
+  if (Array.isArray(value)) return value;
+  const single = optionalValue(value);
+  return single === undefined ? [] : [single];
 }
 
-function required(value, name) {
-  if (value === undefined || value === true || value === "") {
+function required(value: CliArgValue, name: string): string {
+  const raw = optionalValue(value);
+  if (raw === undefined || raw === "") {
     throw new Error(`${name} is required`);
   }
-  return value;
+  return raw;
 }
 
-// A flag passed without a value parses to `true`; treat that as absent.
-function optionalValue(value) {
-  return value === undefined || value === true ? undefined : value;
+// A flag passed without a value parses to `true` and a repeated flag parses to
+// a string[]; neither is a usable scalar, so treat both as absent. This is the
+// single narrowing point from CliArgValue to string — read scalar args through
+// it (or required()) instead of casting at each use site.
+function optionalValue(value: CliArgValue): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
-function optionalNumber(value, fallback, name) {
+function optionalNumber(
+  value: CliArgValue,
+  fallback: number | undefined,
+  name: string,
+): number | undefined {
   const raw = optionalValue(value);
   if (raw === undefined) return fallback;
   const parsed = Number(raw);
@@ -318,12 +334,12 @@ function optionalNumber(value, fallback, name) {
   return parsed;
 }
 
-function optionalSeconds(value, name) {
+function optionalSeconds(value: CliArgValue, name: string): number | undefined {
   const seconds = optionalNumber(value, undefined, name);
   return seconds === undefined ? undefined : seconds * 1000;
 }
 
-async function resolveCpfpPrivateKey(args) {
+async function resolveCpfpPrivateKey(args: CliArgs): Promise<string> {
   const keyFile = optionalValue(args["key-file"]);
   const keyArg = optionalValue(args["private-key"]);
   if (keyFile) return fs.readFileSync(keyFile, "utf8").trim();
@@ -340,7 +356,7 @@ async function resolveCpfpPrivateKey(args) {
   throw new Error("--key-file, --private-key, or --seed-file/--seed is required");
 }
 
-function printHelp() {
+function printHelp(): void {
   process.stdout.write(`spark-unilateral-exit
 
 Commands:
@@ -430,6 +446,6 @@ Seed-only mode is intentionally rejected for offline recovery.
 }
 
 main().catch((error) => {
-  console.error(error.message);
+  console.error((error as Error).message);
   process.exitCode = 1;
 });

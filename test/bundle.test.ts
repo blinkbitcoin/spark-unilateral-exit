@@ -4,7 +4,7 @@ import {
   BundleValidationError,
   getNodeHexStrings,
   parseRecoveryBundle,
-} from "../src/bundle.js";
+} from "../src/bundle.ts";
 
 describe("recovery bundle validation", () => {
   it("parses a valid bundle", () => {
