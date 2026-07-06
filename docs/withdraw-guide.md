@@ -79,7 +79,7 @@ node src/cli.js refresh-bundle \
 
 Operational notes:
 
-- Prefer `--seed-file` or `SPARK_SEED`; avoid passing real seeds via `--seed` in shared shells.
+- Prefer `--seed-file` (mode `0600`) or the hidden prompt; avoid passing real seeds via `--seed` (captured in shell history and `ps`). `SPARK_SEED` is acceptable but is visible to other processes via `ps e`/`/proc`.
 - `--operator-set` and `--app-version` are optional provenance metadata stored in the bundle.
 - The command initializes the Spark wallet from the seed, forces a wallet sync when the SDK exposes that API, queries `getLeaves()`, serializes each `TreeNode`, and writes a bundle matching this repo's recovery schema.
 - The command fails if no leaves are present. An empty bundle cannot recover funds offline.
@@ -172,6 +172,38 @@ Field meanings:
 
 The UTXO must be unspent, confirmed or otherwise acceptable to the target mempool policy, on the same Bitcoin network as the recovery bundle, and large enough to pay the requested fee bump without becoming dust. Do not use a Spark deposit or Lightning invoice as this value; use a normal Bitcoin wallet UTXO whose private key or signing device is available during recovery.
 
+### Seed-derived funding (recommended)
+
+When the recovery seed is available, the CLI can derive a dedicated CPFP funding address from it, tell you exactly how many sats to send, and assemble the `--cpfp-utxo` string for you. The funding key lives at BIP32 purpose `8797556'` (one above the Spark wallet purpose), so it never collides with Spark's own keys or a standard BIP44/49/84/86 wallet on the same seed. This avoids the manual `listunspent`/`getaddressinfo` steps below and means there is no separate fee-key to generate or back up.
+
+First derive the address and required amount:
+
+```sh
+node src/cli.js cpfp-address \
+  --bundle recovery-bundle.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --fee-rate 10
+```
+
+This prints `cpfpAddress`, `script`, `publicKey`, `derivationPath`, and `requiredSats` (the summed fee-bump fees plus a `--buffer-sats` margin, default 1000). Send at least `requiredSats` to `cpfpAddress` from any Bitcoin wallet.
+
+Then watch for the funds to arrive and capture the ready-to-use CPFP input:
+
+```sh
+node src/cli.js watch-cpfp \
+  --bundle recovery-bundle.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --fee-rate 10
+```
+
+It polls Esplora until a UTXO of at least `requiredSats` (auto-computed from `--bundle` + `--fee-rate`, or set `--min-sats` directly) reaches the funding address with the required confirmations (`--min-confirmations`, default 1; use 0 to accept mempool). It then emits a `cpfpUtxo` field in `txid:vout:value:script:publicKey` form to pass straight to `package --cpfp-utxo`. `watch-cpfp` requires either `--min-sats` or `--bundle` so it never matches an underfunded UTXO. Because the funding key comes from the same seed, `sign-packages --seed-file ... --network MAINNET` can sign the CPFP PSBTs later without a separate key file.
+
+`watch-cpfp`, `broadcast`, `broadcast-sweep`, and `tx-status` use Esplora, which has no default URL for `REGTEST`/`LOCAL`; on those networks pass `--esplora-url` or fall back to `bitcoin-cli`.
+
+The manual exports below remain valid when you would rather fund from an existing wallet UTXO.
+
 ### Export from Bitcoin Core
 
 Bitcoin Core is the cleanest source when the fee wallet is loaded locally. The first four fields usually come from `listunspent`:
@@ -243,11 +275,11 @@ For `publicKey`, use Sparrow's address or key details for the selected receive/c
 1. Decrypt and validate the bundle.
 2. Verify the bundle matches the restored seed-derived wallet identity.
 3. Validate the destination address for the configured Bitcoin network.
-4. Collect CPFP fee UTXOs.
-5. Construct unilateral-exit packages from saved `TreeNode` data.
-6. Broadcast parent transactions and signed CPFP children in root-to-leaf order.
-7. Wait for required confirmations/timelocks.
-8. Construct, broadcast, and confirm sweep transactions to the user's destination address.
+4. Collect CPFP fee UTXOs (`cpfp-address` + `watch-cpfp`, or a manual export).
+5. Construct unilateral-exit packages from saved `TreeNode` data (`package`).
+6. Sign the CPFP fee-bump PSBTs (`sign-packages`) and broadcast parent + signed child in root-to-leaf order (`broadcast`).
+7. Wait for required confirmations/timelocks (`tx-status`).
+8. Construct (`sweep`), broadcast (`broadcast-sweep`), and confirm sweep transactions to the user's destination address.
 
 ## Current prototype commands
 
@@ -270,6 +302,26 @@ node src/cli.js plan \
   --cpfp-utxo <txid:vout:value:script:pubkey>
 ```
 
+Derive a CPFP funding address and estimate the sats to send it (seed-derived path):
+
+```sh
+node src/cli.js cpfp-address \
+  --bundle recovery-bundle.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --fee-rate 10
+```
+
+Watch the funding address and emit the `--cpfp-utxo` value once it is funded:
+
+```sh
+node src/cli.js watch-cpfp \
+  --bundle recovery-bundle.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --fee-rate 10
+```
+
 Package construction:
 
 ```sh
@@ -278,6 +330,23 @@ node src/cli.js package \
   --destination <bitcoin-address> \
   --fee-rate 10 \
   --cpfp-utxo <txid:vout:value:script:pubkey>
+```
+
+Sign the CPFP fee-bump PSBTs (from the seed, or `--key-file`/`--private-key`):
+
+```sh
+node src/cli.js sign-packages \
+  --packages recovery-packages.json \
+  --seed-file <spark-seed-file> \
+  --network MAINNET \
+  --out recovery-packages-signed.json
+```
+
+Broadcast the signed packages, then check confirmations (Esplora networks only: MAINNET/TESTNET/SIGNET):
+
+```sh
+node src/cli.js broadcast --packages recovery-packages-signed.json --network MAINNET
+node src/cli.js tx-status --txid <parent-or-child-txid> --network MAINNET
 ```
 
 Sweep construction after refund transactions are confirmed and spendable:
@@ -290,6 +359,12 @@ node src/cli.js sweep \
   --destination <bitcoin-address> \
   --fee-rate 10 \
   --account-number <spark-account-number>
+```
+
+Broadcast the signed sweep transactions (Esplora networks only):
+
+```sh
+node src/cli.js broadcast-sweep --sweeps sweeps.json --network MAINNET
 ```
 
 ## Seed-only mode

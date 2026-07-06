@@ -12,6 +12,65 @@ See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and 
 
 ## Current CLI
 
+The CLI (`node src/cli.js <command>`, run `help` for full flags) exposes:
+
+| Command | Purpose |
+|---------|---------|
+| `refresh-bundle` | Query live Spark leaves from a seed and write a bundle |
+| `plan` | Validate a saved bundle and print a recovery plan |
+| `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
+| `watch-cpfp` | Watch the funding address for an incoming UTXO and emit it as `--cpfp-utxo` |
+| `package` | Construct unilateral-exit packages via the upstream Spark SDK |
+| `sign-packages` | Sign the CPFP fee-bump PSBTs (key from seed, key-file, or hex) |
+| `broadcast` | Submit signed packages via Esplora |
+| `tx-status` | Check confirmation status of a transaction via Esplora |
+| `sweep` | Spend confirmed refund outputs to a destination address |
+| `broadcast-sweep` | Broadcast signed sweep transactions via Esplora |
+
+`watch-cpfp`, `broadcast`, `broadcast-sweep`, and `tx-status` use Esplora and support only MAINNET/TESTNET/SIGNET by default; on REGTEST/LOCAL pass `--esplora-url` or use `bitcoin-cli`.
+
+## Recovery Flow
+
+```mermaid
+flowchart TD
+    seed[("Spark seed")]
+
+    subgraph prep["Preparation — Spark operators online"]
+        refresh["refresh-bundle"]
+        bundle[("recovery-bundle.json<br/>store encrypted, keep fresh")]
+        refresh --> bundle
+    end
+
+    subgraph funding["CPFP fee funding"]
+        addr["cpfp-address<br/>prints cpfpAddress + requiredSats"]
+        send["send ≥ requiredSats to cpfpAddress<br/>(single on-chain UTXO)"]
+        watch["watch-cpfp<br/>emits cpfpUtxo"]
+        addr --> send --> watch
+    end
+
+    subgraph exit["Unilateral exit — operators offline"]
+        plan["plan<br/>optional dry run"]
+        pkg["package<br/>unilateral-exit tx packages"]
+        sign["sign-packages<br/>sign CPFP fee-bump PSBTs"]
+        bcast["broadcast<br/>submit packages via Esplora"]
+        status["tx-status<br/>wait for refund confirmation + timelock"]
+        sweep["sweep<br/>spend refund outputs to destination"]
+        bsweep["broadcast-sweep"]
+        done[("BTC at destination address")]
+        plan --> pkg --> sign --> bcast --> status --> sweep --> bsweep --> done
+    end
+
+    seed --> refresh
+    bundle --> addr
+    bundle --> pkg
+    watch -- "--cpfp-utxo" --> plan
+    seed -.-> addr
+    seed -.-> sign
+    seed -.-> sweep
+```
+
+Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere). The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only.
+
 Install dependencies:
 
 ```sh
@@ -75,6 +134,26 @@ make sweep \
   FEE_RATE=1 \
   ACCOUNT_NUMBER=1
 ```
+
+Derive a CPFP funding address from the seed and estimate the sats to send it, then watch for the funds and capture the ready-to-use `--cpfp-utxo` value:
+
+```sh
+node src/cli.js cpfp-address \
+  --bundle recovery-bundle.json \
+  --seed-file /path/to/spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 10
+
+# send at least the printed requiredSats to the printed cpfpAddress, then:
+
+node src/cli.js watch-cpfp \
+  --bundle recovery-bundle.json \
+  --seed-file /path/to/spark-seed.txt \
+  --network MAINNET \
+  --fee-rate 10
+```
+
+`cpfp-address` derives a dedicated P2WPKH funding key from the seed (BIP32 purpose `8797556'`, one above the Spark wallet purpose) and prints `cpfpAddress`, `script`, `publicKey`, and `requiredSats` (summed fee-bump fees plus `--buffer-sats`, default 1000). `watch-cpfp` polls until a UTXO of at least `requiredSats` (from `--bundle` + `--fee-rate`, or `--min-sats`) reaches that address and emits the `cpfpUtxo` string for `package --cpfp-utxo`. It requires `--min-sats` or `--bundle` so it never accepts an underfunded UTXO. This seed-derived path replaces manually exporting a fee UTXO from Bitcoin Core/Electrum/Sparrow (still documented in the withdraw guide), and the same seed signs the CPFP PSBTs via `sign-packages --seed-file`. If you pass `--account-number`, use the same value for `cpfp-address`, `watch-cpfp`, and `sign-packages` (it defaults to 0): each account derives a different key, so a mismatched `watch-cpfp` polls an address that never receives the funds.
 
 Create a dry-run recovery plan from a saved bundle:
 

@@ -4,12 +4,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
+import http from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
-import { secp256k1 } from "@noble/curves/secp256k1";
-import { ripemd160 } from "@noble/hashes/legacy";
-import { sha256 } from "@noble/hashes/sha2";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 import { Network, getNetwork } from "@buildonspark/spark-sdk";
 import {
@@ -25,6 +23,38 @@ import { parseRecoveryBundle } from "../../src/bundle.js";
 const runE2e = process.env.RUN_SPARK_E2E === "1";
 const execFileAsync = promisify(execFile);
 const repoRoot = new URL("../..", import.meta.url).pathname;
+
+function runCli(args) {
+  return execFileAsync("node", ["src/cli.js", ...args], {
+    cwd: repoRoot,
+    timeout: 60_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+// Minimal Esplora stand-in: the local stack has no Esplora, so this serves the
+// real funding UTXO for the address-utxo and tip-height endpoints watch-cpfp
+// polls, letting the actual CLI + Esplora client run end to end.
+async function startMockEsplora({ utxo, tipHeight }) {
+  const server = http.createServer((req, res) => {
+    if (req.url.endsWith("/blocks/tip/height")) {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(String(tipHeight));
+    } else if (req.url.includes("/address/") && req.url.endsWith("/utxo")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify([utxo]));
+    } else {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end("[]");
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
 const LOCAL_OPERATORS = [
   {
     id: 0,
@@ -86,8 +116,10 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         "claim Spark deposit leaf",
         20,
       );
-      step("creating CPFP funding utxo");
-      const funding = await makeCpfpFundingUtxo(faucet, 50_000n);
+      // Seed file drives every CLI step that needs the seed (CPFP key
+      // derivation, signing, sweeping) without the seed touching argv.
+      const seedFile = path.join(tempDir, "seed.txt");
+      await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
 
       // Step 1: refresh-bundle (via standalone Rust tool, same as make refresh-recovery-bundle)
       step("refresh-bundle (standalone Rust tool)");
@@ -96,48 +128,95 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
       assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
-      // Step 2: package (equivalent to: make package)
+      // Step 2: cpfp-address (derive a funding address from the seed and estimate
+      // the sats to send it, replacing the manual bitcoin-cli/Sparrow UTXO step).
+      step("cpfp-address (derive + estimate)");
+      const { stdout: cpfpAddressOut } = await runCli([
+        "cpfp-address",
+        "--bundle", bundlePath,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--account-number", "1",
+        "--fee-rate", "5",
+      ]);
+      const cpfpInfo = JSON.parse(cpfpAddressOut);
+      expect(cpfpInfo.cpfpAddress).toMatch(/^bcrt1q/);
+      expect(cpfpInfo.feeBumpTxCount).toBeGreaterThanOrEqual(2);
+      const requiredSats = BigInt(cpfpInfo.requiredSats);
+      expect(requiredSats).toBeGreaterThan(0n);
+
+      // Step 3: user funds the generated address on-chain. Here the faucet sends
+      // exactly the estimated amount to it and confirms it.
+      step("funding the CPFP address on-chain");
+      const fundingTx = await faucet.sendToAddress(cpfpInfo.cpfpAddress, requiredSats);
+      await faucet.mineBlocksAndWaitForMiningToComplete(6);
+      const fundingVout = findOutputIndex(
+        fundingTx,
+        hexToBytes(cpfpInfo.script),
+        requiredSats,
+      );
+
+      // Step 4: watch-cpfp detects the incoming funds and emits the cpfp-utxo.
+      // The local stack has no Esplora, so a tiny mock serves the real funding
+      // UTXO to exercise the actual watch-cpfp CLI + Esplora client end to end.
+      step("watch-cpfp (detect incoming funds)");
+      const esplora = await startMockEsplora({
+        utxo: {
+          txid: fundingTx.id,
+          vout: fundingVout,
+          value: Number(requiredSats),
+          status: { confirmed: true, block_height: 1 },
+        },
+        tipHeight: 1,
+      });
+      let cpfpUtxoStr;
+      try {
+        const { stdout: watchOut } = await runCli([
+          "watch-cpfp",
+          "--seed-file", seedFile,
+          "--network", "LOCAL",
+          "--account-number", "1",
+          "--min-sats", requiredSats.toString(),
+          "--min-confirmations", "1",
+          "--poll-interval", "1",
+          "--timeout", "30",
+          "--esplora-url", esplora.url,
+        ]);
+        const watched = JSON.parse(watchOut);
+        expect(watched.txid).toBe(fundingTx.id);
+        expect(watched.cpfpUtxo).toContain(cpfpInfo.script);
+        cpfpUtxoStr = watched.cpfpUtxo;
+      } finally {
+        await esplora.close();
+      }
+
+      // Step 5: package (equivalent to: make package)
       step("package (CLI)");
-      const cpfpUtxoStr = [
-        funding.utxo.txid,
-        funding.utxo.vout,
-        funding.utxo.value.toString(),
-        funding.utxo.script,
-        funding.utxo.publicKey,
-      ].join(":");
       const destination = await faucet.getNewAddress();
       const packagesPath = path.join(tempDir, "packages.json");
-      const { stdout: packageOut } = await execFileAsync(
-        "node",
-        [
-          "src/cli.js", "package",
-          "--bundle", bundlePath,
-          "--destination", destination,
-          "--fee-rate", "5",
-          "--cpfp-utxo", cpfpUtxoStr,
-        ],
-        { cwd: repoRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
-      );
+      const { stdout: packageOut } = await runCli([
+        "package",
+        "--bundle", bundlePath,
+        "--destination", destination,
+        "--fee-rate", "5",
+        "--cpfp-utxo", cpfpUtxoStr,
+      ]);
       await fs.writeFile(packagesPath, packageOut);
       const packageJson = JSON.parse(packageOut);
       expect(packageJson.packages).toHaveLength(1);
       expect(packageJson.packages[0]?.txPackages.length).toBeGreaterThanOrEqual(2);
 
-      // Step 3: sign-packages (equivalent to: make sign-packages)
-      step("sign-packages (CLI)");
-      const keyFilePath = path.join(tempDir, "cpfp-key.hex");
-      await fs.writeFile(keyFilePath, bytesToHex(funding.privateKey), { mode: 0o600 });
+      // Step 6: sign-packages, deriving the CPFP key from the same seed.
+      step("sign-packages (CLI, key from seed)");
       const signedPath = path.join(tempDir, "packages-signed.json");
-      await execFileAsync(
-        "node",
-        [
-          "src/cli.js", "sign-packages",
-          "--packages", packagesPath,
-          "--key-file", keyFilePath,
-          "--out", signedPath,
-        ],
-        { cwd: repoRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
-      );
+      await runCli([
+        "sign-packages",
+        "--packages", packagesPath,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--account-number", "1",
+        "--out", signedPath,
+      ]);
       const signedJson = JSON.parse(await fs.readFile(signedPath, "utf8"));
       expect(signedJson.packages).toHaveLength(1);
       for (const txPkg of signedJson.packages[0].txPackages) {
@@ -145,7 +224,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         expect(txPkg.tx).toBeTruthy();
       }
 
-      // Step 4: broadcast signed packages (submitpackage to regtest bitcoind)
+      // Step 7: broadcast signed packages (submitpackage to regtest bitcoind)
       step("broadcast packages + mine CPFP timelock");
       for (const leafPkg of signedJson.packages) {
         for (const txPkg of leafPkg.txPackages) {
@@ -153,10 +232,8 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         }
       }
 
-      // Step 5: sweep (equivalent to: make sweep)
+      // Step 8: sweep (equivalent to: make sweep)
       step("sweep (CLI)");
-      const seedFile = path.join(tempDir, "seed.txt");
-      await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
       const { stdout: sweepOut } = await execFileAsync(
         "node",
         [
@@ -179,7 +256,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         refundVout: 0,
       });
 
-      // Step 6: broadcast sweep tx
+      // Step 9: broadcast sweep tx
       step("broadcast sweep tx + mine");
       const sweepTxid = await faucet.broadcastTx(sweepResult.sweeps[0].sweepTx);
       expect(sweepTxid).toBe(sweepResult.sweeps[0].sweepTxid);
@@ -341,32 +418,6 @@ async function retry(fn, label, attempts = 8) {
   throw lastError;
 }
 
-async function makeCpfpFundingUtxo(faucet, amount) {
-  const privateKey = secp256k1.utils.randomPrivateKey();
-  const publicKey = secp256k1.getPublicKey(privateKey, true);
-  const bitcoinNetwork = getNetwork(Network.LOCAL);
-  const address = Address(bitcoinNetwork).encode({
-    type: "wpkh",
-    hash: hash160(publicKey),
-  });
-
-  const fundingTx = await faucet.sendToAddress(address, amount);
-  await faucet.mineBlocksAndWaitForMiningToComplete(6);
-  const script = OutScript.encode(Address(bitcoinNetwork).decode(address));
-  const vout = findOutputIndex(fundingTx, script, amount);
-
-  return {
-    privateKey,
-    utxo: {
-      txid: fundingTx.id,
-      vout,
-      value: amount,
-      script: bytesToHex(script),
-      publicKey: bytesToHex(publicKey),
-    },
-  };
-}
-
 function summarizePackage(parentHex, childHex) {
   return {
     parent: summarizeTx(parentHex),
@@ -446,6 +497,3 @@ function packageSubmitSucceeded(result) {
   });
 }
 
-function hash160(bytes) {
-  return ripemd160(sha256(bytes));
-}

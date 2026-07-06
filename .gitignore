@@ -4,6 +4,19 @@ coverage/
 .direnv/
 .env
 *.log
-*.bundle.cleartext.json
-*.seed
 e2e-output
+.DS_Store
+
+# Wallet material and recovery outputs -- these default filenames come from
+# the Makefile, README, and runbook; never commit them.
+*.seed
+*seed*.txt
+*.bundle.cleartext.json
+recovery-bundle*.json
+*.backup.json
+recovery-packages*.json
+sweeps*.json
+
+# Checked-in fixtures are exempt.
+!examples/*.json
+!test/fixtures/*.json

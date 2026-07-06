@@ -129,22 +129,29 @@ pays for parent). The SDK chains this UTXO automatically — one initial UTXO
 feeds all packages via change outputs, so the user does not need to provide a
 separate UTXO per leaf.
 
-### Recommended: App-managed CPFP hot key
+### Recommended: Seed-derived CPFP funding key
 
-The app generates a dedicated P2WPKH keypair for CPFP fee bumping during wallet
-setup or first recovery attempt. This key is stored alongside the wallet seed
-(same security boundary) and used exclusively for CPFP signing.
+The CPFP funding key is derived deterministically from the wallet seed at BIP32
+purpose `8797556'` (one above the Spark wallet purpose `8797555'`), producing a
+dedicated P2WPKH funding address. Deriving from the seed — rather than generating
+and separately storing a keypair — means there is no extra key to back up: the
+same seed that owns the wallet reproduces the funding key on demand. It never
+collides with Spark's own keys or a standard BIP44/49/84/86 wallet on the seed.
+The `cpfp-address`, `watch-cpfp`, and `sign-packages` commands all use this
+derivation (see `deriveCpfpFundingKey` in `src/cpfp-funding.js`).
 
 Recovery flow:
 
 1. App detects recovery is needed (operators unreachable, user-triggered).
-2. App prompts user to fund the CPFP address with a small on-chain amount
-   (e.g. send from an exchange, another wallet, or Blink's own on-chain
-   balance if available).
-3. Once funded, the app constructs all exit packages using the recovery
-   bundle and the funded UTXO.
+2. App derives the funding address and required amount (`cpfp-address`) and
+   prompts the user to fund it with a small on-chain amount (e.g. send from an
+   exchange, another wallet, or Blink's own on-chain balance if available).
+3. App watches the funding address (`watch-cpfp`) and, once a sufficiently
+   funded UTXO confirms, constructs all exit packages using the recovery bundle
+   and that UTXO.
 4. App signs all CPFP PSBTs in-process using `signPackages()` from
-   `src/sign.js` — no external wallet or Bitcoin Core node needed.
+   `src/sign.js`, re-deriving the funding key from the seed — no external
+   wallet, key file, or Bitcoin Core node needed.
 5. App broadcasts signed packages sequentially via Esplora
    (`POST /txs/package`).
 6. App polls for confirmations and timelock maturity.
