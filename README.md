@@ -8,7 +8,7 @@ This repo uses a bundle-first recovery model:
 - The CLI consumes that bundle plus CPFP fee inputs and a destination Bitcoin address.
 - Seed-only recovery is not sufficient once Spark operators are offline, because current leaves cannot be discovered from the seed alone.
 
-See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook.
+See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook. For wallet-app integration, see [docs/mobile-integration-plan.md](docs/mobile-integration-plan.md) (integration boundary) and [docs/mobile-ux-flow.md](docs/mobile-ux-flow.md) (screen flow for Blink mobile).
 
 ## Current CLI
 
