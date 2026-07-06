@@ -2,6 +2,7 @@
   "name": "spark-unilateral-exit",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "spark-unilateral-exit": "./src/cli.ts"
@@ -22,6 +23,16 @@
     "@scure/bip32": "^1.7.0",
     "@scure/bip39": "^1.6.0",
     "@scure/btc-signer": "^1.5.0"
+  },
+  "//": [
+    "overrides: @buildonspark/spark-sdk depends on ua-parser-js ^2.x, which is",
+    "AGPL-3.0-or-later (relicensed from MIT at v2.0). AGPL is incompatible with",
+    "this repo's MIT license for redistributed bundles, so we pin the last",
+    "MIT-licensed major (1.x). The SDK only uses it for user-agent detection",
+    "and the UAParser API it uses is compatible across 1.x/2.x."
+  ],
+  "overrides": {
+    "ua-parser-js": "^1.0.41"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
