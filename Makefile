@@ -84,7 +84,7 @@ package: require-destination require-cpfp-args
 sign-packages: require-signing-key
 	@$(NODE) src/cli.ts sign-packages \
 		--packages $(PACKAGES) \
-		$(if $(KEY_FILE),--key-file $(KEY_FILE),$(SEED_ARGS) $(ACCOUNT_ARGS)) \
+		$(if $(KEY_FILE),--key-file $(KEY_FILE),$(SEED_ARGS) --network $(NETWORK) $(ACCOUNT_ARGS)) \
 		--out $(SIGNED_PACKAGES)
 
 cpfp-address:
@@ -130,7 +130,7 @@ recover: require-destination require-seed-file
 		--fee-rate $(FEE_RATE) --cpfp-utxo "$$cpfp_utxo" > $(PACKAGES); \
 	echo "Wrote $(PACKAGES)" >&2; \
 	$(NODE) src/cli.ts sign-packages \
-		--packages $(PACKAGES) $(SEED_ARGS) $(ACCOUNT_ARGS) \
+		--packages $(PACKAGES) $(SEED_ARGS) --network $(NETWORK) $(ACCOUNT_ARGS) \
 		--out $(SIGNED_PACKAGES); \
 	echo "Wrote $(SIGNED_PACKAGES), broadcasting via Esplora..." >&2; \
 	$(NODE) src/cli.ts broadcast \
