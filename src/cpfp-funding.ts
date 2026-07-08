@@ -29,6 +29,9 @@ const BTC_NETWORKS = new Map<string, BtcNetwork>([
 // with the Spark SDK's own keys -- the SDK derives identity/signing/deposit/
 // static-deposit/htlc under 8797555'/<account>'/0'..4' -- nor with a standard
 // BIP44/49/84/86 wallet that happens to share the same seed.
+// Only the purpose level is hardened: with the account and index public, a
+// watch-only wallet (e.g. Sparrow) given the xpub at m/8797556' can derive and
+// monitor the funding address without the seed.
 const CPFP_FUNDING_PURPOSE = 8797556;
 
 // Large placeholder value so package construction succeeds while we only measure
@@ -52,7 +55,13 @@ export interface CpfpFundingKey {
   address: string | undefined;
   script: string;
   derivationPath: string;
+  purposeXpub: string;
+  watchDescriptor: string;
 }
+
+// Extended-key version bytes so the exported watch-only key reads as xpub on
+// mainnet and tpub elsewhere, matching what Sparrow/Electrum expect per network.
+const TESTNET_BIP32_VERSIONS = { private: 0x04358394, public: 0x043587cf };
 
 export function deriveCpfpFundingKey({
   seed,
@@ -65,8 +74,10 @@ export function deriveCpfpFundingKey({
 }): CpfpFundingKey {
   const btcNetwork = btcNetworkFor(network);
   const account = normalizeAccountNumber(accountNumber);
-  const path = `m/${CPFP_FUNDING_PURPOSE}'/${account}'/0'`;
-  const root = HDKey.fromMasterSeed(parseSeed(seed));
+  const path = `m/${CPFP_FUNDING_PURPOSE}'/${account}/0`;
+  const versions =
+    String(network).toUpperCase() === "MAINNET" ? undefined : TESTNET_BIP32_VERSIONS;
+  const root = HDKey.fromMasterSeed(parseSeed(seed), versions);
   const derived = root.derive(path);
   if (!derived.privateKey) {
     throw new CpfpFundingError(`Derivation path produced no private key: ${path}`);
@@ -74,6 +85,9 @@ export function deriveCpfpFundingKey({
   const privateKey = derived.privateKey;
   const publicKey = secp256k1.getPublicKey(privateKey, true);
   const payment = p2wpkh(publicKey, btcNetwork);
+  const purposeNode = root.derive(`m/${CPFP_FUNDING_PURPOSE}'`);
+  const purposeXpub = purposeNode.publicExtendedKey;
+  const fingerprint = root.fingerprint.toString(16).padStart(8, "0");
   return {
     privateKey,
     privateKeyHex: bytesToHex(privateKey),
@@ -81,6 +95,8 @@ export function deriveCpfpFundingKey({
     address: payment.address,
     script: bytesToHex(payment.script),
     derivationPath: path,
+    purposeXpub,
+    watchDescriptor: `wpkh([${fingerprint}/${CPFP_FUNDING_PURPOSE}']${purposeXpub}/${account}/0)`,
   };
 }
 

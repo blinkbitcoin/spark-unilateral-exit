@@ -142,7 +142,9 @@ Field meanings:
 ### Recommended: seed-derived funding
 
 When the recovery seed is available, let the CLI derive a dedicated funding
-address (BIP32 purpose `8797556'`, isolated from Spark's own keys), tell you the
+address (path `m/8797556'/<account>/0` — only the purpose is hardened, so a
+watch-only wallet like Sparrow can track it from the `m/8797556'` xpub;
+isolated from Spark's own keys), tell you the
 amount to send, and assemble the string for you. This is the primary path for
 mobile/programmatic recovery and avoids manual `listunspent` export.
 

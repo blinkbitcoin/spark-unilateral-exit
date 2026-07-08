@@ -16,7 +16,7 @@ describe("deriveCpfpFundingKey", () => {
     const b = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET", accountNumber: 0 });
     expect(a.address).toBe(b.address);
     expect(a.privateKeyHex).toBe(b.privateKeyHex);
-    expect(a.derivationPath).toBe("m/8797556'/0'/0'");
+    expect(a.derivationPath).toBe("m/8797556'/0/0");
   });
 
   it("uses a P2WPKH address matching the network", () => {
@@ -29,6 +29,17 @@ describe("deriveCpfpFundingKey", () => {
     const key = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET" });
     expect(key.publicKey).toMatch(/^0[23][0-9a-f]{64}$/);
     expect(key.script).toMatch(/^0014[0-9a-f]{40}$/);
+  });
+
+  it("exports a watch-only xpub and descriptor at the hardened purpose level", () => {
+    const mainnet = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET", accountNumber: 0 });
+    expect(mainnet.purposeXpub).toMatch(/^xpub/);
+    expect(mainnet.watchDescriptor).toMatch(
+      /^wpkh\(\[[0-9a-f]{8}\/8797556'\]xpub[1-9A-HJ-NP-Za-km-z]+\/0\/0\)$/,
+    );
+    const regtest = deriveCpfpFundingKey({ seed: SEED, network: "REGTEST", accountNumber: 1 });
+    expect(regtest.purposeXpub).toMatch(/^tpub/);
+    expect(regtest.watchDescriptor).toContain("/1/0)");
   });
 
   it("derives distinct keys per account", () => {

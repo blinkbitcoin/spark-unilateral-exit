@@ -140,6 +140,8 @@ async function main(): Promise<void> {
       script: key.script,
       publicKey: key.publicKey,
       derivationPath: key.derivationPath,
+      purposeXpub: key.purposeXpub,
+      watchDescriptor: key.watchDescriptor,
       ...estimate,
     });
     return;

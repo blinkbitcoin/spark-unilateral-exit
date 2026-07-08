@@ -174,7 +174,7 @@ The UTXO must be unspent, confirmed or otherwise acceptable to the target mempoo
 
 ### Seed-derived funding (recommended)
 
-When the recovery seed is available, the CLI can derive a dedicated CPFP funding address from it, tell you exactly how many sats to send, and assemble the `--cpfp-utxo` string for you. The funding key lives at BIP32 purpose `8797556'` (one above the Spark wallet purpose), so it never collides with Spark's own keys or a standard BIP44/49/84/86 wallet on the same seed. This avoids the manual `listunspent`/`getaddressinfo` steps below and means there is no separate fee-key to generate or back up.
+When the recovery seed is available, the CLI can derive a dedicated CPFP funding address from it, tell you exactly how many sats to send, and assemble the `--cpfp-utxo` string for you. The funding key lives at `m/8797556'/<account>/0` (purpose one above the Spark wallet purpose), so it never collides with Spark's own keys or a standard BIP44/49/84/86 wallet on the same seed. Only the purpose level is hardened, so a watch-only wallet such as Sparrow can monitor the funding address from the `m/8797556'` xpub without the seed. This avoids the manual `listunspent`/`getaddressinfo` steps below and means there is no separate fee-key to generate or back up.
 
 First derive the address and required amount:
 
