@@ -73,9 +73,13 @@ describe("buildFanOutTransaction", () => {
 
 describe("relativeHeightLock", () => {
   it("reads a BIP68 height lock and exposes prev-txid candidates", () => {
+    // Non-palindromic txid so the byte-reversal candidate differs from the
+    // display-order one and the reversal logic is actually exercised.
+    const prevTxid = "abcd".repeat(16);
+    const reversed = "cdab".repeat(16);
     const tx = new Transaction();
     tx.addInput({
-      txid: FUNDING_TXID,
+      txid: prevTxid,
       index: 0,
       sequence: 2000,
       witnessUtxo: { script: hexToBytes(KEY.script), amount: 50_000n },
@@ -85,7 +89,8 @@ describe("relativeHeightLock", () => {
     tx.finalize();
     const lock = relativeHeightLock(tx.hex);
     expect(lock?.blocks).toBe(2000);
-    expect(lock?.prevTxidCandidates).toContain(FUNDING_TXID);
+    expect(lock?.prevTxidCandidates).toContain(prevTxid);
+    expect(lock?.prevTxidCandidates).toContain(reversed);
   });
 
   it("returns null when relative locks are disabled", () => {

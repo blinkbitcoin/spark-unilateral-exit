@@ -18,6 +18,7 @@ import { signPackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
 import { autoExit } from "./auto-exit.ts";
 import {
+  createFundingWatchLogger,
   deriveCpfpFundingKey,
   estimateCpfpFunding,
   watchCpfpFunding,
@@ -196,10 +197,6 @@ async function main(): Promise<void> {
       1,
       "--min-confirmations",
     );
-    // Announce each incoming UTXO once so the operator knows their funding tx
-    // was seen (or is underfunded) instead of watching a bare attempt counter.
-    const announced = new Set<string>();
-    let splitFundingHinted = false;
     const utxo = await watchCpfpFunding({
       address,
       script,
@@ -210,48 +207,12 @@ async function main(): Promise<void> {
       minConfirmations,
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
       timeoutMs: optionalSeconds(args.timeout, "--timeout"),
-      onPoll: ({ attempt, utxos, error }) => {
-        if (error) {
-          console.error(
-            `Esplora poll failed (${error.message}); retrying (attempt ${attempt})`,
-          );
-          return;
-        }
-        for (const seen of utxos ?? []) {
-          const key = `${seen.txid}:${seen.vout}`;
-          if (announced.has(key)) continue;
-          announced.add(key);
-          const value = BigInt(seen.value ?? 0);
-          const confirmed = Boolean(seen.status?.confirmed);
-          if (value < BigInt(minSats!)) {
-            console.error(
-              `Seen ${confirmed ? "confirmed" : "unconfirmed"} UTXO ${key} at ${address}, but ${value} sats is below the required ${minSats} sats on its own`,
-            );
-          } else if (!confirmed) {
-            console.error(
-              `Seen unconfirmed funding tx ${seen.txid} (${value} sats) at ${address}; waiting for ${minConfirmations} confirmation(s)`,
-            );
-          }
-        }
-        // The matcher needs a single UTXO covering minSats; funding split
-        // across several transactions never matches, so say so explicitly
-        // instead of leaving the operator staring at an attempt counter.
-        if (!splitFundingHinted && (utxos?.length ?? 0) > 1) {
-          const confirmedUtxos = (utxos ?? []).filter((u) => u?.status?.confirmed);
-          const total = confirmedUtxos.reduce((sum, u) => sum + BigInt(u.value ?? 0), 0n);
-          const largest = confirmedUtxos.reduce(
-            (max, u) => (BigInt(u.value ?? 0) > max ? BigInt(u.value ?? 0) : max),
-            0n,
-          );
-          if (total >= BigInt(minSats!) && largest < BigInt(minSats!)) {
-            splitFundingHinted = true;
-            console.error(
-              `Total confirmed balance at ${address} is ${total} sats across ${confirmedUtxos.length} UTXOs, which covers the required ${minSats} sats, but no single UTXO does. Consolidate them into one output (send the full balance back to ${address} in one transaction) to proceed.`,
-            );
-          }
-        }
-        console.error(`Waiting for CPFP funding at ${address} (attempt ${attempt})`);
-      },
+      onPoll: createFundingWatchLogger({
+        address: address!,
+        minSats: minSats!,
+        minConfirmations,
+        log: (message) => console.error(message),
+      }),
     });
     emitJson({
       ...utxo,

@@ -101,7 +101,13 @@ export function deriveCpfpFundingKey({
 }
 
 // Observed vsize of the one-input one-output Taproot key-path sweep the sweep
-// command builds; used to price the final leaf-value -> destination spend.
+// command builds (P2TR input; see the runbook's sweep output example), used to
+// price the final leaf-value -> destination spend. This is an approximation:
+// the true size depends on the destination script type (~99 vB for a P2WPKH
+// destination, ~114 vB for P2TR), which is unknown at estimation time. Only
+// the economic classification of leaves within a few sats of break-even is
+// sensitive to the difference; actual sweep fees are computed from the real
+// transaction at sweep time.
 const SWEEP_TX_VSIZE = 111n;
 
 export interface LeafEconomics {
@@ -404,6 +410,77 @@ export async function watchCpfpFunding({
     const backoff = Math.min(2 ** consecutiveErrors, 8);
     await sleep(pollIntervalMs * (pollError ? backoff : 1));
   }
+}
+
+interface FundingWatchLoggerOptions {
+  address: string;
+  minSats: bigint | number | string;
+  minConfirmations?: number;
+  log: (message: string) => void;
+}
+
+// Builds an onPoll handler for watchCpfpFunding that announces each incoming
+// UTXO once, flags underfunded and split funding explicitly, and reports
+// transient Esplora errors. Shared by the watch-cpfp CLI command and the
+// auto-exit orchestrator so every documented path surfaces the same
+// actionable messages instead of a bare attempt counter.
+export function createFundingWatchLogger({
+  address,
+  minSats,
+  minConfirmations = 1,
+  log,
+}: FundingWatchLoggerOptions) {
+  const announced = new Set<string>();
+  let splitFundingHinted = false;
+  const min = BigInt(minSats);
+  return ({
+    attempt,
+    utxos,
+    error,
+  }: {
+    attempt: number;
+    utxos: EsploraUtxo[];
+    match?: unknown;
+    error: Error | null;
+  }) => {
+    if (error) {
+      log(`Esplora poll failed (${error.message}); retrying (attempt ${attempt})`);
+      return;
+    }
+    for (const seen of utxos ?? []) {
+      const key = `${seen.txid}:${seen.vout}`;
+      if (announced.has(key)) continue;
+      announced.add(key);
+      const value = BigInt(seen.value ?? 0);
+      const confirmed = Boolean(seen.status?.confirmed);
+      if (value < min) {
+        log(
+          `Seen ${confirmed ? "confirmed" : "unconfirmed"} UTXO ${key} at ${address}, but ${value} sats is below the required ${min} sats on its own`,
+        );
+      } else if (!confirmed) {
+        log(
+          `Seen unconfirmed funding tx ${seen.txid} (${value} sats) at ${address}; waiting for ${minConfirmations} confirmation(s)`,
+        );
+      }
+    }
+    // The matcher needs a single UTXO covering minSats; funding split across
+    // several transactions never matches, so say so explicitly.
+    if (!splitFundingHinted && (utxos?.length ?? 0) > 1) {
+      const confirmedUtxos = (utxos ?? []).filter((u) => u?.status?.confirmed);
+      const total = confirmedUtxos.reduce((sum, u) => sum + BigInt(u.value ?? 0), 0n);
+      const largest = confirmedUtxos.reduce(
+        (max, u) => (BigInt(u.value ?? 0) > max ? BigInt(u.value ?? 0) : max),
+        0n,
+      );
+      if (total >= min && largest < min) {
+        splitFundingHinted = true;
+        log(
+          `Total confirmed balance at ${address} is ${total} sats across ${confirmedUtxos.length} UTXOs, which covers the required ${min} sats, but no single UTXO does. Consolidate them into one output (send the full balance back to ${address} in one transaction) to proceed.`,
+        );
+      }
+    }
+    log(`Waiting for CPFP funding at ${address} (attempt ${attempt})`);
+  };
 }
 
 // Assumes the user funds the address with a single UTXO covering minValue, as

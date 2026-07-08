@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  createFundingWatchLogger,
   deriveCpfpFundingKey,
   pickFundingUtxo,
   watchCpfpFunding,
@@ -189,6 +190,26 @@ describe("watchCpfpFunding", () => {
         now: () => (clock += 60),
       }),
     ).rejects.toThrow(/Timed out/);
+  });
+
+  it("hints at consolidation when funding is split across UTXOs", () => {
+    const messages: string[] = [];
+    const onPoll = createFundingWatchLogger({
+      address: "bcrt1qexample",
+      minSats: 10_000,
+      log: (m) => messages.push(m),
+    });
+    const status = { confirmed: true, block_height: 10 };
+    const utxos = [
+      { txid: "a".repeat(64), vout: 0, value: 6_000, status },
+      { txid: "b".repeat(64), vout: 0, value: 5_000, status },
+    ];
+    onPoll({ attempt: 1, utxos, match: null, error: null });
+    onPoll({ attempt: 2, utxos, match: null, error: null });
+    const hints = messages.filter((m) => m.includes("Consolidate"));
+    // Total 11k covers 10k but no single UTXO does: hint exactly once.
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain("11000 sats across 2 UTXOs");
   });
 
   it("rejects address-only calls that would emit undefined script/publicKey", async () => {

@@ -2,8 +2,8 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 
 import {
-  CpfpFundingError,
   buildFanOutTransaction,
+  createFundingWatchLogger,
   deriveCpfpFundingKey,
   estimateCpfpFunding,
   watchCpfpFunding,
@@ -211,12 +211,13 @@ export async function autoExit({
       esploraUrl,
       minSats: estimate.requiredSats,
       pollIntervalMs,
-      onPoll: ({ attempt, error }) =>
-        log(
-          error
-            ? `Esplora poll failed (${error.message}); retrying (attempt ${attempt})`
-            : `Waiting for CPFP funding at ${key.address} (attempt ${attempt})`,
-        ),
+      // Shared announcer: reports incoming/underfunded UTXOs and the
+      // split-funding consolidation hint, same as the watch-cpfp command.
+      onPoll: createFundingWatchLogger({
+        address: key.address,
+        minSats: estimate.requiredSats,
+        log,
+      }),
     });
     utxos = await confirmedFundingUtxos(d, key.address, baseUrl);
   }
