@@ -139,6 +139,38 @@ describe("watchCpfpFunding", () => {
     expect(call).toBe(3);
   });
 
+  it("survives transient Esplora failures, backing off between retries", async () => {
+    let call = 0;
+    const errors: (Error | null)[] = [];
+    const sleeps: number[] = [];
+    const utxo = await watchCpfpFunding({
+      address: "bcrt1qexample",
+      script: "0014deadbeef",
+      publicKey: "02abc",
+      network: "REGTEST",
+      esploraUrl: "http://localhost/api",
+      minSats: 10000,
+      minConfirmations: 1,
+      pollIntervalMs: 1000,
+      fetchUtxos: async () => {
+        call += 1;
+        if (call < 4) throw new Error("Request timed out after 30000ms");
+        return [
+          { txid: "e".repeat(64), vout: 0, value: 20000, status: { confirmed: true, block_height: 10 } },
+        ];
+      },
+      fetchTipHeight: async () => 12,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      onPoll: ({ error }) => errors.push(error),
+    });
+    expect(utxo.txid).toBe("e".repeat(64));
+    expect(call).toBe(4);
+    expect(errors.filter(Boolean)).toHaveLength(3);
+    expect(sleeps).toEqual([2000, 4000, 8000]);
+  });
+
   it("times out when funds never arrive", async () => {
     let clock = 0;
     await expect(

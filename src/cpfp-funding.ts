@@ -194,6 +194,7 @@ interface WatchCpfpFundingOptions {
     attempt: number;
     utxos: EsploraUtxo[];
     match: FundingUtxoMatch | null;
+    error: Error | null;
   }) => void;
   fetchUtxos?: (address: string, baseUrl: string) => Promise<EsploraUtxo[]>;
   fetchTipHeight?: (baseUrl: string) => Promise<number>;
@@ -209,7 +210,9 @@ export async function watchCpfpFunding({
   esploraUrl,
   minSats,
   minConfirmations = 1,
-  pollIntervalMs = 5_000,
+  // Funding waits are dominated by block time, and public Esplora instances
+  // rate-limit aggressive pollers, so poll gently by default.
+  pollIntervalMs = 30_000,
   timeoutMs = 0,
   onPoll,
   // Injectable for tests; default to the real Esplora client.
@@ -223,11 +226,27 @@ export async function watchCpfpFunding({
   const minValue = BigInt(minSats ?? 0);
   const deadline = timeoutMs > 0 ? now() + timeoutMs : null;
 
+  let consecutiveErrors = 0;
   for (let attempt = 1; ; attempt += 1) {
-    const utxos = await fetchUtxos(address, baseUrl);
-    const tipHeight = minConfirmations > 0 ? await fetchTipHeight(baseUrl) : null;
-    const match = pickFundingUtxo({ utxos, minValue, minConfirmations, tipHeight });
-    onPoll?.({ attempt, utxos, match });
+    // A watch loop must survive transient Esplora failures (timeouts, 5xx,
+    // rate limiting): report them through onPoll and try again next interval
+    // instead of aborting a wait that may span hours.
+    let utxos: EsploraUtxo[] = [];
+    let match: FundingUtxoMatch | null = null;
+    let pollError: Error | null = null;
+    try {
+      utxos = await fetchUtxos(address, baseUrl);
+      // Esplora already distinguishes confirmed from mempool per UTXO, so the
+      // tip height (a second request per poll) is only needed to count depth
+      // beyond the first confirmation.
+      const tipHeight = minConfirmations > 1 ? await fetchTipHeight(baseUrl) : null;
+      match = pickFundingUtxo({ utxos, minValue, minConfirmations, tipHeight });
+      consecutiveErrors = 0;
+    } catch (error) {
+      pollError = error instanceof Error ? error : new Error(String(error));
+      consecutiveErrors += 1;
+    }
+    onPoll?.({ attempt, utxos, match, error: pollError });
     if (match) {
       return {
         txid: match.txid,
@@ -244,7 +263,11 @@ export async function watchCpfpFunding({
         `Timed out after ${timeoutMs}ms waiting for >= ${minValue} sats at ${address}`,
       );
     }
-    await sleep(pollIntervalMs);
+    // Back off exponentially while Esplora is failing (likely rate limiting),
+    // up to 8x the poll interval, and recover to the normal cadence as soon
+    // as a poll succeeds.
+    const backoff = Math.min(2 ** consecutiveErrors, 8);
+    await sleep(pollIntervalMs * (pollError ? backoff : 1));
   }
 }
 

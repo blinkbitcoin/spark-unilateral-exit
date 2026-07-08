@@ -166,10 +166,13 @@ node src/cli.ts watch-cpfp \
   --fee-rate 1
 ```
 
-`watch-cpfp` polls Esplora until a UTXO of at least `requiredSats` (auto-computed
-from `--bundle` + `--fee-rate`, or set `--min-sats`) confirms at the funding
-address, then prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo`
-below. It requires `--min-sats` or `--bundle` so it never accepts an underfunded
+`watch-cpfp` polls Esplora (every 30 seconds by default, `--poll-interval` to
+change) until a UTXO of at least `requiredSats` (auto-computed from `--bundle`
++ `--fee-rate`, or set `--min-sats`) confirms at the funding address, then
+prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo` below. It never
+gives up on its own unless `--timeout` is set; transient Esplora errors such as
+timeouts or rate limiting are retried with exponential backoff (up to 8x the
+poll interval). It requires `--min-sats` or `--bundle` so it never accepts an underfunded
 UTXO. While waiting it announces incoming transactions it sees at the address,
 including unconfirmed ones and ones below the required amount. Passing
 `--min-confirmations 0` accepts a 0-conf funding UTXO, but is not recommended:

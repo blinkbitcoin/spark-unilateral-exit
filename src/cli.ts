@@ -206,7 +206,13 @@ async function main(): Promise<void> {
       minConfirmations,
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
       timeoutMs: optionalSeconds(args.timeout, "--timeout"),
-      onPoll: ({ attempt, utxos }) => {
+      onPoll: ({ attempt, utxos, error }) => {
+        if (error) {
+          console.error(
+            `Esplora poll failed (${error.message}); retrying (attempt ${attempt})`,
+          );
+          return;
+        }
         for (const seen of utxos ?? []) {
           const key = `${seen.txid}:${seen.vout}`;
           if (announced.has(key)) continue;
