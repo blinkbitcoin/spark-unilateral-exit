@@ -8,7 +8,31 @@ This repo uses a bundle-first recovery model:
 - The CLI consumes that bundle plus CPFP fee inputs and a destination Bitcoin address.
 - Seed-only recovery is not sufficient once Spark operators are offline, because current leaves cannot be discovered from the seed alone.
 
-See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook. For wallet-app integration, see [docs/mobile-integration-plan.md](docs/mobile-integration-plan.md) (integration boundary) and [docs/mobile-ux-flow.md](docs/mobile-ux-flow.md) (screen flow for Blink mobile).
+See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook. [docs/mainnet-exit-case-study.md](docs/mainnet-exit-case-study.md) documents a real mainnet unilateral exit performed with this tooling — costs, failures, and lessons. For wallet-app integration, see [docs/mobile-integration-plan.md](docs/mobile-integration-plan.md) (integration boundary) and [docs/mobile-ux-flow.md](docs/mobile-ux-flow.md) (screen flow for Blink mobile).
+
+## Prerequisites
+
+The `make` commands (and the Rust bundle exporter they wrap) expect the
+development environment from this repo's Nix flake, loaded automatically by
+direnv:
+
+1. Install Nix — the [Determinate Systems installer](https://github.com/DeterminateSystems/nix-installer)
+   is recommended (flakes enabled out of the box, clean uninstall, survives
+   macOS upgrades):
+
+   ```sh
+   curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+   ```
+
+2. Install [direnv](https://direnv.net/) and hook it into your shell.
+3. In the repo root, run `direnv allow` once; the [.envrc](.envrc) (`use flake`)
+   then loads Node, Rust, and the other pinned tools on every `cd` into the
+   repo.
+4. Run `npm install` to fetch the JS dependencies.
+
+Without direnv, prefix commands with `nix develop --command` (the
+`refresh-recovery-bundle` target already does this for the Rust exporter), or
+bring your own Node 22+ and Rust toolchain.
 
 ## Current CLI
 
@@ -153,7 +177,7 @@ node src/cli.ts watch-cpfp \
   --fee-rate 10
 ```
 
-`cpfp-address` derives a dedicated P2WPKH funding key from the seed (BIP32 purpose `8797556'`, one above the Spark wallet purpose) and prints `cpfpAddress`, `script`, `publicKey`, and `requiredSats` (summed fee-bump fees plus `--buffer-sats`, default 1000). `watch-cpfp` polls until a UTXO of at least `requiredSats` (from `--bundle` + `--fee-rate`, or `--min-sats`) reaches that address and emits the `cpfpUtxo` string for `package --cpfp-utxo`. It requires `--min-sats` or `--bundle` so it never accepts an underfunded UTXO. This seed-derived path replaces manually exporting a fee UTXO from Bitcoin Core/Electrum/Sparrow (still documented in the withdraw guide), and the same seed signs the CPFP PSBTs via `sign-packages --seed-file`. If you pass `--account-number`, use the same value for `cpfp-address`, `watch-cpfp`, and `sign-packages` (it defaults to 0): each account derives a different key, so a mismatched `watch-cpfp` polls an address that never receives the funds.
+`cpfp-address` derives a dedicated P2WPKH funding key from the seed (path `m/8797556'/<account>/0`, purpose one above the Spark wallet purpose; only the purpose level is hardened so watch-only wallets can track the address from the `m/8797556'` xpub) and prints `cpfpAddress`, `script`, `publicKey`, and `requiredSats` (summed fee-bump fees plus `--buffer-sats`, default 1000). `watch-cpfp` polls until a UTXO of at least `requiredSats` (from `--bundle` + `--fee-rate`, or `--min-sats`) reaches that address and emits the `cpfpUtxo` string for `package --cpfp-utxo`. It requires `--min-sats` or `--bundle` so it never accepts an underfunded UTXO. This seed-derived path replaces manually exporting a fee UTXO from Bitcoin Core/Electrum/Sparrow (still documented in the withdraw guide), and the same seed signs the CPFP PSBTs via `sign-packages --seed-file`. If you pass `--account-number`, use the same value for `cpfp-address`, `watch-cpfp`, and `sign-packages` (it defaults to 0): each account derives a different key, so a mismatched `watch-cpfp` polls an address that never receives the funds.
 
 Create a dry-run recovery plan from a saved bundle:
 
@@ -192,6 +216,17 @@ These floors are roughly an order of magnitude above Spark's published [cooperat
 ```sh
 npm test
 ```
+
+The per-leaf economics calculations can additionally be verified against a
+real exported recovery bundle (adapted to regtest in-memory; the bundle itself
+is never committed because it reveals wallet graph metadata):
+
+```sh
+SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-bundle-economics.test.ts
+```
+
+The test is skipped automatically when no bundle is present at
+`SPARK_REAL_BUNDLE` or `../recovery-bundle.json`.
 
 ## GitHub Actions
 

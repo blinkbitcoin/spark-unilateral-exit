@@ -46,6 +46,59 @@ The CPFP UTXO must be a normal L1 Bitcoin output, not a Spark leaf and not a
 Lightning payment. It must be unspent, on the same Bitcoin network, and
 controlled by a key that can sign the generated CPFP PSBT.
 
+## Simple flow: automated exit with `make recover`
+
+When the Spark seed is available, `make recover` drives the whole exit:
+
+```sh
+make recover \
+  SEED_FILE=../.spark-seed.txt \
+  BUNDLE=../recovery-bundle.json \
+  NETWORK=mainnet \
+  FEE_RATE=1
+```
+
+It derives the CPFP funding address from the seed, waits for funding to
+confirm there if none exists yet, then loops package → autosign → submit →
+wait-for-confirmation, one package per leaf chain at a time, until every leaf
+is either fully broadcast or waiting on its refund timelock. Spark's v3 (TRUC)
+transactions only allow one unconfirmed parent+child pair per chain, so each
+package must confirm before the next one in that chain can enter the mempool —
+the loop handles that automatically. Expect roughly one block (~10 minutes)
+per remaining package.
+
+Key properties:
+
+- **Uneconomical leaves are skipped by default.** A leaf is only exited when
+  its value covers its CPFP fee-bump costs plus the final sweep fee. The
+  summary reports each leaf's `valueSats`, `feeSats`, and `netSats`. Pass
+  `INCLUDE_UNECONOMICAL=1` to exit everything anyway, or `MIN_NET_SATS=<n>` to
+  demand a larger margin.
+- **Timelocked refunds are deferred, not broadcast.** Each leaf's refund
+  transaction has a CSV timelock (about 2,000 blocks for fresh leaves). The
+  loop reports the maturity height per leaf and exits when only timelocked
+  refunds remain; re-run the same command after maturity and it broadcasts
+  them. Because refunds are deferred, the funding change is never locked and
+  leaves proceed sequentially over a single funding UTXO.
+- **`FAN_OUT=1` broadcasts leaves in parallel.** It first splits the funding
+  into one UTXO per economical leaf (one extra transaction), after which each
+  leaf chain advances every block instead of taking turns.
+- **Safe to interrupt and re-run at any time.** Every round rebuilds packages
+  from live chain state, so confirmed transactions are never resubmitted and a
+  crash, rate-limit, or reboot costs nothing.
+
+The refund transactions are written to `recovery-packages.json` (mode `0600`)
+for step 8's `make sweep` once refunds confirm. All Esplora traffic defaults
+to Blockstream's public instance (`https://blockstream.info/api`); set
+`ESPLORA_URL=<url>` to use a self-hosted one (required on regtest).
+
+The manual step-by-step equivalent (`cpfp-address` → `watch-cpfp` → `package`
+→ `sign-packages` → `broadcast`) remains available for hardware-signer and
+Bitcoin Core flows; sections 1–8 below document each stage in detail. Note
+that the manual `broadcast` submits packages back-to-back without waiting for
+confirmations, so on mainnet only the first package per chain is accepted per
+block — prefer `make recover` unless you are driving the loop yourself.
+
 ## 1. Refresh the recovery bundle while operators are online
 
 Run this before an outage, and again after every event that can change Spark
@@ -96,7 +149,9 @@ Field meanings:
 ### Recommended: seed-derived funding
 
 When the recovery seed is available, let the CLI derive a dedicated funding
-address (BIP32 purpose `8797556'`, isolated from Spark's own keys), tell you the
+address (path `m/8797556'/<account>/0` — only the purpose is hardened, so a
+watch-only wallet like Sparrow can track it from the `m/8797556'` xpub;
+isolated from Spark's own keys), tell you the
 amount to send, and assemble the string for you. This is the primary path for
 mobile/programmatic recovery and avoids manual `listunspent` export.
 
@@ -118,11 +173,20 @@ node src/cli.ts watch-cpfp \
   --fee-rate 1
 ```
 
-`watch-cpfp` polls Esplora until a UTXO of at least `requiredSats` (auto-computed
-from `--bundle` + `--fee-rate`, or set `--min-sats`) confirms at the funding
-address, then prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo`
-below. It requires `--min-sats` or `--bundle` so it never accepts an underfunded
-UTXO. On REGTEST/LOCAL, pass `--esplora-url` (Esplora has no default there).
+`watch-cpfp` polls Esplora (every 30 seconds by default, `--poll-interval` to
+change) until a UTXO of at least `requiredSats` (auto-computed from `--bundle`
++ `--fee-rate`, or set `--min-sats`) confirms at the funding address, then
+prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo` below. It never
+gives up on its own unless `--timeout` is set; transient Esplora errors such as
+timeouts or rate limiting are retried with exponential backoff (up to 8x the
+poll interval). It requires `--min-sats` or `--bundle` so it never accepts an underfunded
+UTXO. While waiting it announces incoming transactions it sees at the address,
+including unconfirmed ones and ones below the required amount. Passing
+`--min-confirmations 0` accepts a 0-conf funding UTXO, but is not recommended:
+the CPFP fee-bump child is a v3 (TRUC) transaction that mempool policy limits
+to one unconfirmed parent (the exit transaction), so packages built on
+unconfirmed funding are rejected until the funding transaction confirms.
+On REGTEST/LOCAL, pass `--esplora-url` (Esplora has no default there).
 Because the key is seed-derived, step 5 Option A can sign with `--seed-file`.
 
 ### Alternative: external fee wallet
@@ -228,6 +292,9 @@ node src/cli.ts sign-packages \
   --out recovery-packages-signed.json
 ```
 
+Or equivalently `make sign-packages PACKAGES=recovery-packages.json
+SEED_FILE=../.spark-seed.txt`.
+
 `sign-packages` re-derives the CPFP key (`--account-number` defaults to 0, match
 whatever you passed to `cpfp-address`). Alternatively, if the CPFP private key is
 available as hex (e.g. an app-managed key), pass it directly:
@@ -302,8 +369,13 @@ node src/cli.ts broadcast \
   --network MAINNET
 ```
 
-This submits each package to Blockstream's Esplora `POST /txs/package` endpoint.
-Use `--esplora-url <url>` to point at a self-hosted Esplora instance instead.
+Or equivalently `make broadcast SIGNED_PACKAGES=recovery-packages-signed.json
+NETWORK=mainnet`.
+
+This submits each package to Blockstream's Esplora `POST /txs/package` endpoint
+(the default when no URL is given). Use `--esplora-url <url>` (or
+`ESPLORA_URL=<url>` with make) to point at a self-hosted Esplora instance
+instead.
 
 ### Option B: Bitcoin Core RPC
 

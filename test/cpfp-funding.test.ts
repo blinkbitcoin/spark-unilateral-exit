@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  createFundingWatchLogger,
   deriveCpfpFundingKey,
   pickFundingUtxo,
   watchCpfpFunding,
@@ -16,7 +17,7 @@ describe("deriveCpfpFundingKey", () => {
     const b = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET", accountNumber: 0 });
     expect(a.address).toBe(b.address);
     expect(a.privateKeyHex).toBe(b.privateKeyHex);
-    expect(a.derivationPath).toBe("m/8797556'/0'/0'");
+    expect(a.derivationPath).toBe("m/8797556'/0/0");
   });
 
   it("uses a P2WPKH address matching the network", () => {
@@ -29,6 +30,17 @@ describe("deriveCpfpFundingKey", () => {
     const key = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET" });
     expect(key.publicKey).toMatch(/^0[23][0-9a-f]{64}$/);
     expect(key.script).toMatch(/^0014[0-9a-f]{40}$/);
+  });
+
+  it("exports a watch-only xpub and descriptor at the hardened purpose level", () => {
+    const mainnet = deriveCpfpFundingKey({ seed: SEED, network: "MAINNET", accountNumber: 0 });
+    expect(mainnet.purposeXpub).toMatch(/^xpub/);
+    expect(mainnet.watchDescriptor).toMatch(
+      /^wpkh\(\[[0-9a-f]{8}\/8797556'\]xpub[1-9A-HJ-NP-Za-km-z]+\/0\/0\)$/,
+    );
+    const regtest = deriveCpfpFundingKey({ seed: SEED, network: "REGTEST", accountNumber: 1 });
+    expect(regtest.purposeXpub).toMatch(/^tpub/);
+    expect(regtest.watchDescriptor).toContain("/1/0)");
   });
 
   it("derives distinct keys per account", () => {
@@ -128,11 +140,45 @@ describe("watchCpfpFunding", () => {
     expect(call).toBe(3);
   });
 
+  it("survives transient Esplora failures, backing off between retries", async () => {
+    let call = 0;
+    const errors: (Error | null)[] = [];
+    const sleeps: number[] = [];
+    const utxo = await watchCpfpFunding({
+      address: "bcrt1qexample",
+      script: "0014deadbeef",
+      publicKey: "02abc",
+      network: "REGTEST",
+      esploraUrl: "http://localhost/api",
+      minSats: 10000,
+      minConfirmations: 1,
+      pollIntervalMs: 1000,
+      fetchUtxos: async () => {
+        call += 1;
+        if (call < 4) throw new Error("Request timed out after 30000ms");
+        return [
+          { txid: "e".repeat(64), vout: 0, value: 20000, status: { confirmed: true, block_height: 10 } },
+        ];
+      },
+      fetchTipHeight: async () => 12,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      onPoll: ({ error }) => errors.push(error),
+    });
+    expect(utxo.txid).toBe("e".repeat(64));
+    expect(call).toBe(4);
+    expect(errors.filter(Boolean)).toHaveLength(3);
+    expect(sleeps).toEqual([2000, 4000, 8000]);
+  });
+
   it("times out when funds never arrive", async () => {
     let clock = 0;
     await expect(
       watchCpfpFunding({
         address: "bcrt1qexample",
+        script: "0014deadbeef",
+        publicKey: "02abc",
         network: "REGTEST",
         esploraUrl: "http://localhost/api",
         minSats: 10000,
@@ -144,5 +190,39 @@ describe("watchCpfpFunding", () => {
         now: () => (clock += 60),
       }),
     ).rejects.toThrow(/Timed out/);
+  });
+
+  it("hints at consolidation when funding is split across UTXOs", () => {
+    const messages: string[] = [];
+    const onPoll = createFundingWatchLogger({
+      address: "bcrt1qexample",
+      minSats: 10_000,
+      log: (m) => messages.push(m),
+    });
+    const status = { confirmed: true, block_height: 10 };
+    const utxos = [
+      { txid: "a".repeat(64), vout: 0, value: 6_000, status },
+      { txid: "b".repeat(64), vout: 0, value: 5_000, status },
+    ];
+    onPoll({ attempt: 1, utxos, match: null, error: null });
+    onPoll({ attempt: 2, utxos, match: null, error: null });
+    const hints = messages.filter((m) => m.includes("Consolidate"));
+    // Total 11k covers 10k but no single UTXO does: hint exactly once.
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain("11000 sats across 2 UTXOs");
+  });
+
+  it("rejects address-only calls that would emit undefined script/publicKey", async () => {
+    await expect(
+      watchCpfpFunding({
+        address: "bcrt1qexample",
+        network: "REGTEST",
+        esploraUrl: "http://localhost/api",
+        minSats: 10000,
+        fetchUtxos: async () => [],
+        fetchTipHeight: async () => 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/script and publicKey/);
   });
 });

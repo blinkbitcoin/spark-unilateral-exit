@@ -16,7 +16,9 @@ import {
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
 import { signPackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
+import { autoExit } from "./auto-exit.ts";
 import {
+  createFundingWatchLogger,
   deriveCpfpFundingKey,
   estimateCpfpFunding,
   watchCpfpFunding,
@@ -133,6 +135,8 @@ async function main(): Promise<void> {
       fundingScript: key.script,
       fundingPublicKey: key.publicKey,
       bufferSats: optionalValue(args["buffer-sats"]),
+      minNetSats: optionalValue(args["min-net-sats"]),
+      includeUneconomical: args["include-uneconomical"] === true,
     });
     emitJson({
       network,
@@ -140,6 +144,8 @@ async function main(): Promise<void> {
       script: key.script,
       publicKey: key.publicKey,
       derivationPath: key.derivationPath,
+      purposeXpub: key.purposeXpub,
+      watchDescriptor: key.watchDescriptor,
       ...estimate,
     });
     return;
@@ -186,6 +192,11 @@ async function main(): Promise<void> {
       minSats = estimate.requiredSats;
     }
 
+    const minConfirmations = optionalNumber(
+      args["min-confirmations"],
+      1,
+      "--min-confirmations",
+    );
     const utxo = await watchCpfpFunding({
       address,
       script,
@@ -193,16 +204,55 @@ async function main(): Promise<void> {
       network,
       esploraUrl: optionalValue(args["esplora-url"]),
       minSats,
-      minConfirmations: optionalNumber(args["min-confirmations"], 1, "--min-confirmations"),
+      minConfirmations,
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
       timeoutMs: optionalSeconds(args.timeout, "--timeout"),
-      onPoll: ({ attempt }) =>
-        console.error(`Waiting for CPFP funding at ${address} (attempt ${attempt})`),
+      onPoll: createFundingWatchLogger({
+        address: address!,
+        minSats: minSats!,
+        minConfirmations,
+        log: (message) => console.error(message),
+      }),
     });
     emitJson({
       ...utxo,
       cpfpUtxo: `${utxo.txid}:${utxo.vout}:${utxo.value}:${utxo.script}:${utxo.publicKey}`,
     });
+    return;
+  }
+
+  if (command === "auto-exit") {
+    const bundle = loadOptionalBundle(args.bundle);
+    if (!bundle) throw new Error("--bundle is required for auto-exit");
+    const seed = await loadSeed(args);
+    const network = optionalValue(args.network) ?? bundle.network;
+    const result = await autoExit({
+      bundle,
+      seed,
+      network,
+      feeRate: Number(required(args["fee-rate"], "--fee-rate")),
+      esploraUrl: optionalValue(args["esplora-url"]),
+      accountNumber: args["account-number"],
+      minNetSats: optionalValue(args["min-net-sats"]),
+      includeUneconomical: args["include-uneconomical"] === true,
+      fanOut: args["fan-out"] === true,
+      bufferSats: optionalValue(args["buffer-sats"]),
+      pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
+      onEvent: (message) => console.error(message),
+    });
+    if (args.out === true) throw new Error("--out requires a path");
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      // Sweep-compatible packages file: `sweep` reads the last tx per leaf as
+      // the refund transaction.
+      fs.writeFileSync(
+        outPath,
+        `${serializeForJson({ packages: result.packages })}\n`,
+        { mode: 0o600 },
+      );
+      console.error(`Wrote refund packages for sweep to ${outPath}`);
+    }
+    emitJson(result);
     return;
   }
 
@@ -343,7 +393,12 @@ async function resolveCpfpPrivateKey(args: CliArgs): Promise<string> {
   const keyFile = optionalValue(args["key-file"]);
   const keyArg = optionalValue(args["private-key"]);
   if (keyFile) return fs.readFileSync(keyFile, "utf8").trim();
-  if (keyArg) return keyArg;
+  if (keyArg) {
+    console.error(
+      "Warning: --private-key exposes the key in the process list and shell history; prefer --key-file or --seed-file",
+    );
+    return keyArg;
+  }
   if (optionalValue(args["seed-file"]) || optionalValue(args.seed) || process.env.SPARK_SEED) {
     const seed = await loadSeed(args);
     const key = deriveCpfpFundingKey({
@@ -364,6 +419,9 @@ Commands:
   plan             Validate a saved recovery bundle and print a recovery plan
   cpfp-address     Derive a CPFP funding address from the seed and estimate the sats to send it
   watch-cpfp       Watch the CPFP funding address for an incoming UTXO and emit it as --cpfp-utxo
+  auto-exit        Run the whole exit automatically: wait for funding, then package, sign,
+                   submit, and wait for confirmations round by round until only timelocked
+                   refunds remain; uneconomical leaves are skipped by default
   package          Construct Spark unilateral-exit packages using upstream Spark SDK
   broadcast        Submit signed packages via Esplora (replaces bitcoin-cli submitpackage)
   broadcast-sweep  Broadcast signed sweep transactions via Esplora
@@ -395,7 +453,26 @@ Inputs for cpfp-address:
   --network <network>      Defaults to the bundle network
   --account-number <n>     Account number for the funding key derivation, default 0
   --buffer-sats <n>        Extra sats added on top of the estimated fees, default 1000
-  Outputs the funding address, script/publicKey, and requiredSats to fund it.
+  --min-net-sats <n>       Extra sats a leaf must net to count as economical, default 0
+  --include-uneconomical   Count uneconomical leaves in requiredSats too
+  Outputs the funding address, script/publicKey, per-leaf economics, and requiredSats.
+
+Inputs for auto-exit:
+  --bundle <path>          Saved Spark recovery bundle JSON
+  --seed-file <path>       Seed for the funding key (derivation, signing) and address watch
+  --fee-rate <number>      Fee rate in sat/vbyte
+  --network <network>      Defaults to the bundle network
+  --account-number <n>     Account number for the funding key derivation, default 0
+  --min-net-sats <n>       Extra sats a leaf must net to count as economical, default 0
+  --include-uneconomical   Also exit leaves whose value does not cover their fees
+  --fan-out                Split funding into one UTXO per leaf so leaves broadcast in
+                           parallel; default is sequential over a single funding chain
+  --buffer-sats <n>        Funding buffer, default 1000
+  --poll-interval <sec>    Seconds between confirmation polls, default 30
+  --esplora-url <url>      Custom Esplora API base URL (optional)
+  --out <path>             Write sweep-compatible refund packages JSON here
+  Runs until every economical leaf is broadcast or waiting on its refund timelock;
+  safe to interrupt and re-run at any point (it resumes from chain state).
 
 Inputs for watch-cpfp:
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
@@ -404,7 +481,7 @@ Inputs for watch-cpfp:
   --fee-rate <number>      Fee rate for the min-sats estimate (with --bundle)
   --min-sats <n>           Minimum UTXO value to accept
   --min-confirmations <n>  Confirmations required before use, default 1 (0 accepts mempool)
-  --poll-interval <sec>    Seconds between polls, default 5
+  --poll-interval <sec>    Seconds between polls, default 30
   --timeout <sec>          Give up after this many seconds (default: wait forever)
   --esplora-url <url>      Custom Esplora API base URL (optional)
   Emits the funded UTXO and a cpfpUtxo string to pass to package --cpfp-utxo.

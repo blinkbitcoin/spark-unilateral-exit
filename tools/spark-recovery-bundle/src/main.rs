@@ -19,7 +19,7 @@ use spark::{
         OperatorConfig, OperatorPool, OperatorPoolConfig,
         rpc::{
             DefaultConnectionManager,
-            spark::{QueryNodesRequest, TreeNode, query_nodes_request::Source},
+            spark::{QueryNodesRequest, TreeNode, TreeNodeIds, query_nodes_request::Source},
         },
     },
     session_store::InMemorySessionStore,
@@ -268,10 +268,60 @@ async fn query_available_nodes_with_parents(
             all_nodes.insert(id, node);
         }
 
+        // QueryNodesResponse.offset follows the Spark proto convention (spelled
+        // out on QueryHtlcResponse.offset: "defaults to -1 if there are no more
+        // results"): the server returns the NEXT page's offset, or <= 0 when
+        // the result set is exhausted. The vendored SDK's
+        // PagingFilter::next_from_offset relies on the same contract, so a
+        // multi-page wallet keeps paginating here rather than truncating at
+        // one page.
         if count == 0 || response.offset <= 0 {
             break;
         }
-        offset += page_size;
+        offset = response.offset;
+    }
+
+    // The SO's include_parents ancestor expansion skips the tree-root node for
+    // legacy mainnet trees, so the owner-pubkey bulk query above can return
+    // exit chains with a missing root. By-ID queries do return those nodes, so
+    // follow parent pointers and re-fetch whatever the bulk response omitted
+    // until every chain is closed. Offline recovery replays these chains from
+    // the bundle alone, so a gap here makes the bundle unusable.
+    loop {
+        let missing: Vec<String> = all_nodes
+            .values()
+            .filter_map(|node| node.parent_node_id.clone())
+            .filter(|parent_id| !all_nodes.contains_key(parent_id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+
+        let response = client
+            .query_nodes(QueryNodesRequest {
+                source: Some(Source::NodeIds(TreeNodeIds {
+                    node_ids: missing.clone(),
+                })),
+                include_parents: true,
+                limit: page_size,
+                offset: 0,
+                network: proto_network(network),
+                statuses: vec![],
+            })
+            .await
+            .context("query_nodes by node id failed")?;
+
+        let mut progressed = false;
+        for (id, node) in response.nodes {
+            progressed |= all_nodes.insert(id, node).is_none();
+        }
+        if !progressed {
+            return Err(anyhow!(
+                "operators did not return ancestor node(s) {missing:?}; refusing to export a bundle with incomplete exit chains"
+            ));
+        }
     }
 
     Ok(all_nodes)
