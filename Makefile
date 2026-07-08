@@ -45,8 +45,10 @@ help:
 	@echo "  make cpfp-address SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
 	@echo "  make watch-cpfp   SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
 	@echo "  make broadcast    SIGNED_PACKAGES=recovery-packages-signed.json NETWORK=mainnet"
-	@echo "  make recover      SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1"
-	@echo "                    # recover = cpfp-address + watch-cpfp + package + sign-packages + broadcast in one run"
+	@echo "  make recover      SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
+	@echo "                    # auto-exit: waits for funding, then packages, signs, submits, and waits for"
+	@echo "                    # confirmations round by round; skips uneconomical leaves (INCLUDE_UNECONOMICAL=1"
+	@echo "                    # to keep them); FAN_OUT=1 broadcasts leaves in parallel; safe to re-run anytime"
 	@echo ""
 	@echo "For multiple CPFP inputs, pass CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'."
 	@echo "For a self-hosted Esplora (required on regtest), pass ESPLORA_URL=<url>."
@@ -110,31 +112,24 @@ broadcast:
 		--network $(NETWORK) \
 		$(ESPLORA_ARGS)
 
-# One-shot seed-derived flow: derive the CPFP funding address, wait for the
-# operator to fund it, then package, autosign with the same seed, and broadcast
-# each package through Esplora. Timelocked refund packages that Esplora rejects
-# still need step 7 of docs/recovery-runbook.md after maturity.
-recover: require-destination require-seed-file
-	@set -e; umask 077; \
-	$(NODE) src/cli.ts cpfp-address \
-		--bundle $(BUNDLE) $(SEED_ARGS) --network $(NETWORK) \
-		--fee-rate $(FEE_RATE) $(ACCOUNT_ARGS); \
-	echo "Send at least requiredSats to cpfpAddress above, then leave this running." >&2; \
-	watch_json=$$($(NODE) src/cli.ts watch-cpfp \
-		--bundle $(BUNDLE) $(SEED_ARGS) --network $(NETWORK) \
-		--fee-rate $(FEE_RATE) $(ACCOUNT_ARGS) $(ESPLORA_ARGS)); \
-	cpfp_utxo=$$(printf '%s' "$$watch_json" | $(NODE) -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>process.stdout.write(JSON.parse(d).cpfpUtxo))'); \
-	echo "CPFP UTXO confirmed: $$cpfp_utxo" >&2; \
-	$(NODE) src/cli.ts package \
-		--bundle $(BUNDLE) --destination $(DESTINATION) \
-		--fee-rate $(FEE_RATE) --cpfp-utxo "$$cpfp_utxo" > $(PACKAGES); \
-	echo "Wrote $(PACKAGES)" >&2; \
-	$(NODE) src/cli.ts sign-packages \
-		--packages $(PACKAGES) $(SEED_ARGS) --network $(NETWORK) $(ACCOUNT_ARGS) \
-		--out $(SIGNED_PACKAGES); \
-	echo "Wrote $(SIGNED_PACKAGES), broadcasting via Esplora..." >&2; \
-	$(NODE) src/cli.ts broadcast \
-		--packages $(SIGNED_PACKAGES) --network $(NETWORK) $(ESPLORA_ARGS)
+# One-shot seed-derived flow: waits for funding at the derived CPFP address,
+# then packages, autosigns, submits, and waits for confirmations round by
+# round until every economical leaf is broadcast or waiting on its refund
+# timelock. Safe to interrupt and re-run; it resumes from chain state.
+# Uneconomical leaves are skipped unless INCLUDE_UNECONOMICAL=1.
+# FAN_OUT=1 splits funding into one UTXO per leaf to broadcast in parallel.
+recover: require-seed-file
+	@$(NODE) src/cli.ts auto-exit \
+		--bundle $(BUNDLE) \
+		$(SEED_ARGS) \
+		--network $(NETWORK) \
+		--fee-rate $(FEE_RATE) \
+		$(ACCOUNT_ARGS) \
+		$(ESPLORA_ARGS) \
+		$(if $(INCLUDE_UNECONOMICAL),--include-uneconomical,) \
+		$(if $(MIN_NET_SATS),--min-net-sats $(MIN_NET_SATS),) \
+		$(if $(FAN_OUT),--fan-out,) \
+		--out $(PACKAGES)
 
 sweep: require-destination
 	@$(NODE) src/cli.ts sweep \

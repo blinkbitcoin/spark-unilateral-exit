@@ -100,12 +100,30 @@ export function deriveCpfpFundingKey({
   };
 }
 
+// Observed vsize of the one-input one-output Taproot key-path sweep the sweep
+// command builds; used to price the final leaf-value -> destination spend.
+const SWEEP_TX_VSIZE = 111n;
+
+export interface LeafEconomics {
+  leafId: string | null | undefined;
+  feeBumpTxCount: number;
+  feeSats: string;
+  valueSats: string | null;
+  sweepFeeSats: string;
+  netSats: string | null;
+  economical: boolean;
+}
+
 interface EstimateCpfpFundingOptions {
   bundle: RecoveryBundle;
   feeRate: number;
   fundingScript: string;
   fundingPublicKey: string;
   bufferSats?: bigint | number | string;
+  // Extra sats a leaf must net (value - CPFP fees - sweep fee) to count as
+  // economical. 0 means "anything that does not lose money".
+  minNetSats?: bigint | number | string;
+  includeUneconomical?: boolean;
   sparkClient?: unknown;
 }
 
@@ -115,6 +133,8 @@ export async function estimateCpfpFunding({
   fundingScript,
   fundingPublicKey,
   bufferSats = DEFAULT_BUFFER_SATS,
+  minNetSats = 0n,
+  includeUneconomical = false,
   sparkClient,
 }: EstimateCpfpFundingOptions) {
   const normalizedFeeRate = validateFeeRate(feeRate);
@@ -137,13 +157,18 @@ export async function estimateCpfpFunding({
     );
   }
 
+  const leafValues = new Map<string, bigint>();
+  for (const leaf of bundle.leaves ?? []) {
+    if (leaf?.id && leaf.valueSats !== undefined) {
+      leafValues.set(leaf.id, BigInt(leaf.valueSats));
+    }
+  }
+  const sweepFeeSats = feeForVsize(SWEEP_TX_VSIZE, normalizedFeeRate);
+  const minNet = BigInt(minNetSats);
+
   let feeBumpTxCount = 0;
   let totalFeeSats = 0n;
-  const perLeaf: Array<{
-    leafId: string | null | undefined;
-    feeBumpTxCount: number;
-    feeSats: string;
-  }> = [];
+  const perLeaf: LeafEconomics[] = [];
   for (const leafPackage of packages) {
     let leafFee = 0n;
     let leafCount = 0;
@@ -152,14 +177,33 @@ export async function estimateCpfpFunding({
       leafFee += feeBumpTxFee(txPkg.feeBumpPsbt);
       leafCount += 1;
     }
-    feeBumpTxCount += leafCount;
-    totalFeeSats += leafFee;
+    const value = leafPackage.leafId
+      ? (leafValues.get(leafPackage.leafId) ?? null)
+      : null;
+    // A leaf is worth exiting when its value covers the CPFP fees spent from
+    // the funding UTXO plus the final sweep fee, with minNetSats to spare.
+    // Leaves without a known value are kept: losing track of value metadata
+    // must not silently drop funds.
+    const net = value === null ? null : value - leafFee - sweepFeeSats;
+    const economical = net === null || net > minNet;
+    if (economical || includeUneconomical) {
+      feeBumpTxCount += leafCount;
+      totalFeeSats += leafFee;
+    }
     perLeaf.push({
       leafId: leafPackage.leafId,
       feeBumpTxCount: leafCount,
       feeSats: leafFee.toString(),
+      valueSats: value === null ? null : value.toString(),
+      sweepFeeSats: sweepFeeSats.toString(),
+      netSats: net === null ? null : net.toString(),
+      economical,
     });
   }
+
+  const skippedLeafIds = includeUneconomical
+    ? []
+    : perLeaf.filter((l) => !l.economical).map((l) => l.leafId);
 
   const buffer = BigInt(bufferSats);
   const requiredSats = totalFeeSats + buffer;
@@ -170,6 +214,90 @@ export async function estimateCpfpFunding({
     bufferSats: buffer.toString(),
     requiredSats: requiredSats.toString(),
     perLeaf,
+    skippedLeafIds,
+  };
+}
+
+function feeForVsize(vsize: bigint, feeRate: number): bigint {
+  // Fee rates are validated positive numbers; scale via 1000 to keep sat
+  // precision for fractional rates without floating-point drift.
+  return (vsize * BigInt(Math.ceil(feeRate * 1000)) + 999n) / 1000n;
+}
+
+// P2WPKH weight units: ~68 vbytes per input (incl. witness), 31 per output,
+// 10.5 overhead. Rounded up via the *2/2 trick is unnecessary; use ceil parts.
+const FAN_OUT_OVERHEAD_VBYTES = 11n;
+const P2WPKH_INPUT_VBYTES = 68n;
+const P2WPKH_OUTPUT_VBYTES = 31n;
+const P2WPKH_DUST_SATS = 546n;
+
+interface BuildFanOutOptions {
+  utxos: CpfpUtxo[];
+  amounts: bigint[];
+  privateKey: Uint8Array;
+  feeRate: number;
+}
+
+// Splits the funding UTXO(s) into one output per leaf, all paying back to the
+// same funding script. Per-leaf UTXOs keep each leaf's CPFP chain independent,
+// so leaves exit in parallel instead of serializing behind each other's
+// refund timelocks. Any input surplus is added to the last output rather than
+// creating a separate change output; it stays at the funding address either way.
+export function buildFanOutTransaction({
+  utxos,
+  amounts,
+  privateKey,
+  feeRate,
+}: BuildFanOutOptions): { txHex: string; txid: string; outputs: CpfpUtxo[] } {
+  if (utxos.length === 0) throw new CpfpFundingError("Fan-out requires at least one input UTXO");
+  if (amounts.length === 0) throw new CpfpFundingError("Fan-out requires at least one output amount");
+  const script = utxos[0]!.script;
+  const publicKey = utxos[0]!.publicKey;
+  if (utxos.some((u) => u.script !== script)) {
+    throw new CpfpFundingError("Fan-out inputs must all pay the funding script");
+  }
+
+  const vsize =
+    FAN_OUT_OVERHEAD_VBYTES +
+    P2WPKH_INPUT_VBYTES * BigInt(utxos.length) +
+    P2WPKH_OUTPUT_VBYTES * BigInt(amounts.length);
+  const fee = feeForVsize(vsize, validateFeeRate(feeRate));
+  const totalIn = utxos.reduce((sum, u) => sum + u.value, 0n);
+  const totalOut = amounts.reduce((sum, a) => sum + a, 0n);
+  const remainder = totalIn - totalOut - fee;
+  if (remainder < 0n) {
+    throw new CpfpFundingError(
+      `Funding UTXOs hold ${totalIn} sats but the fan-out needs ${totalOut + fee} sats (${totalOut} outputs + ${fee} fee); send ${-remainder} more sats to the funding address`,
+    );
+  }
+  const finalAmounts = [...amounts];
+  finalAmounts[finalAmounts.length - 1]! += remainder;
+  if (finalAmounts.some((a) => a < P2WPKH_DUST_SATS)) {
+    throw new CpfpFundingError(
+      `Fan-out output below dust (${P2WPKH_DUST_SATS} sats); raise the per-leaf buffer`,
+    );
+  }
+
+  const scriptBytes = hexToBytes(script);
+  const tx = new Transaction();
+  for (const utxo of utxos) {
+    tx.addInput({
+      txid: utxo.txid,
+      index: utxo.vout,
+      sequence: 0xfffffffd,
+      witnessUtxo: { script: scriptBytes, amount: utxo.value },
+    });
+  }
+  for (const amount of finalAmounts) {
+    tx.addOutput({ script: scriptBytes, amount });
+  }
+  tx.sign(privateKey);
+  tx.finalize();
+  const txid = tx.id;
+  return {
+    txHex: bytesToHex(tx.extract()),
+    txid,
+    outputs: finalAmounts.map((value, vout) => ({ txid, vout, value, script, publicKey })),
   };
 }
 

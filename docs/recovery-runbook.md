@@ -46,51 +46,58 @@ The CPFP UTXO must be a normal L1 Bitcoin output, not a Spark leaf and not a
 Lightning payment. It must be unspent, on the same Bitcoin network, and
 controlled by a key that can sign the generated CPFP PSBT.
 
-## Simple flow: seed-derived funding, autosign, Esplora broadcast
+## Simple flow: automated exit with `make recover`
 
-When the Spark seed is available and the CPFP funding will come from the
-seed-derived address (step 2, recommended path), the whole exit up to the
-timelock wait is four make commands. All Esplora traffic defaults to
-Blockstream's public instance (`https://blockstream.info/api`); set
-`ESPLORA_URL=<url>` to use a self-hosted one (required on regtest).
-
-```sh
-# 1. Derive the funding address and the amount to send.
-make cpfp-address SEED_FILE=../.spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1
-
-# 2. Send at least `requiredSats` to `cpfpAddress`, then wait for confirmation.
-#    Prints the assembled `cpfpUtxo` string.
-make watch-cpfp SEED_FILE=../.spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1
-
-# 3. Build the packages, then autosign every CPFP PSBT with the same seed.
-make package BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> \
-  FEE_RATE=1 CPFP_UTXO=<cpfpUtxo-from-watch-cpfp> > recovery-packages.json
-make sign-packages PACKAGES=recovery-packages.json SEED_FILE=../.spark-seed.txt
-
-# 4. Broadcast every package through Esplora (Blockstream by default).
-make broadcast SIGNED_PACKAGES=recovery-packages-signed.json NETWORK=mainnet
-```
-
-Or run all of the above as one command that pauses while you fund the printed
-address and resumes automatically once the funding UTXO confirms:
+When the Spark seed is available, `make recover` drives the whole exit:
 
 ```sh
 make recover \
   SEED_FILE=../.spark-seed.txt \
   BUNDLE=../recovery-bundle.json \
-  DESTINATION=<bitcoin-address> \
   NETWORK=mainnet \
   FEE_RATE=1
 ```
 
-`make recover` chains `cpfp-address` → `watch-cpfp` → `package` →
-`sign-packages` → `broadcast`, writing `recovery-packages.json` and
-`recovery-packages-signed.json` (mode `0600`) along the way. If you passed
-`ACCOUNT_NUMBER` it is used consistently for derivation and signing. The
-timelocked refund packages still require the wait in step 7 and the final
-`make sweep` in step 8; keep the two JSON files for those steps. Sections 1–8
-below document each stage in detail, including the manual alternatives
-(external fee wallet, hardware signing, Bitcoin Core `submitpackage`).
+It derives the CPFP funding address from the seed, waits for funding to
+confirm there if none exists yet, then loops package → autosign → submit →
+wait-for-confirmation, one package per leaf chain at a time, until every leaf
+is either fully broadcast or waiting on its refund timelock. Spark's v3 (TRUC)
+transactions only allow one unconfirmed parent+child pair per chain, so each
+package must confirm before the next one in that chain can enter the mempool —
+the loop handles that automatically. Expect roughly one block (~10 minutes)
+per remaining package.
+
+Key properties:
+
+- **Uneconomical leaves are skipped by default.** A leaf is only exited when
+  its value covers its CPFP fee-bump costs plus the final sweep fee. The
+  summary reports each leaf's `valueSats`, `feeSats`, and `netSats`. Pass
+  `INCLUDE_UNECONOMICAL=1` to exit everything anyway, or `MIN_NET_SATS=<n>` to
+  demand a larger margin.
+- **Timelocked refunds are deferred, not broadcast.** Each leaf's refund
+  transaction has a CSV timelock (about 2,000 blocks for fresh leaves). The
+  loop reports the maturity height per leaf and exits when only timelocked
+  refunds remain; re-run the same command after maturity and it broadcasts
+  them. Because refunds are deferred, the funding change is never locked and
+  leaves proceed sequentially over a single funding UTXO.
+- **`FAN_OUT=1` broadcasts leaves in parallel.** It first splits the funding
+  into one UTXO per economical leaf (one extra transaction), after which each
+  leaf chain advances every block instead of taking turns.
+- **Safe to interrupt and re-run at any time.** Every round rebuilds packages
+  from live chain state, so confirmed transactions are never resubmitted and a
+  crash, rate-limit, or reboot costs nothing.
+
+The refund transactions are written to `recovery-packages.json` (mode `0600`)
+for step 8's `make sweep` once refunds confirm. All Esplora traffic defaults
+to Blockstream's public instance (`https://blockstream.info/api`); set
+`ESPLORA_URL=<url>` to use a self-hosted one (required on regtest).
+
+The manual step-by-step equivalent (`cpfp-address` → `watch-cpfp` → `package`
+→ `sign-packages` → `broadcast`) remains available for hardware-signer and
+Bitcoin Core flows; sections 1–8 below document each stage in detail. Note
+that the manual `broadcast` submits packages back-to-back without waiting for
+confirmations, so on mainnet only the first package per chain is accepted per
+block — prefer `make recover` unless you are driving the loop yourself.
 
 ## 1. Refresh the recovery bundle while operators are online
 
