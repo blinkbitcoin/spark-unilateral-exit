@@ -199,6 +199,7 @@ async function main(): Promise<void> {
     // Announce each incoming UTXO once so the operator knows their funding tx
     // was seen (or is underfunded) instead of watching a bare attempt counter.
     const announced = new Set<string>();
+    let splitFundingHinted = false;
     const utxo = await watchCpfpFunding({
       address,
       script,
@@ -224,11 +225,28 @@ async function main(): Promise<void> {
           const confirmed = Boolean(seen.status?.confirmed);
           if (value < BigInt(minSats!)) {
             console.error(
-              `Seen ${confirmed ? "confirmed" : "unconfirmed"} UTXO ${key} at ${address}, but ${value} sats is below the required ${minSats} sats; send the difference as a new transaction`,
+              `Seen ${confirmed ? "confirmed" : "unconfirmed"} UTXO ${key} at ${address}, but ${value} sats is below the required ${minSats} sats on its own`,
             );
           } else if (!confirmed) {
             console.error(
               `Seen unconfirmed funding tx ${seen.txid} (${value} sats) at ${address}; waiting for ${minConfirmations} confirmation(s)`,
+            );
+          }
+        }
+        // The matcher needs a single UTXO covering minSats; funding split
+        // across several transactions never matches, so say so explicitly
+        // instead of leaving the operator staring at an attempt counter.
+        if (!splitFundingHinted && (utxos?.length ?? 0) > 1) {
+          const confirmedUtxos = (utxos ?? []).filter((u) => u?.status?.confirmed);
+          const total = confirmedUtxos.reduce((sum, u) => sum + BigInt(u.value ?? 0), 0n);
+          const largest = confirmedUtxos.reduce(
+            (max, u) => (BigInt(u.value ?? 0) > max ? BigInt(u.value ?? 0) : max),
+            0n,
+          );
+          if (total >= BigInt(minSats!) && largest < BigInt(minSats!)) {
+            splitFundingHinted = true;
+            console.error(
+              `Total confirmed balance at ${address} is ${total} sats across ${confirmedUtxos.length} UTXOs, which covers the required ${minSats} sats, but no single UTXO does. Consolidate them into one output (send the full balance back to ${address} in one transaction) to proceed.`,
             );
           }
         }
@@ -414,7 +432,12 @@ async function resolveCpfpPrivateKey(args: CliArgs): Promise<string> {
   const keyFile = optionalValue(args["key-file"]);
   const keyArg = optionalValue(args["private-key"]);
   if (keyFile) return fs.readFileSync(keyFile, "utf8").trim();
-  if (keyArg) return keyArg;
+  if (keyArg) {
+    console.error(
+      "Warning: --private-key exposes the key in the process list and shell history; prefer --key-file or --seed-file",
+    );
+    return keyArg;
+  }
   if (optionalValue(args["seed-file"]) || optionalValue(args.seed) || process.env.SPARK_SEED) {
     const seed = await loadSeed(args);
     const key = deriveCpfpFundingKey({

@@ -3,6 +3,9 @@ NODE ?= node
 
 BUNDLE ?= ../recovery-bundle.json
 PACKAGES ?= recovery-packages.json
+# Path to a file holding the Spark seed or mnemonic. Alternatively export the
+# SPARK_SEED environment variable (the CLI reads it when no --seed-file is
+# passed), which avoids writing the seed to disk.
 SEED_FILE ?=
 NETWORK ?= mainnet
 ACCOUNT_NUMBER ?=
@@ -149,7 +152,7 @@ require-cpfp-args:
 	@: $(if $(CPFP_ARGS),,$(error CPFP_UTXO or CPFP_ARGS is required))
 
 require-signing-key:
-	@: $(if $(SEED_FILE)$(KEY_FILE),,$(error SEED_FILE or KEY_FILE is required))
+	@: $(if $(SEED_FILE)$(KEY_FILE)$(SPARK_SEED),,$(error SEED_FILE, KEY_FILE, or the SPARK_SEED environment variable is required))
 
 require-seed-file:
-	@: $(if $(SEED_FILE),,$(error SEED_FILE is required))
+	@: $(if $(SEED_FILE)$(SPARK_SEED),,$(error SEED_FILE or the SPARK_SEED environment variable is required))

@@ -350,6 +350,13 @@ export async function watchCpfpFunding({
   now = () => Date.now(),
 }: WatchCpfpFundingOptions) {
   if (!address) throw new CpfpFundingError("watchCpfpFunding requires an address");
+  // The returned cpfpUtxo string embeds the script and public key; accepting
+  // an address-only call would silently emit "undefined" fields downstream.
+  if (!script || !publicKey) {
+    throw new CpfpFundingError(
+      "watchCpfpFunding requires script and publicKey (pass them or derive from the seed)",
+    );
+  }
   const baseUrl = esploraBaseUrl(network, esploraUrl);
   const minValue = BigInt(minSats ?? 0);
   const deadline = timeoutMs > 0 ? now() + timeoutMs : null;

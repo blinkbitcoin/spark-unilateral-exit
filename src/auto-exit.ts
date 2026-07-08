@@ -248,17 +248,21 @@ export async function autoExit({
       const amounts = active.map(
         (s) => BigInt(s.feeSats) + PER_LEAF_FAN_OUT_BUFFER,
       );
-      const fanOut = buildFanOutTransaction({
+      const fanOutTx = buildFanOutTransaction({
         utxos: utxos.map((u) => toCpfpUtxo(u, key.script, key.publicKey)),
         amounts,
         privateKey: key.privateKey,
         feeRate,
       });
       log(
-        `Splitting funding into ${amounts.length} per-leaf UTXOs (txid ${fanOut.txid})`,
+        `Splitting funding into ${amounts.length} per-leaf UTXOs (txid ${fanOutTx.txid})`,
       );
-      await d.broadcastTx(fanOut.txHex, baseUrl);
-      await waitForConfirmation(d, fanOut.txid, baseUrl, pollIntervalMs, log);
+      await d.broadcastTx(fanOutTx.txHex, baseUrl);
+      if (!(await waitForConfirmation(d, fanOutTx.txid, baseUrl, pollIntervalMs, log))) {
+        log(
+          `Fan-out ${fanOutTx.txid} disappeared from the mempool (likely evicted); rebuilding next round`,
+        );
+      }
       continue;
     }
 
@@ -362,8 +366,22 @@ export async function autoExit({
     }
 
     for (const entry of submitted) {
-      await waitForConfirmation(d, entry.parentTxid, baseUrl, pollIntervalMs, log);
-      log(`Leaf ${entry.state.leafId}: package confirmed (${entry.parentTxid})`);
+      const confirmed = await waitForConfirmation(
+        d,
+        entry.parentTxid,
+        baseUrl,
+        pollIntervalMs,
+        log,
+      );
+      if (confirmed) {
+        log(`Leaf ${entry.state.leafId}: package confirmed (${entry.parentTxid})`);
+      } else {
+        // Evicted (e.g. fee spike outbid the package): the leaf stays pending
+        // and the next round rebuilds and resubmits it from chain state.
+        log(
+          `Leaf ${entry.state.leafId}: package ${entry.parentTxid} disappeared from the mempool (likely evicted); will rebuild and resubmit`,
+        );
+      }
     }
   }
 
@@ -449,19 +467,32 @@ async function lockMaturityHeight(
   return null;
 }
 
+// How many consecutive not-found polls before a submitted transaction is
+// treated as evicted from the mempool. Generous because Esplora may briefly
+// 404 a transaction right after submission while it propagates.
+const EVICTION_NOT_FOUND_POLLS = 20;
+
+// Resolves true when the transaction confirms, false when it has been absent
+// from the mempool for EVICTION_NOT_FOUND_POLLS consecutive polls (evicted,
+// e.g. outbid during a fee spike). Waiting forever on an evicted transaction
+// would stall the whole recovery with no signal, so eviction is surfaced to
+// the caller, which rebuilds and resubmits on the next round.
 async function waitForConfirmation(
   d: AutoExitDeps,
   txid: string,
   baseUrl: string,
   pollIntervalMs: number,
   log: (message: string) => void,
-): Promise<void> {
+): Promise<boolean> {
   let consecutiveErrors = 0;
+  let consecutiveNotFound = 0;
   for (let attempt = 1; ; attempt += 1) {
     try {
       const tx = await d.fetchTx(txid, baseUrl);
       consecutiveErrors = 0;
-      if (tx?.status?.confirmed) return;
+      if (tx?.status?.confirmed) return true;
+      consecutiveNotFound = tx === null ? consecutiveNotFound + 1 : 0;
+      if (consecutiveNotFound >= EVICTION_NOT_FOUND_POLLS) return false;
       if (attempt % 10 === 0) log(`Still waiting for ${txid} to confirm`);
     } catch (error) {
       consecutiveErrors += 1;

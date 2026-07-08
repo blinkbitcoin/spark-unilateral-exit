@@ -217,6 +217,17 @@ These floors are roughly an order of magnitude above Spark's published [cooperat
 npm test
 ```
 
+The per-leaf economics calculations can additionally be verified against a
+real exported recovery bundle (adapted to regtest in-memory; the bundle itself
+is never committed because it reveals wallet graph metadata):
+
+```sh
+SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-bundle-economics.test.ts
+```
+
+The test is skipped automatically when no bundle is present at
+`SPARK_REAL_BUNDLE` or `../recovery-bundle.json`.
+
 ## GitHub Actions
 
 This repo has two workflows:

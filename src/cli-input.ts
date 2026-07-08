@@ -29,7 +29,12 @@ export async function loadSeed(
   if (args["seed-file"] && args["seed-file"] !== true) {
     return fs.readFileSync(args["seed-file"] as string, "utf8").trim();
   }
-  if (args.seed && args.seed !== true) return String(args.seed).trim();
+  if (args.seed && args.seed !== true) {
+    console.error(
+      "Warning: --seed exposes the seed in the process list and shell history; prefer --seed-file or the SPARK_SEED environment variable",
+    );
+    return String(args.seed).trim();
+  }
   if (process.env.SPARK_SEED) return process.env.SPARK_SEED.trim();
   return readHiddenLine("Spark seed or mnemonic: ", options);
 }

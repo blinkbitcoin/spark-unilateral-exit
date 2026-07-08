@@ -176,6 +176,8 @@ describe("watchCpfpFunding", () => {
     await expect(
       watchCpfpFunding({
         address: "bcrt1qexample",
+        script: "0014deadbeef",
+        publicKey: "02abc",
         network: "REGTEST",
         esploraUrl: "http://localhost/api",
         minSats: 10000,
@@ -187,5 +189,19 @@ describe("watchCpfpFunding", () => {
         now: () => (clock += 60),
       }),
     ).rejects.toThrow(/Timed out/);
+  });
+
+  it("rejects address-only calls that would emit undefined script/publicKey", async () => {
+    await expect(
+      watchCpfpFunding({
+        address: "bcrt1qexample",
+        network: "REGTEST",
+        esploraUrl: "http://localhost/api",
+        minSats: 10000,
+        fetchUtxos: async () => [],
+        fetchTipHeight: async () => 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/script and publicKey/);
   });
 });

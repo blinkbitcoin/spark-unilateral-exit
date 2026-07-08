@@ -260,6 +260,36 @@ describe("autoExit", () => {
     expect(submitted).toEqual(["tx-B1"]);
   });
 
+  it("recovers when a submitted package is evicted from the mempool", async () => {
+    const { deps, submitted, confirmed } = makeFakes();
+    // First submission of tx-A1 is "accepted" but never appears anywhere
+    // (evicted); the retry sticks.
+    let evictions = 1;
+    const submitPkg: AutoExitDeps["submitPkg"] = async (txs) => {
+      const parent = txs[0]!;
+      submitted.push(parent);
+      if (parent === "tx-A1" && evictions > 0) {
+        evictions -= 1; // vanish: not confirmed, not in mempool
+      } else {
+        confirmed.set(parent, 100);
+      }
+      return { package_msg: "success" };
+    };
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: { ...deps, submitPkg },
+    });
+    // tx-A1 was submitted twice: once evicted, once confirmed; the run still
+    // completes every chain.
+    expect(submitted.filter((t) => t === "tx-A1")).toHaveLength(2);
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")?.status).toBe("waiting-timelock");
+  });
+
   it("exits mature refunds instead of deferring them", async () => {
     const { deps, submitted } = makeFakes();
     const fetchTip: AutoExitDeps["fetchTip"] = async () => 2_200; // past maturity 2100

@@ -268,10 +268,17 @@ async fn query_available_nodes_with_parents(
             all_nodes.insert(id, node);
         }
 
+        // QueryNodesResponse.offset follows the Spark proto convention (spelled
+        // out on QueryHtlcResponse.offset: "defaults to -1 if there are no more
+        // results"): the server returns the NEXT page's offset, or <= 0 when
+        // the result set is exhausted. The vendored SDK's
+        // PagingFilter::next_from_offset relies on the same contract, so a
+        // multi-page wallet keeps paginating here rather than truncating at
+        // one page.
         if count == 0 || response.offset <= 0 {
             break;
         }
-        offset += page_size;
+        offset = response.offset;
     }
 
     // The SO's include_parents ancestor expansion skips the tree-root node for
