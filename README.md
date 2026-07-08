@@ -10,6 +10,30 @@ This repo uses a bundle-first recovery model:
 
 See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook. For wallet-app integration, see [docs/mobile-integration-plan.md](docs/mobile-integration-plan.md) (integration boundary) and [docs/mobile-ux-flow.md](docs/mobile-ux-flow.md) (screen flow for Blink mobile).
 
+## Prerequisites
+
+The `make` commands (and the Rust bundle exporter they wrap) expect the
+development environment from this repo's Nix flake, loaded automatically by
+direnv:
+
+1. Install Nix — the [Determinate Systems installer](https://github.com/DeterminateSystems/nix-installer)
+   is recommended (flakes enabled out of the box, clean uninstall, survives
+   macOS upgrades):
+
+   ```sh
+   curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+   ```
+
+2. Install [direnv](https://direnv.net/) and hook it into your shell.
+3. In the repo root, run `direnv allow` once; the [.envrc](.envrc) (`use flake`)
+   then loads Node, Rust, and the other pinned tools on every `cd` into the
+   repo.
+4. Run `npm install` to fetch the JS dependencies.
+
+Without direnv, prefix commands with `nix develop --command` (the
+`refresh-recovery-bundle` target already does this for the Rust exporter), or
+bring your own Node 22+ and Rust toolchain.
+
 ## Current CLI
 
 The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
