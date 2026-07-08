@@ -170,7 +170,13 @@ node src/cli.ts watch-cpfp \
 from `--bundle` + `--fee-rate`, or set `--min-sats`) confirms at the funding
 address, then prints a `cpfpUtxo` field to use as `CPFP_UTXO`/`--cpfp-utxo`
 below. It requires `--min-sats` or `--bundle` so it never accepts an underfunded
-UTXO. On REGTEST/LOCAL, pass `--esplora-url` (Esplora has no default there).
+UTXO. While waiting it announces incoming transactions it sees at the address,
+including unconfirmed ones and ones below the required amount. Passing
+`--min-confirmations 0` accepts a 0-conf funding UTXO, but is not recommended:
+the CPFP fee-bump child is a v3 (TRUC) transaction that mempool policy limits
+to one unconfirmed parent (the exit transaction), so packages built on
+unconfirmed funding are rejected until the funding transaction confirms.
+On REGTEST/LOCAL, pass `--esplora-url` (Esplora has no default there).
 Because the key is seed-derived, step 5 Option A can sign with `--seed-file`.
 
 ### Alternative: external fee wallet

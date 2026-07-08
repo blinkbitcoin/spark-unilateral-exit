@@ -188,6 +188,14 @@ async function main(): Promise<void> {
       minSats = estimate.requiredSats;
     }
 
+    const minConfirmations = optionalNumber(
+      args["min-confirmations"],
+      1,
+      "--min-confirmations",
+    );
+    // Announce each incoming UTXO once so the operator knows their funding tx
+    // was seen (or is underfunded) instead of watching a bare attempt counter.
+    const announced = new Set<string>();
     const utxo = await watchCpfpFunding({
       address,
       script,
@@ -195,11 +203,28 @@ async function main(): Promise<void> {
       network,
       esploraUrl: optionalValue(args["esplora-url"]),
       minSats,
-      minConfirmations: optionalNumber(args["min-confirmations"], 1, "--min-confirmations"),
+      minConfirmations,
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
       timeoutMs: optionalSeconds(args.timeout, "--timeout"),
-      onPoll: ({ attempt }) =>
-        console.error(`Waiting for CPFP funding at ${address} (attempt ${attempt})`),
+      onPoll: ({ attempt, utxos }) => {
+        for (const seen of utxos ?? []) {
+          const key = `${seen.txid}:${seen.vout}`;
+          if (announced.has(key)) continue;
+          announced.add(key);
+          const value = BigInt(seen.value ?? 0);
+          const confirmed = Boolean(seen.status?.confirmed);
+          if (value < BigInt(minSats!)) {
+            console.error(
+              `Seen ${confirmed ? "confirmed" : "unconfirmed"} UTXO ${key} at ${address}, but ${value} sats is below the required ${minSats} sats; send the difference as a new transaction`,
+            );
+          } else if (!confirmed) {
+            console.error(
+              `Seen unconfirmed funding tx ${seen.txid} (${value} sats) at ${address}; waiting for ${minConfirmations} confirmation(s)`,
+            );
+          }
+        }
+        console.error(`Waiting for CPFP funding at ${address} (attempt ${attempt})`);
+      },
     });
     emitJson({
       ...utxo,
