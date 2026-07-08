@@ -148,14 +148,41 @@ Two structural details matter:
 
 - **Refund transactions are deferred, not broadcast.** The last transaction of
   each chain (the refund that actually hands the leaf to the user's key)
-  carries a ~2,000-block CSV timelock (~2 weeks). The loop decodes each
-  refund's lock, reports its maturity height, and stops when only timelocked
-  refunds remain. Because refunds are never broadcast early, the fee-funding
-  change is never captured by a timelocked transaction, and leaves drain
-  sequentially over a single funding UTXO without deadlock.
+  carries a CSV timelock — ~2,000 blocks (~2 weeks) for fresh leaves; this
+  wallet's renewed leaves carried 1,400 blocks. The loop decodes each refund's
+  lock, reports its maturity height, and stops when only timelocked refunds
+  remain. Because refunds are never broadcast early, the fee-funding change is
+  never captured by a timelocked transaction, and leaves drain sequentially
+  over a single funding UTXO without deadlock.
 - **Parallelism is optional.** `FAN_OUT=1` first splits the funding into one
   UTXO per leaf, after which every leaf chain advances each block instead of
   taking turns — the SDK's UTXO handling was designed for exactly this shape.
+
+### What fan-out would have changed here
+
+We ran this recovery sequentially (the default). With `FAN_OUT=1` the loop
+would first have broadcast **one extra transaction with 4 outputs** — the
+single 9,388-sat funding UTXO split into one UTXO per economical leaf, each
+sized to that leaf's remaining CPFP fees plus a 1,000-sat buffer, the last
+output absorbing the remainder. A 1-input/4-output P2WPKH transaction is
+~203 vB, so ~203 sats at 1 sat/vB.
+
+From then on **4 tracks run in parallel** — one per leaf. Each leaf chain is
+its own TRUC cluster, so all four packages of a round are independent and can
+confirm in the same block. Each of this wallet's four leaves had a ~6-package
+chain before its refund:
+
+| | blocks until timelock wait | at ~10 min/block |
+|---|---|---|
+| Sequential (default) | 4 leaves × ~6 packages ≈ **24 blocks** | ~4 hours |
+| `FAN_OUT=1` | 1 (fan-out) + ~6 (deepest chain) ≈ **7 blocks** | ~70 minutes |
+
+Roughly a **3.5× wall-clock gain for ~203 sats**, and the same shape repeats
+after refund maturity: the four refund packages broadcast in one block with
+per-leaf UTXOs instead of four consecutive blocks. The gain scales with leaf
+count (sum of chain depths versus deepest single chain), so a wallet with
+dozens of economical leaves should always fan out; for a handful of leaves,
+sequential is simpler and was fast enough here.
 
 ## Step 6: timelocks, then sweep
 
