@@ -49,7 +49,7 @@ interface ExportFromSeedOptions {
 
 export async function exportRecoveryBundleFromSeed({
   seed,
-  accountNumber = 0,
+  accountNumber,
   network = "MAINNET",
   operatorSet = DEFAULT_OPERATOR_SET,
   appVersion = "unknown",
@@ -64,12 +64,13 @@ export async function exportRecoveryBundleFromSeed({
     throw new RecoveryBundleExportError("Spark seed or mnemonic is required");
   }
   const normalizedNetwork = normalizeNetwork(network);
-  const walletResponse = await walletFactory({
-    seed,
-    accountNumber: normalizeAccountNumber(accountNumber),
-    network: normalizedNetwork,
-  });
-  const wallet = walletResponse?.wallet ?? walletResponse;
+  const wallet = unwrapWallet(
+    await walletFactory({
+      seed,
+      accountNumber: normalizeAccountNumber(accountNumber),
+      network: normalizedNetwork,
+    }),
+  );
 
   if (!wallet) {
     throw new RecoveryBundleExportError("Spark wallet initialization returned no wallet");
@@ -145,7 +146,7 @@ export async function exportRecoveryBundleFromWallet({
   return validateRecoveryBundle(bundle);
 }
 
-async function pollLeaves({
+export async function pollLeaves({
   wallet,
   attempts,
   delayMs,
@@ -171,20 +172,39 @@ interface SparkWalletModule {
   SparkWallet: {
     initialize(config: {
       mnemonicOrSeed: string;
-      accountNumber: number;
-      options: { network: string };
+      accountNumber: number | undefined;
+      options: {
+        network: string;
+        optimizationOptions?: { auto?: boolean; multiplicity?: number };
+      };
     }): Promise<unknown>;
   };
 }
 
-async function defaultWalletFactory({ seed, accountNumber, network }: WalletFactoryParams) {
+// SparkWallet.initialize resolves to { wallet, ... } while injected factories
+// and fakes may return the wallet directly; this is the single place that
+// assumption about the SDK's return shape lives.
+export function unwrapWallet(walletResponse: any): SparkWalletLike | undefined {
+  return (walletResponse?.wallet ?? walletResponse) || undefined;
+}
+
+export async function defaultWalletFactory({ seed, accountNumber, network }: WalletFactoryParams) {
   const { SparkWallet } = (await import(
     "@buildonspark/spark-sdk"
   )) as unknown as SparkWalletModule;
   return SparkWallet.initialize({
     mnemonicOrSeed: seed,
     accountNumber,
-    options: { network },
+    options: {
+      network,
+      // The SDK defaults to auto:true with multiplicity 1: after any sync or
+      // claim it may launch background SSP swaps on its own. That would race
+      // bundle exports with leaf churn and, right after a multiplicity-0
+      // consolidation, start re-fragmenting the leaf set toward the
+      // transfer-friendly ladder until cleanup() kills it mid-claim. This
+      // tool only ever swaps leaves explicitly, so keep the wallet passive.
+      optimizationOptions: { auto: false },
+    },
   });
 }
 
@@ -271,7 +291,13 @@ function normalizeLeafValue(value: bigint | number | string | undefined): number
   return asNumber;
 }
 
-function normalizeAccountNumber(value: AccountNumberInput): number {
+// undefined lets SparkWallet.initialize pick its network default (0 on
+// regtest, 1 on mainnet) - the same rule the Rust bundle tool follows, so all
+// commands land on the same wallet identity unless an account is given.
+export function normalizeAccountNumber(
+  value: AccountNumberInput,
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
   const accountNumber = Number(value);
   if (!Number.isSafeInteger(accountNumber) || accountNumber < 0) {
     throw new RecoveryBundleExportError("--account-number must be a non-negative integer");
@@ -279,7 +305,7 @@ function normalizeAccountNumber(value: AccountNumberInput): number {
   return accountNumber;
 }
 
-function normalizeNetwork(value: string): string {
+export function normalizeNetwork(value: string): string {
   const network = String(value ?? "").toUpperCase();
   if (!["MAINNET", "REGTEST", "TESTNET", "SIGNET", "LOCAL"].includes(network)) {
     throw new RecoveryBundleExportError(`Unsupported Spark network: ${value}`);

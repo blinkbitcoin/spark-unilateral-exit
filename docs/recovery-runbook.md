@@ -58,7 +58,20 @@ make recover \
   FEE_RATE=1
 ```
 
-It derives the CPFP funding address from the seed, waits for funding to
+Before touching the chain it prepares the wallet on a best-effort basis while
+Spark operators are still reachable: it consolidates the leaves into the
+exit-optimal (fewest-leaves) denominations so the maximum value is economical
+to exit, and refreshes the recovery bundle so the exit runs against the
+current leaves (the previous bundle file is kept as a timestamped backup).
+Both steps are opportunistic: when the operators or the SSP are offline the
+flow notes what was skipped and proceeds with the saved bundle, which is the
+normal unilateral-exit situation. Pass `NO_CONSOLIDATE=1` to refresh without
+swapping leaves, or `OFFLINE=1` to skip both and use the saved bundle
+as-is. When a `recovery-packages.json` from a previous run exists, the
+prepare phase is skipped automatically so a resumed recovery never swaps
+leaves whose exits are already in flight.
+
+It then derives the CPFP funding address from the seed, waits for funding to
 confirm there if none exists yet, then loops package → autosign → submit →
 wait-for-confirmation, one package per leaf chain at a time, until every leaf
 is either fully broadcast or waiting on its refund timelock. Spark's v3 (TRUC)
@@ -92,6 +105,26 @@ for step 8's `make sweep` once refunds confirm. All Esplora traffic defaults
 to Blockstream's public instance (`https://blockstream.info/api`); set
 `ESPLORA_URL=<url>` to use a self-hosted one (required on regtest).
 
+**Keep the resume files.** The seed, the recovery bundle (including its
+timestamped `*.backup.json` copies), and `recovery-packages.json` are the
+complete resume state of a recovery in progress; treat them as
+funds-critical until every leaf is swept. The CLI protects them against
+accidents: any write that would replace different content first copies the
+old file to a timestamped backup, the packages file is labeled with a
+`purpose` field and its creation context, and `auto-exit` prints an explicit
+warning when a new run drops leaves that the existing packages file still
+tracks (for example when exiting a new leaf set while an older recovery is
+waiting on timelocks). For parallel or test runs, use separate
+`BUNDLE=`/`PACKAGES=` paths; to finish an older recovery after the wallet's
+remaining leaves were swapped or spent, re-run `make recover` with the
+backup bundle that still contains the exiting leaves.
+
+If the recovery turns out to be unnecessary (operators come back, false
+alarm) and the wallet returns to day-to-day use, swap the leaves back to the
+transfer-optimal shape with `make consolidate MULTIPLICITY=1` and refresh the
+bundle again; the exit-optimal denominations make ordinary payments depend
+on an SSP swap first. See the consolidation trade-off section in the README.
+
 The manual step-by-step equivalent (`cpfp-address` → `watch-cpfp` → `package`
 → `sign-packages` → `broadcast`) remains available for hardware-signer and
 Bitcoin Core flows; sections 1–8 below document each stage in detail. Note
@@ -102,7 +135,11 @@ block — prefer `make recover` unless you are driving the loop yourself.
 ## 1. Refresh the recovery bundle while operators are online
 
 Run this before an outage, and again after every event that can change Spark
-leaves.
+leaves. If a unilateral exit looks likely, consider consolidating the leaves
+first (`make consolidate SEED_FILE=... NETWORK=mainnet`, or rely on
+`make recover` doing it automatically): fewer, larger leaves make more of the
+balance economical to exit. Consolidation spends the current leaves, so
+always refresh the bundle after it.
 
 ```sh
 make refresh-recovery-bundle \

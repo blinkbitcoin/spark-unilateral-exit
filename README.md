@@ -41,6 +41,7 @@ The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 | Command | Purpose |
 |---------|---------|
 | `refresh-bundle` | Query live Spark leaves from a seed and write a bundle |
+| `consolidate` | Swap small leaves with the SSP into the fewest denominations (`make consolidate`) |
 | `plan` | Validate a saved bundle and print a recovery plan |
 | `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
 | `watch-cpfp` | Watch the funding address for an incoming UTXO and emit it as `--cpfp-utxo` |
@@ -60,8 +61,10 @@ flowchart TD
     seed[("Spark seed")]
 
     subgraph prep["Preparation — Spark operators online"]
+        consolidate["consolidate<br/>(optional: fewest-leaves denominations,<br/>cheapest to exit)"]
         refresh["refresh-bundle"]
         bundle[("recovery-bundle.json<br/>store encrypted, keep fresh")]
+        consolidate -.-> refresh
         refresh --> bundle
     end
 
@@ -93,7 +96,19 @@ flowchart TD
     seed -.-> sweep
 ```
 
-Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere). The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only.
+Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere) and optional steps. The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only. The one-shot `make recover` flow runs the preparation subgraph automatically on a best-effort basis: it consolidates leaves and refreshes the bundle when operators are reachable, and falls back to the saved bundle with a note when they are not.
+
+### Files required to resume a recovery
+
+Three artifacts are the resume state of a recovery in progress; losing them can strand funds behind timelocks:
+
+| File | Why it matters |
+|---|---|
+| Spark seed (`SEED_FILE` / `SPARK_SEED`) | Derives the CPFP funding key and the refund/sweep keys |
+| `recovery-bundle.json` + its `*.backup.json` copies | Only source of the exit and refund transactions per leaf set; a bundle from *before* a swap is the only way to rebuild packages for leaves that were exiting at that time |
+| `recovery-packages.json` (the `--out` of `auto-exit`) | The refund transactions of the in-flight recovery; `sweep` reads it |
+
+The CLI never overwrites any of these silently: every write that would replace different content first copies the old file to a timestamped `*.backup.json` next to it, and `auto-exit` warns explicitly when a new run would drop leaves that the existing packages file still tracks. The packages file itself carries a `purpose` label and its creation context so it is recognizable months later. When testing or running a second recovery while one is in flight, point the run at separate paths (`BUNDLE=... PACKAGES=...`); but even without that, the previous state survives in a backup.
 
 Install dependencies:
 
@@ -211,6 +226,53 @@ The CLI does not currently enforce a minimum recoverable balance. As conservativ
 
 These floors are roughly an order of magnitude above Spark's published [cooperative "Exit to L1" fee](https://docs.spark.money/learn/faq#what-are-the-fees-on-spark) of `250 × sats_per_vbyte + 750` (about 1,000 sats at 1 sat/vbyte). That cooperative fee is flat and applies only while Spark operators are online; unilateral exit is the offline fallback and costs more because the user broadcasts the full exit tree plus CPFP bumps and a final sweep rather than one operator-assisted transaction. See [docs/withdraw-guide.md](docs/withdraw-guide.md#minimum-practical-balance) for details.
 
+## Leaf Consolidation
+
+Every leaf pays its own CPFP and sweep fees on unilateral exit, so a balance
+fragmented across many small leaves strands more value in uneconomical leaves
+than the same balance held as a few large ones. While the Spark operators are
+online, the leaf set can be consolidated cooperatively:
+
+```sh
+make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet DRY_RUN=1  # inspect the plan
+make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet           # execute the swaps
+```
+
+This drives the Spark SDK's `optimizeLeaves` swap with the SSP toward the
+greedy power-of-two decomposition of the balance - the fewest leaves Spark can
+represent it with. Leaf values are power-of-two denominations (matched from
+the SSP's inventory), so a single leaf holding the whole balance is generally
+not possible: 9,888 sats consolidates to `8192 + 1024 + 512 + 128 + 32`, five
+leaves, not one. Value stranded in still-uneconomical leaves after
+consolidation is bounded by roughly twice the per-leaf exit cost, no matter
+how fragmented the wallet was before.
+
+Consolidation is a cooperative operation (not an exit) and spends the current
+leaves, so refresh the recovery bundle afterwards; the command reminds you.
+`make recover` performs both steps automatically before exiting (see below).
+
+### The consolidation trade-off
+
+There is no leaf set that is optimal for both exits and payments; the
+denomination shape trades one against the other:
+
+| | Exit-optimal (`MULTIPLICITY=0`) | Transfer-optimal (`MULTIPLICITY=1`) |
+|---|---|---|
+| Leaf set for 9,888 sats | `32,128,512,1024,8192` (5 leaves) | `1,1,2,4,8,...,2048,4096` (18 leaves) |
+| Unilateral exit cost | Lowest possible; least value stranded | Every small leaf pays its own exit fees; most strand below break-even |
+| Sending payments | Most amounts cannot be composed exactly, so sends trigger an SSP swap first (extra latency, SSP must be online, more metadata shared, burns refund-timelock hops) | Any amount up to the balance composes like a binary number, so sends almost never need a pre-swap |
+
+The Spark SDK's own default is transfer-optimal (it even re-optimizes in the
+background toward multiplicity 1; this tool disables that on the wallets it
+opens). So treat exit-optimal as a *recovery posture*, not a resting state:
+
+- **Before a unilateral exit**: consolidate to `MULTIPLICITY=0` (or let
+  `make recover` do it) so the maximum value is economical to exit.
+- **If the recovery turns out unnecessary** (operators recovered, false
+  alarm) and the wallet goes back to day-to-day use: swap back with
+  `make consolidate MULTIPLICITY=1` so ordinary payments stop depending on
+  an SSP swap, and refresh the recovery bundle again afterwards.
+
 ## Test
 
 ```sh
@@ -223,10 +285,14 @@ is never committed because it reveals wallet graph metadata):
 
 ```sh
 SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-bundle-economics.test.ts
+SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-consolidate.test.ts
 ```
 
-The test is skipped automatically when no bundle is present at
-`SPARK_REAL_BUNDLE` or `../recovery-bundle.json`.
+The second test measures what `consolidate` would do to the real bundle's leaf
+set: how much value is stranded in uneconomical leaves now versus after
+consolidating to the greedy power-of-two denominations. Both tests are skipped
+automatically when no bundle is present at `SPARK_REAL_BUNDLE` or
+`../recovery-bundle.json`.
 
 ## GitHub Actions
 
