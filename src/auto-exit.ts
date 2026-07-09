@@ -134,8 +134,9 @@ const MIN_USABLE_UTXO_SATS = 600n;
 // package -> sign -> submit-head -> wait-for-confirmation per leaf until every
 // chain has been broadcast or is blocked on its refund timelock. Stateless
 // across runs: each round reconstructs packages from live chain state (the SDK
-// skips already-broadcast transactions), so interrupting and re-running is
-// always safe.
+// skips already-broadcast transactions, and constructSparkPackages re-attaches
+// the still-pending refund so it is never dropped), so interrupting and
+// re-running is always safe.
 export async function autoExit({
   bundle,
   seed,
@@ -299,7 +300,10 @@ export async function autoExit({
       }
       const txPackages = packages[0]?.txPackages ?? [];
       if (txPackages.length === 0) {
-        // Everything for this leaf (including the refund) is on chain.
+        // Empty means the exit chain AND the refund are on chain: the SDK omits
+        // broadcast nodes, and constructSparkPackages re-attaches a refund that
+        // is not yet broadcast, so an empty list here is the genuine
+        // "exit complete" signal rather than a dropped refund.
         state.status = "exit-broadcast";
         log(`Leaf ${state.leafId}: all transactions broadcast`);
         continue;

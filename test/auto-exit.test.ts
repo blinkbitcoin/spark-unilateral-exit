@@ -163,6 +163,11 @@ function makeFakes({ fanOutUtxoCount = 0 }: { fanOutUtxoCount?: number } = {}) {
     estimateFunding: (async () => estimate) as AutoExitDeps["estimateFunding"],
     constructPackages: (async ({ bundle }) => {
       const leafId = bundle.leaves[0]!.id;
+      // Mirrors the real constructSparkPackages contract: it keeps returning a
+      // leaf's not-yet-confirmed transactions — INCLUDING the refund — until they
+      // land on chain. The SDK alone drops the refund once the node is broadcast;
+      // constructSparkPackages re-attaches it (see reattachPendingRefunds), which
+      // is what makes this "refund stays in the list until confirmed" behavior real.
       const remaining = (CHAINS[leafId] ?? []).filter((tx) => !confirmed.has(tx));
       return [
         {
