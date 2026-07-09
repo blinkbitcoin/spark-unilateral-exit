@@ -16,6 +16,7 @@ import {
 import { consolidateLeavesFromSeed } from "./consolidate.ts";
 import { prepareRecovery } from "./prepare-recovery.ts";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
+import { packagesFileLeafIds, writeFileWithBackup } from "./safe-files.ts";
 import { signPackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
 import { autoExit } from "./auto-exit.ts";
@@ -267,13 +268,13 @@ async function main(): Promise<void> {
       prepareSummary.consolidated = prepared.consolidated;
       prepareSummary.notes.push(...prepared.notes);
       if (prepared.bundle) {
-        const backupPath = backupFile(bundlePath);
-        if (backupPath) console.error(`Saved previous bundle to ${backupPath}`);
-        fs.writeFileSync(
+        const written = writeFileWithBackup(
           bundlePath,
           `${serializeForJson(prepared.bundle)}\n`,
-          { mode: 0o600 },
         );
+        if (written.backupPath) {
+          console.error(`Saved previous bundle to ${written.backupPath}`);
+        }
         console.error(`Wrote refreshed recovery bundle to ${bundlePath}`);
         bundle = prepared.bundle;
       }
@@ -296,12 +297,36 @@ async function main(): Promise<void> {
     });
     if (outPath) {
       // Sweep-compatible packages file: `sweep` reads the last tx per leaf as
-      // the refund transaction.
-      fs.writeFileSync(
+      // the refund transaction. This file is the resume state of the recovery,
+      // so it is labeled, and replacing it always leaves a timestamped backup.
+      const previousLeafIds = packagesFileLeafIds(outPath);
+      const written = writeFileWithBackup(
         outPath,
-        `${serializeForJson({ packages: result.packages })}\n`,
-        { mode: 0o600 },
+        `${serializeForJson({
+          purpose:
+            "spark-unilateral-exit refund packages: needed to broadcast matured refunds and sweep this recovery. Keep this file (and the seed) until every leaf below is swept.",
+          createdAt: new Date().toISOString(),
+          network,
+          bundleCreatedAt: bundle.createdAt,
+          packages: result.packages,
+        })}\n`,
       );
+      if (written.backupPath) {
+        console.error(`Backed up previous packages file to ${written.backupPath}`);
+      }
+      const newLeafIds = new Set(
+        result.packages.map((p) => p.leafId).filter(Boolean),
+      );
+      const dropped = previousLeafIds.filter((id) => !newLeafIds.has(id));
+      if (dropped.length > 0) {
+        console.error(
+          `WARNING: ${outPath} previously held refund packages for ` +
+            `${dropped.length} leaf/leaves that are not part of this run: ` +
+            `${dropped.join(", ")}. That recovery can still be resumed from the ` +
+            "backup above - keep it until those leaves are swept, or re-run with " +
+            "a different --out path to keep the recoveries separate.",
+        );
+      }
       console.error(`Wrote refund packages for sweep to ${outPath}`);
     }
     emitJson({ ...result, prepare: prepareSummary });
@@ -319,7 +344,10 @@ async function main(): Promise<void> {
     if (args.out === true) throw new Error("--out requires a path");
     const outPath = optionalValue(args.out);
     if (outPath) {
-      fs.writeFileSync(outPath, `${output}\n`, { mode: 0o600 });
+      const written = writeFileWithBackup(outPath, `${output}\n`);
+      if (written.backupPath) {
+        console.error(`Backed up previous signed packages to ${written.backupPath}`);
+      }
     } else {
       process.stdout.write(`${output}\n`);
     }
@@ -357,7 +385,10 @@ async function main(): Promise<void> {
     const output = `${serializeForJson(bundle)}\n`;
     const outPath = optionalValue(args.out);
     if (outPath) {
-      fs.writeFileSync(outPath, output, { mode: 0o600 });
+      const written = writeFileWithBackup(outPath, output);
+      if (written.backupPath) {
+        console.error(`Saved previous bundle to ${written.backupPath}`);
+      }
     } else {
       process.stdout.write(output);
     }
@@ -413,21 +444,6 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
   return args;
-}
-
-// Timestamped copy next to the original, matching the Makefile's
-// refresh-recovery-bundle backup naming (<name>.<UTC timestamp>.backup.json).
-function backupFile(path: string): string | null {
-  if (!fs.existsSync(path)) return null;
-  const timestamp = new Date()
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d+Z$/, "Z");
-  const backupPath = path.endsWith(".json")
-    ? `${path.slice(0, -5)}.${timestamp}.backup.json`
-    : `${path}.${timestamp}.backup.json`;
-  fs.copyFileSync(path, backupPath);
-  return backupPath;
 }
 
 function loadOptionalBundle(path: CliArgValue): RecoveryBundle | null {

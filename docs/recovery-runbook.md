@@ -105,6 +105,20 @@ for step 8's `make sweep` once refunds confirm. All Esplora traffic defaults
 to Blockstream's public instance (`https://blockstream.info/api`); set
 `ESPLORA_URL=<url>` to use a self-hosted one (required on regtest).
 
+**Keep the resume files.** The seed, the recovery bundle (including its
+timestamped `*.backup.json` copies), and `recovery-packages.json` are the
+complete resume state of a recovery in progress; treat them as
+funds-critical until every leaf is swept. The CLI protects them against
+accidents: any write that would replace different content first copies the
+old file to a timestamped backup, the packages file is labeled with a
+`purpose` field and its creation context, and `auto-exit` prints an explicit
+warning when a new run drops leaves that the existing packages file still
+tracks (for example when exiting a new leaf set while an older recovery is
+waiting on timelocks). For parallel or test runs, use separate
+`BUNDLE=`/`PACKAGES=` paths; to finish an older recovery after the wallet's
+remaining leaves were swapped or spent, re-run `make recover` with the
+backup bundle that still contains the exiting leaves.
+
 If the recovery turns out to be unnecessary (operators come back, false
 alarm) and the wallet returns to day-to-day use, swap the leaves back to the
 transfer-optimal shape with `make consolidate MULTIPLICITY=1` and refresh the

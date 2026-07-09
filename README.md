@@ -98,6 +98,18 @@ flowchart TD
 
 Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere) and optional steps. The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only. The one-shot `make recover` flow runs the preparation subgraph automatically on a best-effort basis: it consolidates leaves and refreshes the bundle when operators are reachable, and falls back to the saved bundle with a note when they are not.
 
+### Files required to resume a recovery
+
+Three artifacts are the resume state of a recovery in progress; losing them can strand funds behind timelocks:
+
+| File | Why it matters |
+|---|---|
+| Spark seed (`SEED_FILE` / `SPARK_SEED`) | Derives the CPFP funding key and the refund/sweep keys |
+| `recovery-bundle.json` + its `*.backup.json` copies | Only source of the exit and refund transactions per leaf set; a bundle from *before* a swap is the only way to rebuild packages for leaves that were exiting at that time |
+| `recovery-packages.json` (the `--out` of `auto-exit`) | The refund transactions of the in-flight recovery; `sweep` reads it |
+
+The CLI never overwrites any of these silently: every write that would replace different content first copies the old file to a timestamped `*.backup.json` next to it, and `auto-exit` warns explicitly when a new run would drop leaves that the existing packages file still tracks. The packages file itself carries a `purpose` label and its creation context so it is recognizable months later. When testing or running a second recovery while one is in flight, point the run at separate paths (`BUNDLE=... PACKAGES=...`); but even without that, the previous state survives in a backup.
+
 Install dependencies:
 
 ```sh
