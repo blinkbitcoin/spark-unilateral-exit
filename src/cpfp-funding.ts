@@ -5,6 +5,7 @@ import { NETWORK, TEST_NETWORK, Transaction, p2wpkh } from "@scure/btc-signer";
 
 import { esploraBaseUrl, getAddressUtxos, getTipHeight } from "./esplora.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
+import { relativeHeightLock } from "./tx-utils.ts";
 import { parseSeed } from "./sweep.ts";
 import type {
   AccountNumberInput,
@@ -118,6 +119,13 @@ export interface LeafEconomics {
   sweepFeeSats: string;
   netSats: string | null;
   economical: boolean;
+  // Refund CSV in blocks: the wait between the leaf's exit chain confirming
+  // and the refund becoming broadcastable. 2000 for fresh leaves, 100 lower
+  // per transfer hop since the last renewal.
+  exitWaitBlocks: number | null;
+  // exitWaitBlocks plus ~1 block per package of the exit chain: the estimated
+  // total blocks from starting the exit until the refund can confirm.
+  worstCaseExitBlocks: number | null;
 }
 
 interface EstimateCpfpFundingOptions {
@@ -174,6 +182,9 @@ export async function estimateCpfpFunding({
 
   let feeBumpTxCount = 0;
   let totalFeeSats = 0n;
+  let weightedExitBlocks = 0n;
+  let weightedExitValue = 0n;
+  let maxExitBlocks: number | null = null;
   const perLeaf: LeafEconomics[] = [];
   for (const leafPackage of packages) {
     let leafFee = 0n;
@@ -192,9 +203,27 @@ export async function estimateCpfpFunding({
     // must not silently drop funds.
     const net = value === null ? null : value - leafFee - sweepFeeSats;
     const economical = net === null || net > minNet;
+
+    // Exit latency: the refund is the last package of the leaf's chain and
+    // carries the CSV that gates the final wait.
+    const txPackages = leafPackage.txPackages ?? [];
+    const refundTx = txPackages[txPackages.length - 1]?.tx;
+    const exitWaitBlocks = refundTx
+      ? (relativeHeightLock(refundTx)?.blocks ?? null)
+      : null;
+    const worstCaseExitBlocks =
+      exitWaitBlocks === null ? null : exitWaitBlocks + leafCount;
+
     if (economical || includeUneconomical) {
       feeBumpTxCount += leafCount;
       totalFeeSats += leafFee;
+      if (worstCaseExitBlocks !== null && value !== null && value > 0n) {
+        weightedExitBlocks += value * BigInt(worstCaseExitBlocks);
+        weightedExitValue += value;
+      }
+      if (worstCaseExitBlocks !== null) {
+        maxExitBlocks = Math.max(maxExitBlocks ?? 0, worstCaseExitBlocks);
+      }
     }
     perLeaf.push({
       leafId: leafPackage.leafId,
@@ -204,6 +233,8 @@ export async function estimateCpfpFunding({
       sweepFeeSats: sweepFeeSats.toString(),
       netSats: net === null ? null : net.toString(),
       economical,
+      exitWaitBlocks,
+      worstCaseExitBlocks,
     });
   }
 
@@ -219,6 +250,14 @@ export async function estimateCpfpFunding({
     totalFeeSats: totalFeeSats.toString(),
     bufferSats: buffer.toString(),
     requiredSats: requiredSats.toString(),
+    // Estimated blocks from starting the exit until refunds can confirm,
+    // over the leaves counted above: weighted by leaf value, and the slowest
+    // single leaf. ~10 minutes per block on mainnet.
+    valueWeightedExitBlocks:
+      weightedExitValue > 0n
+        ? Number(weightedExitBlocks / weightedExitValue)
+        : null,
+    maxExitBlocks,
     perLeaf,
     skippedLeafIds,
   };

@@ -200,6 +200,13 @@ node src/cli.ts cpfp-address \
   --fee-rate 1
 ```
 
+The output also reports exit latency per leaf: `exitWaitBlocks` is the
+refund's CSV timelock (2,000 blocks for fresh leaves, 100 lower per transfer
+hop since renewal) and `worstCaseExitBlocks` adds ~1 block per package of the
+exit chain. The top-level `valueWeightedExitBlocks` and `maxExitBlocks`
+summarize how long the exit takes for the leaves being recovered, at ~10
+minutes per block.
+
 Send at least the printed `requiredSats` to the printed `cpfpAddress`, then:
 
 ```sh

@@ -138,11 +138,13 @@ function makeFakes({ fanOutUtxoCount = 0 }: { fanOutUtxoCount?: number } = {}) {
     totalFeeSats: "900",
     bufferSats: "1000",
     requiredSats: "1900",
+    valueWeightedExitBlocks: 2003,
+    maxExitBlocks: 2003,
     skippedLeafIds: ["L3"],
     perLeaf: [
-      { leafId: "L1", feeBumpTxCount: 3, feeSats: "600", valueSats: "100000", sweepFeeSats: "111", netSats: "99289", economical: true },
-      { leafId: "L2", feeBumpTxCount: 2, feeSats: "300", valueSats: "50000", sweepFeeSats: "111", netSats: "49589", economical: true },
-      { leafId: "L3", feeBumpTxCount: 1, feeSats: "300", valueSats: "100", sweepFeeSats: "111", netSats: "-311", economical: false },
+      { leafId: "L1", feeBumpTxCount: 3, feeSats: "600", valueSats: "100000", sweepFeeSats: "111", netSats: "99289", economical: true, exitWaitBlocks: 2000, worstCaseExitBlocks: 2003 },
+      { leafId: "L2", feeBumpTxCount: 2, feeSats: "300", valueSats: "50000", sweepFeeSats: "111", netSats: "49589", economical: true, exitWaitBlocks: 2000, worstCaseExitBlocks: 2002 },
+      { leafId: "L3", feeBumpTxCount: 1, feeSats: "300", valueSats: "100", sweepFeeSats: "111", netSats: "-311", economical: false, exitWaitBlocks: 2000, worstCaseExitBlocks: 2001 },
     ],
   };
 

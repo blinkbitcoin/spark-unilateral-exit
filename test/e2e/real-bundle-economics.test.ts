@@ -55,11 +55,31 @@ describe.skipIf(!haveBundle)("real-bundle economics (regtest-adapted)", () => {
         expect(BigInt(leaf.netSats!)).toBe(value - fee - sweepFee);
         // ... and the classification must follow from it.
         expect(leaf.economical).toBe(BigInt(leaf.netSats!) > 0n);
+        // Exit latency: refund CSVs start at 2000 and step down by 100 per
+        // transfer hop (the direct path adds a 50-block offset).
+        expect(leaf.exitWaitBlocks, `leaf ${leaf.leafId} has no CSV`).not.toBeNull();
+        expect(leaf.exitWaitBlocks!).toBeGreaterThan(0);
+        expect(leaf.exitWaitBlocks!).toBeLessThanOrEqual(2050);
+        expect(leaf.exitWaitBlocks! % 50).toBe(0);
+        expect(leaf.worstCaseExitBlocks).toBe(
+          leaf.exitWaitBlocks! + leaf.feeBumpTxCount,
+        );
         if (leaf.economical) {
           economicalFees += fee;
           economicalCount += 1;
         }
       }
+
+      // Latency aggregates cover the counted (economical) leaves.
+      const economicalLeaves = estimate.perLeaf.filter((l) => l.economical);
+      expect(estimate.maxExitBlocks).toBe(
+        Math.max(...economicalLeaves.map((l) => l.worstCaseExitBlocks!)),
+      );
+      expect(estimate.valueWeightedExitBlocks).not.toBeNull();
+      expect(estimate.valueWeightedExitBlocks!).toBeGreaterThan(0);
+      expect(estimate.valueWeightedExitBlocks!).toBeLessThanOrEqual(
+        estimate.maxExitBlocks!,
+      );
 
       // requiredSats prices economical leaves only (plus the buffer).
       expect(BigInt(estimate.requiredSats)).toBe(
@@ -95,7 +115,8 @@ describe.skipIf(!haveBundle)("real-bundle economics (regtest-adapted)", () => {
 
       console.error(
         `[economics] ${economicalCount}/${bundle.leaves.length} leaves economical at ${FEE_RATE} sat/vB; ` +
-          `funding required ${estimate.requiredSats} sats (vs ${withUneconomical.requiredSats} with uneconomical leaves)`,
+          `funding required ${estimate.requiredSats} sats (vs ${withUneconomical.requiredSats} with uneconomical leaves); ` +
+          `exit latency ~${estimate.valueWeightedExitBlocks} blocks value-weighted, ${estimate.maxExitBlocks} worst leaf`,
       );
     },
   );
