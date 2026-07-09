@@ -13,6 +13,7 @@ import {
   assertSeedOnlyIsNotOfflineRecoverable,
   createRecoveryPlan,
 } from "./planner.ts";
+import { consolidateLeavesFromSeed } from "./consolidate.ts";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
 import { signPackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
@@ -297,7 +298,7 @@ async function main(): Promise<void> {
     if (args.out === true) throw new Error("--out requires a path");
     const bundle = await exportRecoveryBundleFromSeed({
       seed,
-      accountNumber: args["account-number"] ?? 0,
+      accountNumber: args["account-number"],
       network: optionalValue(args.network) ?? "MAINNET",
       operatorSet: optionalValue(args["operator-set"]) ?? "spark-sdk",
       appVersion: optionalValue(args["app-version"]) ?? "unknown",
@@ -308,6 +309,27 @@ async function main(): Promise<void> {
       fs.writeFileSync(outPath, output, { mode: 0o600 });
     } else {
       process.stdout.write(output);
+    }
+    return;
+  }
+
+  if (command === "consolidate") {
+    const seed = await loadSeed(args);
+    const result = await consolidateLeavesFromSeed({
+      seed,
+      accountNumber: args["account-number"],
+      network: optionalValue(args.network) ?? "MAINNET",
+      multiplicity: optionalNumber(args.multiplicity, 0, "--multiplicity"),
+      dryRun: args["dry-run"] === true,
+      maxRounds: optionalNumber(args["max-rounds"], undefined, "--max-rounds"),
+      onEvent: (message) => console.error(message),
+    });
+    emitJson(result);
+    if (result.bundleRefreshRequired) {
+      console.error(
+        "Leaves changed: the saved recovery bundle is now stale. Run refresh-bundle " +
+          "(make refresh-recovery-bundle) before relying on unilateral exit.",
+      );
     }
     return;
   }
@@ -416,6 +438,8 @@ function printHelp(): void {
 
 Commands:
   refresh-bundle   Query live Spark leaves from a seed and write a bundle
+  consolidate      Swap small leaves with the SSP into the fewest denominations so
+                   fewer leaves are uneconomical to exit (refresh the bundle after)
   plan             Validate a saved recovery bundle and print a recovery plan
   cpfp-address     Derive a CPFP funding address from the seed and estimate the sats to send it
   watch-cpfp       Watch the CPFP funding address for an incoming UTXO and emit it as --cpfp-utxo
@@ -440,11 +464,24 @@ Inputs for refresh-bundle:
   --seed <value>           Spark seed or mnemonic; prefer --seed-file
   --out <path>             Bundle output path; stdout when omitted
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
-  --account-number <n>     Spark account number, default 0
+  --account-number <n>     Spark account number; defaults to the SDK default for the
+                           network (0 on regtest, 1 elsewhere)
 
 Optional provenance metadata for refresh-bundle:
   --operator-set <label>   Operator-set label stored in the bundle
   --app-version <version>  App version label stored in the bundle
+
+Inputs for consolidate:
+  --seed-file <path>       File containing Spark seed or mnemonic; prompts when omitted
+  --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL (default MAINNET)
+  --account-number <n>     Spark account number; defaults to the SDK default for the
+                           network (0 on regtest, 1 elsewhere)
+  --multiplicity <n>       0 (default) targets the fewest leaves - best for unilateral
+                           exit; 1-5 keeps extra denominations for cheaper transfers
+  --dry-run                Report the planned consolidation without swapping
+  --max-rounds <n>         Optimization passes to drive before giving up, default 5
+  Consolidation swaps leaves with the SSP (a cooperative operation, not an exit).
+  It spends the current leaves, so refresh the recovery bundle afterwards.
 
 Inputs for cpfp-address:
   --bundle <path>          Saved Spark recovery bundle JSON

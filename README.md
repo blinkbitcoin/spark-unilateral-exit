@@ -41,6 +41,7 @@ The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 | Command | Purpose |
 |---------|---------|
 | `refresh-bundle` | Query live Spark leaves from a seed and write a bundle |
+| `consolidate` | Swap small leaves with the SSP into the fewest denominations (`make consolidate`) |
 | `plan` | Validate a saved bundle and print a recovery plan |
 | `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
 | `watch-cpfp` | Watch the funding address for an incoming UTXO and emit it as `--cpfp-utxo` |
@@ -211,6 +212,31 @@ The CLI does not currently enforce a minimum recoverable balance. As conservativ
 
 These floors are roughly an order of magnitude above Spark's published [cooperative "Exit to L1" fee](https://docs.spark.money/learn/faq#what-are-the-fees-on-spark) of `250 × sats_per_vbyte + 750` (about 1,000 sats at 1 sat/vbyte). That cooperative fee is flat and applies only while Spark operators are online; unilateral exit is the offline fallback and costs more because the user broadcasts the full exit tree plus CPFP bumps and a final sweep rather than one operator-assisted transaction. See [docs/withdraw-guide.md](docs/withdraw-guide.md#minimum-practical-balance) for details.
 
+## Leaf Consolidation
+
+Every leaf pays its own CPFP and sweep fees on unilateral exit, so a balance
+fragmented across many small leaves strands more value in uneconomical leaves
+than the same balance held as a few large ones. While the Spark operators are
+online, the leaf set can be consolidated cooperatively:
+
+```sh
+make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet DRY_RUN=1  # inspect the plan
+make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet           # execute the swaps
+```
+
+This drives the Spark SDK's `optimizeLeaves` swap with the SSP toward the
+greedy power-of-two decomposition of the balance - the fewest leaves Spark can
+represent it with. Leaf values are power-of-two denominations (matched from
+the SSP's inventory), so a single leaf holding the whole balance is generally
+not possible: 9,888 sats consolidates to `8192 + 1024 + 512 + 128 + 32`, five
+leaves, not one. Value stranded in still-uneconomical leaves after
+consolidation is bounded by roughly twice the per-leaf exit cost, no matter
+how fragmented the wallet was before. `MULTIPLICITY=1..5` instead keeps extra
+denominations for cheaper day-to-day transfers at the cost of more leaves.
+
+Consolidation is a cooperative operation (not an exit) and spends the current
+leaves, so refresh the recovery bundle afterwards; the command reminds you.
+
 ## Test
 
 ```sh
@@ -223,10 +249,14 @@ is never committed because it reveals wallet graph metadata):
 
 ```sh
 SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-bundle-economics.test.ts
+SPARK_REAL_BUNDLE=../recovery-bundle.json npx vitest run test/e2e/real-consolidate.test.ts
 ```
 
-The test is skipped automatically when no bundle is present at
-`SPARK_REAL_BUNDLE` or `../recovery-bundle.json`.
+The second test measures what `consolidate` would do to the real bundle's leaf
+set: how much value is stranded in uneconomical leaves now versus after
+consolidating to the greedy power-of-two denominations. Both tests are skipped
+automatically when no bundle is present at `SPARK_REAL_BUNDLE` or
+`../recovery-bundle.json`.
 
 ## GitHub Actions
 

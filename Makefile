@@ -32,12 +32,19 @@ REFRESH_ARGS = \
 	$(if $(OPERATOR_SET),--operator-set $(OPERATOR_SET),) \
 	$(if $(APP_VERSION),--app-version $(APP_VERSION),)
 
-.PHONY: help refresh-recovery-bundle plan package sign-packages sweep test-e2e \
-	cpfp-address watch-cpfp broadcast recover
+MULTIPLICITY ?=
+DRY_RUN ?=
+MAX_ROUNDS ?=
+
+.PHONY: help refresh-recovery-bundle consolidate plan package sign-packages sweep \
+	test-e2e cpfp-address watch-cpfp broadcast recover
 
 help:
 	@echo "Targets:"
 	@echo "  make refresh-recovery-bundle SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json NETWORK=mainnet"
+	@echo "  make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet [DRY_RUN=1] [MULTIPLICITY=0]"
+	@echo "                    # swap small leaves with the SSP into the fewest denominations so fewer"
+	@echo "                    # leaves are uneconomical to exit; refresh the recovery bundle afterwards"
 	@echo "  make plan BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make package BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make sign-packages PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt   # or KEY_FILE=cpfp-key.hex"
@@ -71,6 +78,19 @@ refresh-recovery-bundle:
 		echo "Saved existing bundle to $$backup"; \
 	fi
 	@$(NIX) cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml -- $(REFRESH_ARGS)
+
+# Cooperative leaf consolidation (not an exit): swaps small leaves with the
+# SSP into the unilateral-exit-optimal denomination set so fewer leaves are
+# uneconomical to exit. Spends the current leaves, so refresh the recovery
+# bundle afterwards. DRY_RUN=1 reports the plan without swapping.
+consolidate: require-seed-file
+	@$(NODE) src/cli.ts consolidate \
+		$(SEED_ARGS) \
+		--network $(NETWORK) \
+		$(ACCOUNT_ARGS) \
+		$(if $(MULTIPLICITY),--multiplicity $(MULTIPLICITY),) \
+		$(if $(MAX_ROUNDS),--max-rounds $(MAX_ROUNDS),) \
+		$(if $(DRY_RUN),--dry-run,)
 
 plan: require-destination require-cpfp-args
 	@$(NODE) src/cli.ts plan \

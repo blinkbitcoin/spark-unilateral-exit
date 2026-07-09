@@ -170,16 +170,26 @@ export interface WalletBalance {
   tokenBalances?: WalletTokenBalances;
 }
 
+export interface OptimizeLeavesStep {
+  step: number;
+  total: number;
+  controller?: { abort(): void };
+}
+
 export interface SparkWalletLike {
   getLeaves(): Promise<SparkLeaf[]>;
   getBalance?(): Promise<WalletBalance | undefined | null>;
   getIdentityPublicKey?(): Promise<string | undefined>;
   experimental_syncWallet?(): Promise<void>;
   cleanup?(): Promise<void>;
+  optimizeLeaves?(
+    multiplicity?: number,
+  ): AsyncGenerator<OptimizeLeavesStep, void, void>;
 }
 
 export interface WalletFactoryParams {
   seed: string;
-  accountNumber: number;
+  /** undefined lets the SDK pick its network default (0 regtest, 1 mainnet). */
+  accountNumber: number | undefined;
   network: string;
 }
