@@ -244,9 +244,9 @@ async function main(): Promise<void> {
       consolidated: false,
       notes: [] as string[],
     };
-    if (args["no-refresh"] === true) {
+    if (args.offline === true) {
       prepareSummary.notes.push(
-        "Bundle refresh and consolidation skipped (--no-refresh)",
+        "Bundle refresh and consolidation skipped (--offline)",
       );
     } else if (outPath && fs.existsSync(outPath)) {
       prepareSummary.notes.push(
@@ -314,10 +314,17 @@ async function main(): Promise<void> {
       if (written.backupPath) {
         console.error(`Backed up previous packages file to ${written.backupPath}`);
       }
+      if (previousLeafIds === null) {
+        console.error(
+          `WARNING: the existing ${outPath} could not be parsed as a packages ` +
+            "file. Its exact bytes were preserved in the backup above - inspect " +
+            "it before discarding, in case it tracked an older recovery.",
+        );
+      }
       const newLeafIds = new Set(
         result.packages.map((p) => p.leafId).filter(Boolean),
       );
-      const dropped = previousLeafIds.filter((id) => !newLeafIds.has(id));
+      const dropped = (previousLeafIds ?? []).filter((id) => !newLeafIds.has(id));
       if (dropped.length > 0) {
         console.error(
           `WARNING: ${outPath} previously held refund packages for ` +
@@ -592,8 +599,8 @@ Inputs for auto-exit:
   --poll-interval <sec>    Seconds between confirmation polls, default 30
   --esplora-url <url>      Custom Esplora API base URL (optional)
   --out <path>             Write sweep-compatible refund packages JSON here
-  --no-refresh             Skip the pre-exit bundle refresh and leaf consolidation
-                           (pure offline mode; uses the saved bundle as-is)
+  --offline                Skip the entire prepare phase (bundle refresh AND leaf
+                           consolidation) and use the saved bundle as-is
   --no-consolidate         Refresh the bundle but do not consolidate leaves first
   Before exiting, auto-exit tries to consolidate leaves into the exit-optimal
   denominations and refresh the bundle; both are best effort and are skipped with a

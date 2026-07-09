@@ -61,18 +61,20 @@ export function timestampedBackupPath(path: string): string {
 
 /**
  * Leaf ids present in an existing packages file. Returns [] when the file is
- * missing or unreadable; overwrite protection must not block on corrupt data
+ * missing and null when it exists but cannot be parsed, so callers can warn
+ * about corruption; overwrite protection must not block on corrupt data
  * (the byte-level backup still preserves it).
  */
-export function packagesFileLeafIds(path: string): string[] {
+export function packagesFileLeafIds(path: string): string[] | null {
+  if (!fs.existsSync(path)) return [];
   try {
     const parsed = JSON.parse(fs.readFileSync(path, "utf8"));
     const packages = parsed?.packages ?? parsed;
-    if (!Array.isArray(packages)) return [];
+    if (!Array.isArray(packages)) return null;
     return packages
       .map((p) => (typeof p?.leafId === "string" ? p.leafId : null))
       .filter((id): id is string => id !== null);
   } catch {
-    return [];
+    return null;
   }
 }

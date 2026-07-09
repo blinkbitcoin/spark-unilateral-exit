@@ -7,7 +7,8 @@ import {
   planLeafConsolidation,
   swapMinimizingDenominations,
 } from "../src/consolidate.ts";
-import type { OptimizeLeavesStep, SparkWalletLike } from "../src/types.ts";
+import type { SparkWalletLike } from "../src/types.ts";
+import { fakeSparkWallet as fakeWallet } from "./helpers/fake-spark-wallet.ts";
 
 describe("consolidation planning", () => {
   it("decomposes an amount into the fewest power-of-two denominations", () => {
@@ -216,34 +217,3 @@ describe("consolidateLeavesFromSeed", () => {
   });
 });
 
-function fakeWallet({ leafSets }: { leafSets: number[][] }): SparkWalletLike & {
-  optimizeCalls: number;
-  multiplicities: number[];
-  cleaned: boolean;
-} {
-  // getLeaves serves leafSets[i] where i is how many optimize passes have run,
-  // so each optimizeLeaves call "advances" the wallet to the next leaf set.
-  let index = 0;
-  return {
-    optimizeCalls: 0,
-    multiplicities: [],
-    cleaned: false,
-    async experimental_syncWallet() {},
-    async getLeaves() {
-      const values = leafSets[Math.min(index, leafSets.length - 1)] ?? [];
-      return values.map((value, i) => ({ id: `leaf-${index}-${i}`, value }));
-    },
-    async *optimizeLeaves(
-      multiplicity?: number,
-    ): AsyncGenerator<OptimizeLeavesStep, void, void> {
-      this.optimizeCalls += 1;
-      this.multiplicities.push(multiplicity ?? -1);
-      index += 1;
-      yield { step: 1, total: 2 };
-      yield { step: 2, total: 2 };
-    },
-    async cleanup() {
-      this.cleaned = true;
-    },
-  };
-}

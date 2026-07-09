@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { prepareRecovery } from "../src/prepare-recovery.ts";
-import type { OptimizeLeavesStep, SparkWalletLike } from "../src/types.ts";
+import type { OptimizeLeavesStep } from "../src/types.ts";
+import { fakeSparkWallet as fakeWallet } from "./helpers/fake-spark-wallet.ts";
 
 describe("prepareRecovery", () => {
   it("consolidates leaves and exports a fresh bundle when operators are reachable", async () => {
@@ -136,38 +137,3 @@ describe("prepareRecovery", () => {
   });
 });
 
-function fakeWallet({ leafSets }: { leafSets: number[][] }): SparkWalletLike & {
-  optimizeCalls: number;
-  cleaned: boolean;
-} {
-  // Serves leafSets[i] where i is how many optimize passes have run.
-  let index = 0;
-  return {
-    optimizeCalls: 0,
-    cleaned: false,
-    async experimental_syncWallet() {},
-    async getLeaves() {
-      const values = leafSets[Math.min(index, leafSets.length - 1)] ?? [];
-      return values.map((value, i) => ({
-        id: `leaf-${index}-${i}`,
-        status: "AVAILABLE",
-        value,
-        encoded: "aa",
-      }));
-    },
-    async getIdentityPublicKey() {
-      return "identity";
-    },
-    async getBalance() {
-      return { satsBalance: { owned: 0n }, tokenBalances: new Map() };
-    },
-    async *optimizeLeaves(): AsyncGenerator<OptimizeLeavesStep, void, void> {
-      this.optimizeCalls += 1;
-      index += 1;
-      yield { step: 1, total: 1 };
-    },
-    async cleanup() {
-      this.cleaned = true;
-    },
-  };
-}

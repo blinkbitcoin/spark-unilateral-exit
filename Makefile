@@ -35,7 +35,7 @@ REFRESH_ARGS = \
 MULTIPLICITY ?=
 DRY_RUN ?=
 MAX_ROUNDS ?=
-NO_REFRESH ?=
+OFFLINE ?=
 NO_CONSOLIDATE ?=
 
 .PHONY: help refresh-recovery-bundle consolidate plan package sign-packages sweep \
@@ -59,7 +59,7 @@ help:
 	@echo "  make broadcast    SIGNED_PACKAGES=recovery-packages-signed.json NETWORK=mainnet"
 	@echo "  make recover      SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
 	@echo "                    # auto-exit: first consolidates leaves and refreshes the bundle when operators"
-	@echo "                    # are reachable (best effort; NO_REFRESH=1 / NO_CONSOLIDATE=1 to skip), then"
+	@echo "                    # are reachable (best effort; OFFLINE=1 / NO_CONSOLIDATE=1 to skip), then"
 	@echo "                    # waits for funding, packages, signs, submits, and waits for confirmations"
 	@echo "                    # round by round; skips uneconomical leaves (INCLUDE_UNECONOMICAL=1 to keep"
 	@echo "                    # them); FAN_OUT=1 broadcasts leaves in parallel; safe to re-run anytime"
@@ -142,7 +142,7 @@ broadcast:
 # One-shot seed-derived flow. While operators are reachable it first
 # consolidates leaves into the exit-optimal denominations and refreshes the
 # bundle (both best effort: skipped with a note when operators or the SSP are
-# offline, or when resuming a partial recovery; NO_REFRESH=1 / NO_CONSOLIDATE=1
+# offline, or when resuming a partial recovery; OFFLINE=1 / NO_CONSOLIDATE=1
 # to opt out). Then it waits for funding at the derived CPFP address, packages,
 # autosigns, submits, and waits for confirmations round by round until every
 # economical leaf is broadcast or waiting on its refund timelock. Safe to
@@ -160,7 +160,7 @@ recover: require-seed-file
 		$(if $(INCLUDE_UNECONOMICAL),--include-uneconomical,) \
 		$(if $(MIN_NET_SATS),--min-net-sats $(MIN_NET_SATS),) \
 		$(if $(FAN_OUT),--fan-out,) \
-		$(if $(NO_REFRESH),--no-refresh,) \
+		$(if $(OFFLINE),--offline,) \
 		$(if $(NO_CONSOLIDATE),--no-consolidate,) \
 		--out $(PACKAGES)
 

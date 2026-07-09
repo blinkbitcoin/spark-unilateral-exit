@@ -95,10 +95,13 @@ describe("packagesFileLeafIds", () => {
     expect(packagesFileLeafIds(bare)).toEqual(["leaf-c"]);
   });
 
-  it("returns [] for missing or corrupt files instead of blocking the write", () => {
+  it("returns [] for missing files and null for corrupt ones so callers can warn", () => {
     expect(packagesFileLeafIds(path.join(dir, "missing.json"))).toEqual([]);
     const corrupt = path.join(dir, "corrupt.json");
     fs.writeFileSync(corrupt, "not json");
-    expect(packagesFileLeafIds(corrupt)).toEqual([]);
+    expect(packagesFileLeafIds(corrupt)).toBeNull();
+    const wrongShape = path.join(dir, "wrong-shape.json");
+    fs.writeFileSync(wrongShape, JSON.stringify({ packages: "nope" }));
+    expect(packagesFileLeafIds(wrongShape)).toBeNull();
   });
 });

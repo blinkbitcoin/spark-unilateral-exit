@@ -96,8 +96,8 @@ export function planLeafConsolidation(
 ): ConsolidationPlan {
   validateMultiplicity(multiplicity);
   const currentValues = [...values].sort((a, b) => a - b);
+  // The target computation asserts the total is a safe integer.
   const totalSats = currentValues.reduce((sum, value) => sum + value, 0);
-  assertSafeAmount(totalSats);
   const targetValues =
     multiplicity === 0
       ? greedyDenominations(totalSats)
@@ -114,9 +114,9 @@ export function planLeafConsolidation(
   };
 }
 
-export interface ConsolidateLeavesOptions {
-  seed?: string;
-  accountNumber?: AccountNumberInput;
+export interface ConsolidateWalletOptions {
+  /** An initialized Spark wallet; the caller owns its lifecycle. */
+  wallet: SparkWalletLike;
   network?: string;
   multiplicity?: number;
   dryRun?: boolean;
@@ -125,11 +125,17 @@ export interface ConsolidateLeavesOptions {
    * not reach the target set; rounds bound how many passes we drive.
    */
   maxRounds?: number;
-  walletFactory?: WalletFactory;
   onEvent?: (message: string) => void;
-  cleanupWallet?: boolean;
   leafPollAttempts?: number;
   leafPollDelayMs?: number;
+}
+
+export interface ConsolidateLeavesOptions
+  extends Omit<ConsolidateWalletOptions, "wallet"> {
+  seed?: string;
+  accountNumber?: AccountNumberInput;
+  walletFactory?: WalletFactory;
+  cleanupWallet?: boolean;
 }
 
 export interface LeafSetSummary {
@@ -152,27 +158,18 @@ export interface ConsolidateResult {
   bundleRefreshRequired: boolean;
 }
 
+/** Initializes a wallet from the seed, consolidates, and cleans up. */
 export async function consolidateLeavesFromSeed({
   seed,
   accountNumber,
   network = "MAINNET",
-  multiplicity = 0,
-  dryRun = false,
-  maxRounds = 5,
   walletFactory = defaultWalletFactory,
-  onEvent = () => {},
   cleanupWallet = true,
-  leafPollAttempts = 6,
-  leafPollDelayMs = 2_000,
+  ...walletOptions
 }: ConsolidateLeavesOptions = {}): Promise<ConsolidateResult> {
   if (typeof seed !== "string" || seed.trim().length === 0) {
     throw new ConsolidateError("Spark seed or mnemonic is required");
   }
-  validateMultiplicity(multiplicity);
-  if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) {
-    throw new ConsolidateError("maxRounds must be a positive integer");
-  }
-
   const normalizedNetwork = normalizeNetwork(network);
   const walletResponse = await walletFactory({
     seed,
@@ -183,8 +180,35 @@ export async function consolidateLeavesFromSeed({
   if (!wallet) {
     throw new ConsolidateError("Spark wallet initialization returned no wallet");
   }
-
   try {
+    return await consolidateLeaves({
+      wallet,
+      network: normalizedNetwork,
+      ...walletOptions,
+    });
+  } finally {
+    if (cleanupWallet) await wallet.cleanup?.();
+  }
+}
+
+/** Consolidates an already-open wallet; the caller keeps lifecycle ownership. */
+export async function consolidateLeaves({
+  wallet,
+  network = "MAINNET",
+  multiplicity = 0,
+  dryRun = false,
+  maxRounds = 5,
+  onEvent = () => {},
+  leafPollAttempts = 6,
+  leafPollDelayMs = 2_000,
+}: ConsolidateWalletOptions): Promise<ConsolidateResult> {
+  validateMultiplicity(multiplicity);
+  if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) {
+    throw new ConsolidateError("maxRounds must be a positive integer");
+  }
+  const normalizedNetwork = normalizeNetwork(network);
+
+  {
     const beforeLeaves = await pollLeaves({
       wallet,
       attempts: leafPollAttempts,
@@ -288,8 +312,6 @@ export async function consolidateLeavesFromSeed({
       after,
       bundleRefreshRequired: rounds > 0,
     };
-  } finally {
-    if (cleanupWallet) await wallet.cleanup?.();
   }
 }
 

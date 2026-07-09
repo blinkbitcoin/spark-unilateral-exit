@@ -66,7 +66,7 @@ current leaves (the previous bundle file is kept as a timestamped backup).
 Both steps are opportunistic: when the operators or the SSP are offline the
 flow notes what was skipped and proceeds with the saved bundle, which is the
 normal unilateral-exit situation. Pass `NO_CONSOLIDATE=1` to refresh without
-swapping leaves, or `NO_REFRESH=1` to skip both and use the saved bundle
+swapping leaves, or `OFFLINE=1` to skip both and use the saved bundle
 as-is. When a `recovery-packages.json` from a previous run exists, the
 prepare phase is skipped automatically so a resumed recovery never swaps
 leaves whose exits are already in flight.

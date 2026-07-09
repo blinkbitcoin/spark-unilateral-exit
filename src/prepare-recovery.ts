@@ -12,7 +12,7 @@
 // One wallet session serves both steps so a consolidation is always followed
 // by an export of the leaves it produced.
 
-import { consolidateLeavesFromSeed } from "./consolidate.ts";
+import { consolidateLeaves } from "./consolidate.ts";
 import {
   defaultWalletFactory,
   exportRecoveryBundleFromWallet,
@@ -91,7 +91,10 @@ export async function prepareRecovery({
     wallet = walletResponse?.wallet ?? walletResponse;
     if (!wallet) throw new Error("wallet initialization returned no wallet");
   } catch (error) {
-    // Clean up the wallet if the initialization outlives the timeout.
+    // Best-effort: if the initialization outlives the timeout, close the late
+    // wallet once it resolves. There is no guarantee - a cleanup that itself
+    // hangs or throws leaves its connections open until process exit, which
+    // is acceptable for a CLI run that is about to proceed offline anyway.
     void walletPromise
       .then((response) => (response?.wallet ?? response)?.cleanup?.())
       .catch(() => {});
@@ -106,13 +109,10 @@ export async function prepareRecovery({
     let consolidated = false;
     if (consolidate) {
       try {
-        const result = await consolidateLeavesFromSeed({
-          seed,
+        const result = await consolidateLeaves({
+          wallet,
           network: normalizedNetwork,
-          accountNumber,
           multiplicity,
-          walletFactory: async () => wallet,
-          cleanupWallet: false,
           onEvent,
           leafPollAttempts,
           leafPollDelayMs,
