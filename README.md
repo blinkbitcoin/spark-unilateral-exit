@@ -61,8 +61,10 @@ flowchart TD
     seed[("Spark seed")]
 
     subgraph prep["Preparation — Spark operators online"]
+        consolidate["consolidate<br/>(optional: fewest-leaves denominations,<br/>cheapest to exit)"]
         refresh["refresh-bundle"]
         bundle[("recovery-bundle.json<br/>store encrypted, keep fresh")]
+        consolidate -.-> refresh
         refresh --> bundle
     end
 
@@ -94,7 +96,7 @@ flowchart TD
     seed -.-> sweep
 ```
 
-Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere). The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only.
+Solid arrows carry data between steps; dashed arrows mark the commands that re-derive keys from the seed (use the same `--account-number` everywhere) and optional steps. The bundle must be refreshed while operators are online — everything below the first subgraph works fully offline against Bitcoin only. The one-shot `make recover` flow runs the preparation subgraph automatically on a best-effort basis: it consolidates leaves and refreshes the bundle when operators are reachable, and falls back to the saved bundle with a note when they are not.
 
 Install dependencies:
 
@@ -231,11 +233,33 @@ the SSP's inventory), so a single leaf holding the whole balance is generally
 not possible: 9,888 sats consolidates to `8192 + 1024 + 512 + 128 + 32`, five
 leaves, not one. Value stranded in still-uneconomical leaves after
 consolidation is bounded by roughly twice the per-leaf exit cost, no matter
-how fragmented the wallet was before. `MULTIPLICITY=1..5` instead keeps extra
-denominations for cheaper day-to-day transfers at the cost of more leaves.
+how fragmented the wallet was before.
 
 Consolidation is a cooperative operation (not an exit) and spends the current
 leaves, so refresh the recovery bundle afterwards; the command reminds you.
+`make recover` performs both steps automatically before exiting (see below).
+
+### The consolidation trade-off
+
+There is no leaf set that is optimal for both exits and payments; the
+denomination shape trades one against the other:
+
+| | Exit-optimal (`MULTIPLICITY=0`) | Transfer-optimal (`MULTIPLICITY=1`) |
+|---|---|---|
+| Leaf set for 9,888 sats | `32,128,512,1024,8192` (5 leaves) | `1,1,2,4,8,...,2048,4096` (18 leaves) |
+| Unilateral exit cost | Lowest possible; least value stranded | Every small leaf pays its own exit fees; most strand below break-even |
+| Sending payments | Most amounts cannot be composed exactly, so sends trigger an SSP swap first (extra latency, SSP must be online, more metadata shared, burns refund-timelock hops) | Any amount up to the balance composes like a binary number, so sends almost never need a pre-swap |
+
+The Spark SDK's own default is transfer-optimal (it even re-optimizes in the
+background toward multiplicity 1; this tool disables that on the wallets it
+opens). So treat exit-optimal as a *recovery posture*, not a resting state:
+
+- **Before a unilateral exit**: consolidate to `MULTIPLICITY=0` (or let
+  `make recover` do it) so the maximum value is economical to exit.
+- **If the recovery turns out unnecessary** (operators recovered, false
+  alarm) and the wallet goes back to day-to-day use: swap back with
+  `make consolidate MULTIPLICITY=1` so ordinary payments stop depending on
+  an SSP swap, and refresh the recovery bundle again afterwards.
 
 ## Test
 

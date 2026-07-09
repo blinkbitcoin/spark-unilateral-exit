@@ -14,6 +14,7 @@ import {
   createRecoveryPlan,
 } from "./planner.ts";
 import { consolidateLeavesFromSeed } from "./consolidate.ts";
+import { prepareRecovery } from "./prepare-recovery.ts";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
 import { signPackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
@@ -223,10 +224,62 @@ async function main(): Promise<void> {
   }
 
   if (command === "auto-exit") {
-    const bundle = loadOptionalBundle(args.bundle);
+    const bundlePath = required(args.bundle, "--bundle");
+    let bundle = loadOptionalBundle(bundlePath);
     if (!bundle) throw new Error("--bundle is required for auto-exit");
     const seed = await loadSeed(args);
     const network = optionalValue(args.network) ?? bundle.network;
+    if (args.out === true) throw new Error("--out requires a path");
+    const outPath = optionalValue(args.out);
+
+    // Best-effort prepare phase: consolidate leaves and refresh the bundle
+    // while operators are still reachable. Skipped when resuming a partial
+    // recovery (a packages file already exists): consolidation must not swap
+    // leaves whose exits are already in flight, and a refreshed bundle would
+    // drop them from the resume.
+    const prepareSummary = {
+      attempted: false,
+      refreshed: false,
+      consolidated: false,
+      notes: [] as string[],
+    };
+    if (args["no-refresh"] === true) {
+      prepareSummary.notes.push(
+        "Bundle refresh and consolidation skipped (--no-refresh)",
+      );
+    } else if (outPath && fs.existsSync(outPath)) {
+      prepareSummary.notes.push(
+        `Existing packages found at ${outPath}; resuming with the saved bundle ` +
+          "(refresh and consolidation skipped)",
+      );
+    } else {
+      prepareSummary.attempted = true;
+      const prepared = await prepareRecovery({
+        seed,
+        network,
+        accountNumber: args["account-number"],
+        consolidate: args["no-consolidate"] !== true,
+        operatorSet: bundle.operatorSet,
+        appVersion: bundle.appVersion,
+        onEvent: (message) => console.error(message),
+      });
+      prepareSummary.refreshed = prepared.refreshed;
+      prepareSummary.consolidated = prepared.consolidated;
+      prepareSummary.notes.push(...prepared.notes);
+      if (prepared.bundle) {
+        const backupPath = backupFile(bundlePath);
+        if (backupPath) console.error(`Saved previous bundle to ${backupPath}`);
+        fs.writeFileSync(
+          bundlePath,
+          `${serializeForJson(prepared.bundle)}\n`,
+          { mode: 0o600 },
+        );
+        console.error(`Wrote refreshed recovery bundle to ${bundlePath}`);
+        bundle = prepared.bundle;
+      }
+    }
+    for (const note of prepareSummary.notes) console.error(note);
+
     const result = await autoExit({
       bundle,
       seed,
@@ -241,8 +294,6 @@ async function main(): Promise<void> {
       pollIntervalMs: optionalSeconds(args["poll-interval"], "--poll-interval"),
       onEvent: (message) => console.error(message),
     });
-    if (args.out === true) throw new Error("--out requires a path");
-    const outPath = optionalValue(args.out);
     if (outPath) {
       // Sweep-compatible packages file: `sweep` reads the last tx per leaf as
       // the refund transaction.
@@ -253,7 +304,7 @@ async function main(): Promise<void> {
       );
       console.error(`Wrote refund packages for sweep to ${outPath}`);
     }
-    emitJson(result);
+    emitJson({ ...result, prepare: prepareSummary });
     return;
   }
 
@@ -364,6 +415,21 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
+// Timestamped copy next to the original, matching the Makefile's
+// refresh-recovery-bundle backup naming (<name>.<UTC timestamp>.backup.json).
+function backupFile(path: string): string | null {
+  if (!fs.existsSync(path)) return null;
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d+Z$/, "Z");
+  const backupPath = path.endsWith(".json")
+    ? `${path.slice(0, -5)}.${timestamp}.backup.json`
+    : `${path}.${timestamp}.backup.json`;
+  fs.copyFileSync(path, backupPath);
+  return backupPath;
+}
+
 function loadOptionalBundle(path: CliArgValue): RecoveryBundle | null {
   const resolved = optionalValue(path);
   if (!resolved) return null;
@@ -443,9 +509,11 @@ Commands:
   plan             Validate a saved recovery bundle and print a recovery plan
   cpfp-address     Derive a CPFP funding address from the seed and estimate the sats to send it
   watch-cpfp       Watch the CPFP funding address for an incoming UTXO and emit it as --cpfp-utxo
-  auto-exit        Run the whole exit automatically: wait for funding, then package, sign,
-                   submit, and wait for confirmations round by round until only timelocked
-                   refunds remain; uneconomical leaves are skipped by default
+  auto-exit        Run the whole exit automatically: first consolidate leaves and refresh
+                   the bundle if operators are reachable (best effort), then wait for
+                   funding, package, sign, submit, and wait for confirmations round by
+                   round until only timelocked refunds remain; uneconomical leaves are
+                   skipped by default
   package          Construct Spark unilateral-exit packages using upstream Spark SDK
   broadcast        Submit signed packages via Esplora (replaces bitcoin-cli submitpackage)
   broadcast-sweep  Broadcast signed sweep transactions via Esplora
@@ -508,8 +576,15 @@ Inputs for auto-exit:
   --poll-interval <sec>    Seconds between confirmation polls, default 30
   --esplora-url <url>      Custom Esplora API base URL (optional)
   --out <path>             Write sweep-compatible refund packages JSON here
-  Runs until every economical leaf is broadcast or waiting on its refund timelock;
-  safe to interrupt and re-run at any point (it resumes from chain state).
+  --no-refresh             Skip the pre-exit bundle refresh and leaf consolidation
+                           (pure offline mode; uses the saved bundle as-is)
+  --no-consolidate         Refresh the bundle but do not consolidate leaves first
+  Before exiting, auto-exit tries to consolidate leaves into the exit-optimal
+  denominations and refresh the bundle; both are best effort and are skipped with a
+  note when operators or the SSP are unreachable, or when a packages file from a
+  previous run exists (resuming). Runs until every economical leaf is broadcast or
+  waiting on its refund timelock; safe to interrupt and re-run at any point (it
+  resumes from chain state).
 
 Inputs for watch-cpfp:
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL

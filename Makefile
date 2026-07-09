@@ -35,6 +35,8 @@ REFRESH_ARGS = \
 MULTIPLICITY ?=
 DRY_RUN ?=
 MAX_ROUNDS ?=
+NO_REFRESH ?=
+NO_CONSOLIDATE ?=
 
 .PHONY: help refresh-recovery-bundle consolidate plan package sign-packages sweep \
 	test-e2e cpfp-address watch-cpfp broadcast recover
@@ -56,9 +58,11 @@ help:
 	@echo "  make watch-cpfp   SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
 	@echo "  make broadcast    SIGNED_PACKAGES=recovery-packages-signed.json NETWORK=mainnet"
 	@echo "  make recover      SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json FEE_RATE=1"
-	@echo "                    # auto-exit: waits for funding, then packages, signs, submits, and waits for"
-	@echo "                    # confirmations round by round; skips uneconomical leaves (INCLUDE_UNECONOMICAL=1"
-	@echo "                    # to keep them); FAN_OUT=1 broadcasts leaves in parallel; safe to re-run anytime"
+	@echo "                    # auto-exit: first consolidates leaves and refreshes the bundle when operators"
+	@echo "                    # are reachable (best effort; NO_REFRESH=1 / NO_CONSOLIDATE=1 to skip), then"
+	@echo "                    # waits for funding, packages, signs, submits, and waits for confirmations"
+	@echo "                    # round by round; skips uneconomical leaves (INCLUDE_UNECONOMICAL=1 to keep"
+	@echo "                    # them); FAN_OUT=1 broadcasts leaves in parallel; safe to re-run anytime"
 	@echo ""
 	@echo "For multiple CPFP inputs, pass CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'."
 	@echo "For a self-hosted Esplora (required on regtest), pass ESPLORA_URL=<url>."
@@ -135,10 +139,14 @@ broadcast:
 		--network $(NETWORK) \
 		$(ESPLORA_ARGS)
 
-# One-shot seed-derived flow: waits for funding at the derived CPFP address,
-# then packages, autosigns, submits, and waits for confirmations round by
-# round until every economical leaf is broadcast or waiting on its refund
-# timelock. Safe to interrupt and re-run; it resumes from chain state.
+# One-shot seed-derived flow. While operators are reachable it first
+# consolidates leaves into the exit-optimal denominations and refreshes the
+# bundle (both best effort: skipped with a note when operators or the SSP are
+# offline, or when resuming a partial recovery; NO_REFRESH=1 / NO_CONSOLIDATE=1
+# to opt out). Then it waits for funding at the derived CPFP address, packages,
+# autosigns, submits, and waits for confirmations round by round until every
+# economical leaf is broadcast or waiting on its refund timelock. Safe to
+# interrupt and re-run; it resumes from chain state.
 # Uneconomical leaves are skipped unless INCLUDE_UNECONOMICAL=1.
 # FAN_OUT=1 splits funding into one UTXO per leaf to broadcast in parallel.
 recover: require-seed-file
@@ -152,6 +160,8 @@ recover: require-seed-file
 		$(if $(INCLUDE_UNECONOMICAL),--include-uneconomical,) \
 		$(if $(MIN_NET_SATS),--min-net-sats $(MIN_NET_SATS),) \
 		$(if $(FAN_OUT),--fan-out,) \
+		$(if $(NO_REFRESH),--no-refresh,) \
+		$(if $(NO_CONSOLIDATE),--no-consolidate,) \
 		--out $(PACKAGES)
 
 sweep: require-destination
