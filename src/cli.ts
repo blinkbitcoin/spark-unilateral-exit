@@ -324,6 +324,9 @@ async function main(): Promise<void> {
       const newLeafIds = new Set(
         result.packages.map((p) => p.leafId).filter(Boolean),
       );
+      // For a corrupt previous file (null) there is nothing reliable to diff,
+      // so no dropped-leaves warning can fire; the corruption warning above
+      // already directs the operator to the byte-preserving backup.
       const dropped = (previousLeafIds ?? []).filter((id) => !newLeafIds.has(id));
       if (dropped.length > 0) {
         console.error(

@@ -42,6 +42,11 @@ export class ConsolidateError extends Error {
  * The fewest-leaves decomposition of `totalSats` into power-of-two
  * denominations. This is the target set the SDK's multiplicity-0 optimization
  * (maximizeUnilateralExit) converges to.
+ *
+ * Below 2^27 this equals the binary decomposition of the amount, but the
+ * greedy loop is kept (mirroring the SDK) because amounts above the largest
+ * denomination repeat 2^27 leaves, which a set-bits reading cannot express
+ * (and JS bitwise operators truncate to 32 bits anyway).
  */
 export function greedyDenominations(totalSats: number): number[] {
   assertSafeAmount(totalSats);
@@ -208,122 +213,127 @@ export async function consolidateLeaves({
   }
   const normalizedNetwork = normalizeNetwork(network);
 
-  {
-    const beforeLeaves = await pollLeaves({
-      wallet,
-      attempts: leafPollAttempts,
-      delayMs: leafPollDelayMs,
-    });
-    if (!Array.isArray(beforeLeaves) || beforeLeaves.length === 0) {
-      throw new ConsolidateError("Spark wallet has no leaves to consolidate");
-    }
+  const beforeLeaves = await pollLeaves({
+    wallet,
+    attempts: leafPollAttempts,
+    delayMs: leafPollDelayMs,
+  });
+  if (!Array.isArray(beforeLeaves) || beforeLeaves.length === 0) {
+    throw new ConsolidateError("Spark wallet has no leaves to consolidate");
+  }
 
-    const before = summarizeLeaves(beforeLeaves);
-    let plan = planLeafConsolidation(before.values, multiplicity);
-    const target: LeafSetSummary = {
-      leafCount: plan.targetLeafCount,
-      totalSats: plan.totalSats,
-      values: plan.targetValues,
-    };
-    onEvent(
-      `Current leaves: ${plan.currentLeafCount} (${plan.totalSats} sats); ` +
-        `optimal for unilateral exit: ${plan.targetLeafCount}`,
-    );
+  const before = summarizeLeaves(beforeLeaves);
+  let plan = planLeafConsolidation(before.values, multiplicity);
+  const target: LeafSetSummary = {
+    leafCount: plan.targetLeafCount,
+    totalSats: plan.totalSats,
+    values: plan.targetValues,
+  };
+  onEvent(
+    `Current leaves: ${plan.currentLeafCount} (${plan.totalSats} sats); ` +
+      `optimal for unilateral exit: ${plan.targetLeafCount}`,
+  );
 
-    if (!plan.needsSwap) {
-      onEvent("Leaves already match the optimal denomination set; nothing to do");
-      return {
-        network: normalizedNetwork,
-        multiplicity,
-        dryRun,
-        executed: false,
-        rounds: 0,
-        converged: true,
-        before,
-        target,
-        after: before,
-        bundleRefreshRequired: false,
-      };
-    }
-
-    if (dryRun) {
-      onEvent(
-        `Dry run: would consolidate ${plan.currentLeafCount} leaves into ` +
-          `${plan.targetLeafCount} via SSP swaps`,
-      );
-      return {
-        network: normalizedNetwork,
-        multiplicity,
-        dryRun,
-        executed: false,
-        rounds: 0,
-        converged: false,
-        before,
-        target,
-        bundleRefreshRequired: false,
-      };
-    }
-
-    if (typeof wallet.optimizeLeaves !== "function") {
-      throw new ConsolidateError(
-        "This Spark wallet does not expose optimizeLeaves(); upgrade @buildonspark/spark-sdk",
-      );
-    }
-
-    let rounds = 0;
-    let after = before;
-    while (plan.needsSwap && rounds < maxRounds) {
-      rounds += 1;
-      onEvent(`Consolidation round ${rounds}/${maxRounds}: requesting SSP swaps`);
-      for await (const step of wallet.optimizeLeaves(multiplicity)) {
-        if (step.total > 0) {
-          onEvent(`Round ${rounds}: swap ${step.step} of ${step.total}`);
-        }
-      }
-      const leaves = await pollLeaves({
-        wallet,
-        attempts: leafPollAttempts,
-        delayMs: leafPollDelayMs,
-      });
-      after = summarizeLeaves(leaves);
-      if (after.totalSats !== before.totalSats) {
-        throw new ConsolidateError(
-          `Balance changed during consolidation (before ${before.totalSats} sats, ` +
-            `after ${after.totalSats} sats); wallet may have concurrent activity - ` +
-            "re-run once transfers settle",
-        );
-      }
-      plan = planLeafConsolidation(after.values, multiplicity);
-      onEvent(
-        `Round ${rounds} complete: ${after.leafCount} leaves` +
-          (plan.needsSwap ? " (further swaps possible)" : " (optimal)"),
-      );
-    }
-
+  if (!plan.needsSwap) {
+    onEvent("Leaves already match the optimal denomination set; nothing to do");
     return {
       network: normalizedNetwork,
       multiplicity,
       dryRun,
-      executed: rounds > 0,
-      rounds,
-      converged: !plan.needsSwap,
+      executed: false,
+      rounds: 0,
+      converged: true,
       before,
       target,
-      after,
-      bundleRefreshRequired: rounds > 0,
+      after: before,
+      bundleRefreshRequired: false,
     };
   }
+
+  if (dryRun) {
+    onEvent(
+      `Dry run: would consolidate ${plan.currentLeafCount} leaves into ` +
+        `${plan.targetLeafCount} via SSP swaps`,
+    );
+    return {
+      network: normalizedNetwork,
+      multiplicity,
+      dryRun,
+      executed: false,
+      rounds: 0,
+      converged: false,
+      before,
+      target,
+      bundleRefreshRequired: false,
+    };
+  }
+
+  if (typeof wallet.optimizeLeaves !== "function") {
+    throw new ConsolidateError(
+      "This Spark wallet does not expose optimizeLeaves(); upgrade @buildonspark/spark-sdk",
+    );
+  }
+
+  let rounds = 0;
+  let after = before;
+  while (plan.needsSwap && rounds < maxRounds) {
+    rounds += 1;
+    onEvent(`Consolidation round ${rounds}/${maxRounds}: requesting SSP swaps`);
+    for await (const step of wallet.optimizeLeaves(multiplicity)) {
+      if (step.total > 0) {
+        onEvent(`Round ${rounds}: swap ${step.step} of ${step.total}`);
+      }
+    }
+    const leaves = await pollLeaves({
+      wallet,
+      attempts: leafPollAttempts,
+      delayMs: leafPollDelayMs,
+    });
+    after = summarizeLeaves(leaves);
+    if (after.totalSats !== before.totalSats) {
+      throw new ConsolidateError(
+        `Balance changed during consolidation (before ${before.totalSats} sats, ` +
+          `after ${after.totalSats} sats); wallet may have concurrent activity - ` +
+          "re-run once transfers settle",
+      );
+    }
+    plan = planLeafConsolidation(after.values, multiplicity);
+    onEvent(
+      `Round ${rounds} complete: ${after.leafCount} leaves` +
+        (plan.needsSwap ? " (further swaps possible)" : " (optimal)"),
+    );
+  }
+
+  return {
+    network: normalizedNetwork,
+    multiplicity,
+    dryRun,
+    executed: rounds > 0,
+    rounds,
+    converged: !plan.needsSwap,
+    before,
+    target,
+    after,
+    bundleRefreshRequired: rounds > 0,
+  };
 }
 
 function summarizeLeaves(leaves: SparkLeaf[]): LeafSetSummary {
   const values = leaves
     .map((leaf) => {
-      const value = Number(leaf.value ?? leaf.valueSats ?? 0);
+      const raw = leaf.value ?? leaf.valueSats;
+      // A leaf without a value is stale or corrupt wallet state; treating it
+      // as 0 sats would silently include it in swap planning. Refuse instead.
+      if (raw === undefined || raw === null) {
+        throw new ConsolidateError(
+          `Spark leaf ${String(leaf.id ?? "?")} has no value; ` +
+            "re-sync the wallet before consolidating",
+        );
+      }
+      const value = Number(raw);
       if (!Number.isSafeInteger(value) || value < 0) {
         throw new ConsolidateError(
-          `Spark leaf ${String(leaf.id ?? "?")} has an invalid value: ${String(
-            leaf.value ?? leaf.valueSats,
-          )}`,
+          `Spark leaf ${String(leaf.id ?? "?")} has an invalid value: ${String(raw)}`,
         );
       }
       return value;

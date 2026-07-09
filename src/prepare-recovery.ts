@@ -39,7 +39,13 @@ export interface PrepareRecoveryOptions {
   multiplicity?: number;
   operatorSet?: string;
   appVersion?: string;
-  /** Give up on reaching the operators after this long and fall back to the saved bundle. */
+  /**
+   * Bounds the wallet initialization and the bundle export, each falling back
+   * to the saved bundle with a note. The consolidation swaps are deliberately
+   * NOT time-bounded: abandoning an in-flight SSP swap would let the leaf set
+   * keep changing underneath the exit that follows. If consolidation wedges,
+   * interrupt the run and retry with consolidation disabled.
+   */
   timeoutMs?: number;
   walletFactory?: WalletFactory;
   onEvent?: (message: string) => void;
@@ -136,15 +142,20 @@ export async function prepareRecovery({
     }
 
     try {
-      const bundle = await exportRecoveryBundleFromWallet({
-        wallet,
-        network: normalizedNetwork,
-        ...(operatorSet ? { operatorSet } : {}),
-        ...(appVersion ? { appVersion } : {}),
-        ...(encodeTreeNode ? { encodeTreeNode } : {}),
-        leafPollAttempts,
-        leafPollDelayMs,
-      });
+      // Read-only, so safe to abandon on timeout (unlike the swaps above).
+      const bundle = await withTimeout(
+        exportRecoveryBundleFromWallet({
+          wallet,
+          network: normalizedNetwork,
+          ...(operatorSet ? { operatorSet } : {}),
+          ...(appVersion ? { appVersion } : {}),
+          ...(encodeTreeNode ? { encodeTreeNode } : {}),
+          leafPollAttempts,
+          leafPollDelayMs,
+        }),
+        timeoutMs,
+        "Bundle refresh",
+      );
       onEvent(
         `Refreshed recovery bundle from live leaves (${bundle.leaves.length} leaf/leaves)`,
       );

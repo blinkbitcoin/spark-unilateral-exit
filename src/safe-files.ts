@@ -33,11 +33,30 @@ export function writeFileWithBackup(
     }
     const backupPath = timestampedBackupPath(path);
     fs.copyFileSync(path, backupPath);
-    fs.writeFileSync(path, content, { mode });
+    atomicWriteFileSync(path, content, mode);
     return { backupPath, unchanged: false };
   }
-  fs.writeFileSync(path, content, { mode });
+  atomicWriteFileSync(path, content, mode);
   return { backupPath: null, unchanged: false };
+}
+
+// Write-to-temp + rename so a crash mid-write can never leave the target
+// truncated: the file is either its previous content or the complete new
+// content (rename is atomic on the same filesystem). A crash between the
+// backup copy and the rename leaves a redundant backup, which is harmless.
+function atomicWriteFileSync(path: string, content: string, mode: number): void {
+  const tempPath = `${path}.tmp-${process.pid}`;
+  fs.writeFileSync(tempPath, content, { mode });
+  try {
+    fs.renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Keep the original error; a stray temp file is not worth masking it.
+    }
+    throw error;
+  }
 }
 
 // <name>.<UTC timestamp>.backup.json for .json files (matching the Makefile's

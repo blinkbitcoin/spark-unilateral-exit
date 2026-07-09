@@ -22,6 +22,9 @@ const bundlePath =
   process.env.SPARK_REAL_BUNDLE ?? path.resolve(repoRoot, "../recovery-bundle.json");
 const haveBundle = fs.existsSync(bundlePath);
 
+// The BIP39 test-vector mnemonic: publicly known, corresponds to no funded
+// wallet, and is only used here to derive a throwaway CPFP funding script for
+// fee estimation.
 const SEED =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const FEE_RATE = 1;
