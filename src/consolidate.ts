@@ -17,6 +17,7 @@ import {
   normalizeAccountNumber,
   normalizeNetwork,
   pollLeaves,
+  unwrapWallet,
 } from "./recovery-bundle.ts";
 import type {
   AccountNumberInput,
@@ -137,7 +138,7 @@ export interface ConsolidateWalletOptions {
 
 export interface ConsolidateLeavesOptions
   extends Omit<ConsolidateWalletOptions, "wallet"> {
-  seed?: string;
+  seed: string;
   accountNumber?: AccountNumberInput;
   walletFactory?: WalletFactory;
   cleanupWallet?: boolean;
@@ -171,17 +172,19 @@ export async function consolidateLeavesFromSeed({
   walletFactory = defaultWalletFactory,
   cleanupWallet = true,
   ...walletOptions
-}: ConsolidateLeavesOptions = {}): Promise<ConsolidateResult> {
+}: ConsolidateLeavesOptions): Promise<ConsolidateResult> {
+  // The type requires seed, but untyped callers (plain JS) still hit this.
   if (typeof seed !== "string" || seed.trim().length === 0) {
     throw new ConsolidateError("Spark seed or mnemonic is required");
   }
   const normalizedNetwork = normalizeNetwork(network);
-  const walletResponse = await walletFactory({
-    seed,
-    accountNumber: normalizeAccountNumber(accountNumber),
-    network: normalizedNetwork,
-  });
-  const wallet: SparkWalletLike = walletResponse?.wallet ?? walletResponse;
+  const wallet = unwrapWallet(
+    await walletFactory({
+      seed,
+      accountNumber: normalizeAccountNumber(accountNumber),
+      network: normalizedNetwork,
+    }),
+  );
   if (!wallet) {
     throw new ConsolidateError("Spark wallet initialization returned no wallet");
   }

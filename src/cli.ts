@@ -227,7 +227,9 @@ async function main(): Promise<void> {
   if (command === "auto-exit") {
     const bundlePath = required(args.bundle, "--bundle");
     let bundle = loadOptionalBundle(bundlePath);
-    if (!bundle) throw new Error("--bundle is required for auto-exit");
+    if (!bundle) {
+      throw new Error(`could not read or parse the recovery bundle at ${bundlePath}`);
+    }
     const seed = await loadSeed(args);
     const network = optionalValue(args.network) ?? bundle.network;
     if (args.out === true) throw new Error("--out requires a path");

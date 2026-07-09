@@ -64,12 +64,13 @@ export async function exportRecoveryBundleFromSeed({
     throw new RecoveryBundleExportError("Spark seed or mnemonic is required");
   }
   const normalizedNetwork = normalizeNetwork(network);
-  const walletResponse = await walletFactory({
-    seed,
-    accountNumber: normalizeAccountNumber(accountNumber),
-    network: normalizedNetwork,
-  });
-  const wallet = walletResponse?.wallet ?? walletResponse;
+  const wallet = unwrapWallet(
+    await walletFactory({
+      seed,
+      accountNumber: normalizeAccountNumber(accountNumber),
+      network: normalizedNetwork,
+    }),
+  );
 
   if (!wallet) {
     throw new RecoveryBundleExportError("Spark wallet initialization returned no wallet");
@@ -178,6 +179,13 @@ interface SparkWalletModule {
       };
     }): Promise<unknown>;
   };
+}
+
+// SparkWallet.initialize resolves to { wallet, ... } while injected factories
+// and fakes may return the wallet directly; this is the single place that
+// assumption about the SDK's return shape lives.
+export function unwrapWallet(walletResponse: any): SparkWalletLike | undefined {
+  return (walletResponse?.wallet ?? walletResponse) || undefined;
 }
 
 export async function defaultWalletFactory({ seed, accountNumber, network }: WalletFactoryParams) {

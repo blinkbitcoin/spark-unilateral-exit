@@ -204,7 +204,7 @@ describe("consolidateLeavesFromSeed", () => {
     ).rejects.toThrow(/optimizeLeaves/);
   });
 
-  it("rejects an empty wallet and missing seed", async () => {
+  it("rejects an empty wallet and a blank seed", async () => {
     await expect(
       consolidateLeavesFromSeed({
         seed: "test seed",
@@ -213,7 +213,10 @@ describe("consolidateLeavesFromSeed", () => {
         walletFactory: async () => ({ wallet: fakeWallet({ leafSets: [[]] }) }),
       }),
     ).rejects.toThrow(/no leaves/);
-    await expect(consolidateLeavesFromSeed()).rejects.toThrow(/required/);
+    // The type requires seed; the runtime guard still covers untyped callers.
+    await expect(consolidateLeavesFromSeed({ seed: "  " })).rejects.toThrow(
+      /required/,
+    );
   });
 });
 

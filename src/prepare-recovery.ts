@@ -18,6 +18,7 @@ import {
   exportRecoveryBundleFromWallet,
   normalizeAccountNumber,
   normalizeNetwork,
+  unwrapWallet,
 } from "./recovery-bundle.ts";
 import type {
   AccountNumberInput,
@@ -89,20 +90,18 @@ export async function prepareRecovery({
     network: normalizedNetwork,
   });
   try {
-    const walletResponse = await withTimeout(
-      walletPromise,
-      timeoutMs,
-      "Spark wallet initialization",
+    const unwrapped = unwrapWallet(
+      await withTimeout(walletPromise, timeoutMs, "Spark wallet initialization"),
     );
-    wallet = walletResponse?.wallet ?? walletResponse;
-    if (!wallet) throw new Error("wallet initialization returned no wallet");
+    if (!unwrapped) throw new Error("wallet initialization returned no wallet");
+    wallet = unwrapped;
   } catch (error) {
     // Best-effort: if the initialization outlives the timeout, close the late
     // wallet once it resolves. There is no guarantee - a cleanup that itself
     // hangs or throws leaves its connections open until process exit, which
     // is acceptable for a CLI run that is about to proceed offline anyway.
     void walletPromise
-      .then((response) => (response?.wallet ?? response)?.cleanup?.())
+      .then((response) => unwrapWallet(response)?.cleanup?.())
       .catch(() => {});
     notes.push(
       `Spark operators unreachable (${(error as Error).message}); ` +
