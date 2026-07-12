@@ -225,6 +225,17 @@ async function main(): Promise<void> {
   }
 
   if (command === "auto-exit") {
+    // The SDK wallet used for consolidation and the CPFP funding derivation
+    // take a raw mnemonic-or-seed with no passphrase parameter, so accepting
+    // --passphrase here would silently run half the flow on a different
+    // wallet identity. Passphrase wallets must pass the derived 64-byte hex
+    // seed instead.
+    if (args.passphrase !== undefined) {
+      throw new Error(
+        "auto-exit does not support --passphrase; derive the 64-byte hex seed " +
+          "(BIP39 mnemonic + passphrase) and pass it via --seed-file",
+      );
+    }
     const bundlePath = required(args.bundle, "--bundle");
     let bundle = loadOptionalBundle(bundlePath);
     if (!bundle) {
@@ -270,6 +281,19 @@ async function main(): Promise<void> {
       prepareSummary.refreshed = prepared.refreshed;
       prepareSummary.consolidated = prepared.consolidated;
       prepareSummary.notes.push(...prepared.notes);
+      // A consolidation spends the current leaves in SSP swaps, so the saved
+      // bundle is now stale: exiting with it would fund and broadcast
+      // packages for leaves the SSP already owns. Operators were reachable
+      // moments ago, so stop instead of degrading.
+      if (prepared.consolidated && !prepared.bundle) {
+        for (const note of prepareSummary.notes) console.error(note);
+        throw new Error(
+          "Consolidation changed the leaf set but the bundle refresh failed; " +
+            "the saved bundle is stale and must not be used for an exit. " +
+            "Re-run recover (operators were reachable moments ago) or run " +
+            "refresh-bundle manually first.",
+        );
+      }
       if (prepared.bundle) {
         const written = writeFileWithBackup(
           bundlePath,
@@ -568,7 +592,7 @@ Inputs for refresh-bundle:
   --out <path>             Bundle output path; stdout when omitted
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
   --account-number <n>     Spark account number; defaults to the Spark default for the
-                           network (0 on regtest/local, 1 elsewhere)
+                           network (0 on regtest, 1 elsewhere including local)
   --coordinator <url>      Spark coordinator base URL; defaults to the public pool
                            coordinator (required for LOCAL stacks)
   --page-size <n>          query_nodes page size, default 100
@@ -613,6 +637,8 @@ Inputs for auto-exit:
   --buffer-sats <n>        Funding buffer, default 1000
   --poll-interval <sec>    Seconds between confirmation polls, default 30
   --esplora-url <url>      Custom Esplora API base URL (optional)
+  --coordinator <url>      Spark coordinator base URL for the prepare phase's bundle
+                           refresh; defaults to the public pool coordinator
   --out <path>             Write sweep-compatible refund packages JSON here
   --offline                Skip the entire prepare phase (bundle refresh AND leaf
                            consolidation) and use the saved bundle as-is

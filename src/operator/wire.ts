@@ -14,6 +14,9 @@ export const WireType = {
   Fixed32: 5,
 } as const;
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 export interface WireField {
   fieldNumber: number;
   wireType: number;
@@ -66,7 +69,7 @@ export class ProtoWriter {
   }
 
   string(fieldNumber: number, value: string): this {
-    return this.bytes(fieldNumber, new TextEncoder().encode(value));
+    return this.bytes(fieldNumber, textEncoder.encode(value));
   }
 
   finish(): Uint8Array {
@@ -139,5 +142,5 @@ export function firstField(
 }
 
 export function utf8Decode(bytes: Uint8Array): string {
-  return new TextDecoder().decode(bytes);
+  return textDecoder.decode(bytes);
 }

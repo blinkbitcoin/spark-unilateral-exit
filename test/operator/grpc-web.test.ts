@@ -5,27 +5,7 @@ import {
   grpcWebUnaryCall,
   type FetchLike,
 } from "../../src/operator/grpc-web.ts";
-
-function frame(flag: number, payload: Uint8Array): Uint8Array {
-  const framed = new Uint8Array(5 + payload.length);
-  framed[0] = flag;
-  new DataView(framed.buffer).setUint32(1, payload.length, false);
-  framed.set(payload, 5);
-  return framed;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((sum, p) => sum + p.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-const textBytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+import { concatBytes, frame, textBytes } from "../helpers/grpc-frames.ts";
 
 interface MockResponse {
   ok?: boolean;
@@ -66,7 +46,7 @@ describe("grpcWebUnaryCall", () => {
   it("frames the request and returns the message frame", async () => {
     const message = Uint8Array.from([9, 8, 7]);
     const { fetchImpl, calls } = mockFetch({
-      body: concat(frame(0, message), frame(0x80, textBytes("grpc-status: 0"))),
+      body: concatBytes(frame(0, message), frame(0x80, textBytes("grpc-status: 0"))),
     });
 
     const result = await grpcWebUnaryCall({
@@ -86,7 +66,7 @@ describe("grpcWebUnaryCall", () => {
 
   it("throws on non-zero grpc-status in trailers", async () => {
     const { fetchImpl } = mockFetch({
-      body: concat(
+      body: concatBytes(
         frame(0, Uint8Array.from([1])),
         frame(0x80, textBytes("grpc-status: 16\r\ngrpc-message: unauthenticated")),
       ),

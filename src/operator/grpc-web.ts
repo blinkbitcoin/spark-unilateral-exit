@@ -6,6 +6,8 @@
 // Mirrors app/self-custodial/recovery-bundle/protocol/grpc-web.ts in
 // blink-mobile; keep the two in sync.
 
+import { utf8Decode } from "./wire.ts";
+
 const GRPC_WEB_CONTENT_TYPE = "application/grpc-web+proto";
 const TRAILER_FLAG = 0x80;
 const CALL_TIMEOUT_MS = 30_000;
@@ -60,7 +62,7 @@ function parseFrames(body: Uint8Array): Frame[] {
 
 function parseTrailers(payload: Uint8Array): Map<string, string> {
   const trailers = new Map<string, string>();
-  for (const line of new TextDecoder().decode(payload).split("\r\n")) {
+  for (const line of utf8Decode(payload).split("\r\n")) {
     const separator = line.indexOf(":");
     if (separator !== -1) {
       trailers.set(
@@ -160,7 +162,7 @@ export async function grpcWebUnaryCall({
 
   let message: Uint8Array | undefined;
   for (const frame of parseFrames(body)) {
-    // eslint-disable-next-line no-bitwise -- gRPC-web trailer flag is the high bit
+    // The gRPC-web trailer flag is the high bit of the frame flag byte
     if (frame.flag & TRAILER_FLAG) {
       const trailers = parseTrailers(frame.payload);
       const status = trailers.get("grpc-status");

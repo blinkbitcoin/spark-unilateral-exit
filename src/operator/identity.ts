@@ -2,8 +2,10 @@
 //
 // The identity key lives at m/8797555'/{account}'/0' from the BIP39 seed
 // (same derivation as the Spark SDK's DefaultSigner). The default account
-// number is network-dependent: 1 on mainnet, 0 on regtest/local - hardcoding
-// 0 on mainnet derives a different wallet identity that owns no leaves.
+// number is network-dependent: 0 on REGTEST, 1 everywhere else - including
+// LOCAL, matching the JS SDK's `getNetwork() === Network.REGTEST ? 0 : 1`
+// (Network.LOCAL is a distinct member). Hardcoding the wrong account derives
+// a different wallet identity that owns no leaves.
 
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha2";
@@ -20,8 +22,7 @@ export interface IdentityKeyPair {
 }
 
 export function defaultAccountNumber(network: string): number {
-  const normalized = network.toUpperCase();
-  return normalized === "REGTEST" || normalized === "LOCAL" ? 0 : 1;
+  return network.toUpperCase() === "REGTEST" ? 0 : 1;
 }
 
 export function deriveIdentityKeyPair(

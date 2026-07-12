@@ -17,6 +17,7 @@ import {
   fetchOwnedLeafSet,
   OperatorExportError,
   SPARK_COORDINATOR_URL,
+  type OperatorExportErrorReason,
 } from "./operator/exporter.ts";
 import { TREE_NODE_STATUS_AVAILABLE, type DecodedTreeNode } from "./operator/messages.ts";
 import type { FetchLike } from "./operator/grpc-web.ts";
@@ -28,9 +29,9 @@ const DEFAULT_OPERATOR_SET = "spark-sdk";
 export { SPARK_COORDINATOR_URL };
 
 export class RecoveryBundleExportError extends Error {
-  readonly reason?: "no-leaves" | "incomplete-chain";
+  readonly reason?: OperatorExportErrorReason;
 
-  constructor(message: string, reason?: "no-leaves" | "incomplete-chain") {
+  constructor(message: string, reason?: OperatorExportErrorReason) {
     super(message);
     this.name = "RecoveryBundleExportError";
     this.reason = reason;
@@ -59,7 +60,7 @@ export async function exportRecoveryBundleFromSeed({
   network = "MAINNET",
   operatorSet = DEFAULT_OPERATOR_SET,
   appVersion = "unknown",
-  coordinatorUrl = SPARK_COORDINATOR_URL,
+  coordinatorUrl,
   pageSize,
   now = () => new Date(),
   fetchImpl,
@@ -69,6 +70,16 @@ export async function exportRecoveryBundleFromSeed({
   }
   const normalizedNetwork = normalizeNetwork(network);
 
+  // The public pool coordinator serves every non-local network (the target
+  // network travels in each request), but a LOCAL stack is only reachable at
+  // its own address - falling through to the public pool would just produce
+  // a misleading no-leaves error.
+  if (normalizedNetwork === "LOCAL" && !isNonEmptyString(coordinatorUrl)) {
+    throw new RecoveryBundleExportError(
+      "--coordinator is required for LOCAL networks (e.g. https://localhost:8535)",
+    );
+  }
+
   let leafSet;
   try {
     leafSet = await fetchOwnedLeafSet({
@@ -76,7 +87,7 @@ export async function exportRecoveryBundleFromSeed({
       passphrase,
       network: normalizedNetwork,
       accountNumber: normalizeAccountNumber(accountNumber),
-      coordinatorUrl,
+      coordinatorUrl: coordinatorUrl ?? SPARK_COORDINATOR_URL,
       pageSize,
       fetchImpl,
     });
@@ -136,9 +147,9 @@ function leafValueAsNumber(leaf: DecodedTreeNode): number {
 }
 
 // undefined lets the exporter pick the Spark default account for the network
-// (0 on regtest/local, 1 everywhere else) - the same rule the Spark SDK
-// follows, so all commands land on the same wallet identity unless an account
-// is given.
+// (0 on regtest, 1 everywhere else including local) - the same rule the Spark
+// SDK follows, so all commands land on the same wallet identity unless an
+// account is given.
 export function normalizeAccountNumber(
   value: AccountNumberInput,
 ): number | undefined {

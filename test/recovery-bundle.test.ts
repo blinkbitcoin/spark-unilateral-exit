@@ -9,28 +9,12 @@ import {
   RecoveryBundleExportError,
   exportRecoveryBundleFromSeed,
 } from "../src/recovery-bundle.ts";
+import { grpcBody } from "./helpers/grpc-frames.ts";
 
 const TEST_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 // --- test-side encoders for operator responses ---
-
-function frame(flag: number, payload: Uint8Array): Uint8Array {
-  const framed = new Uint8Array(5 + payload.length);
-  framed[0] = flag;
-  new DataView(framed.buffer).setUint32(1, payload.length, false);
-  framed.set(payload, 5);
-  return framed;
-}
-
-function grpcBody(message: Uint8Array): Uint8Array {
-  const messageFrame = frame(0, message);
-  const trailer = frame(0x80, new TextEncoder().encode("grpc-status: 0"));
-  const body = new Uint8Array(messageFrame.length + trailer.length);
-  body.set(messageFrame, 0);
-  body.set(trailer, messageFrame.length);
-  return body;
-}
 
 interface TestNode {
   id: string;
@@ -222,12 +206,77 @@ describe("exportRecoveryBundleFromSeed", () => {
     });
   });
 
-  it("errors when the wallet has no available leaves", async () => {
-    const { fetchImpl } = mockOperator({ ownerQueryNodes: [], byIdNodes: {} });
+  it("errors when the wallet has no available leaves, with identity diagnostics", async () => {
+    const locked: TestNode = {
+      id: "leaf-locked",
+      valueSats: 100,
+      owner: identity(),
+      available: false,
+    };
+    const { fetchImpl } = mockOperator({ ownerQueryNodes: [locked], byIdNodes: {} });
 
+    // Identity pubkey + status histogram distinguish a wrong-account/passphrase
+    // derivation from a genuinely empty wallet.
     await expect(
       exportRecoveryBundleFromSeed(exportOptions(fetchImpl)),
-    ).rejects.toMatchObject({ name: "RecoveryBundleExportError", reason: "no-leaves" });
+    ).rejects.toMatchObject({
+      name: "RecoveryBundleExportError",
+      reason: "no-leaves",
+      message: expect.stringMatching(/identity=02.*queriedNodes=1.*SPLITTED/s),
+    });
+  });
+
+  it("keeps refetching while ancestor rounds make progress", async () => {
+    const owner = identity();
+    const leaf: TestNode = {
+      id: "leaf-1",
+      valueSats: 1000,
+      parentNodeId: "mid-1",
+      owner,
+      available: true,
+    };
+    const mid: TestNode = {
+      id: "mid-1",
+      valueSats: 2000,
+      parentNodeId: "root-1",
+      owner: otherOwner,
+      available: false,
+    };
+    const root: TestNode = {
+      id: "root-1",
+      valueSats: 3000,
+      owner: otherOwner,
+      available: false,
+    };
+    // Each by-id round reveals one more ancestor (mid first, then the root):
+    // partial rounds must continue, not throw.
+    const { fetchImpl, byIdRequests } = mockOperator({
+      ownerQueryNodes: [leaf],
+      byIdNodes: { "mid-1": mid, "root-1": root },
+    });
+
+    const bundle = await exportRecoveryBundleFromSeed(exportOptions(fetchImpl));
+    expect(byIdRequests).toEqual([["mid-1"], ["root-1"]]);
+    expect(bundle.nodes?.map((n) => n.id)).toEqual(["leaf-1", "mid-1", "root-1"]);
+  });
+
+  it("rejects a non-positive page size before any network call", async () => {
+    await expect(
+      exportRecoveryBundleFromSeed({
+        seed: TEST_MNEMONIC,
+        network: "mainnet",
+        pageSize: 0,
+        fetchImpl: async () => {
+          throw new Error("must not be called");
+        },
+      }),
+    ).rejects.toThrow(/positive integer/);
+  });
+
+  it("requires an explicit coordinator for LOCAL networks", async () => {
+    await expect(
+      exportRecoveryBundleFromSeed({ seed: TEST_MNEMONIC, network: "local" }),
+    ).rejects.toThrow(/--coordinator is required for LOCAL/);
   });
 
   it("excludes leaves owned by other identities", async () => {

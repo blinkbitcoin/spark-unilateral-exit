@@ -90,7 +90,7 @@ Operational notes:
 
 The exporter needs no SDK wallet and no wallet API support: it talks to the Spark operators directly (`src/operator/`). It derives the wallet identity key from the seed (`m/8797555'/{account}'/0'`), completes the operators' challenge-response authentication, and pages through `query_nodes(owner, include_parents=true)` on the pool coordinator over gRPC-web. It stores leaf `treeNodeHex` values plus all bundled ancestor nodes in the `spark.unilateral-exit-bundle.v1` JSON schema, re-fetching by node id any ancestors the bulk query omits (the operators skip tree roots for legacy mainnet trees) and refusing to write a bundle with an open exit chain. The recovery package builder can then satisfy parent lookups from the bundle while offline.
 
-`--account-number`, `--operator-set`, `--app-version`, and `--coordinator` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the Spark default for the selected network (0 on regtest/local, 1 elsewhere). `npm run refresh-recovery-bundle` remains as an alias for `refresh-bundle`.
+`--account-number`, `--operator-set`, `--app-version`, and `--coordinator` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the Spark default for the selected network (0 on regtest, 1 elsewhere including local). `npm run refresh-recovery-bundle` remains as an alias for `refresh-bundle`.
 
 ### Make targets
 

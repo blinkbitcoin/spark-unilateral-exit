@@ -106,17 +106,35 @@ export async function prepareRecovery({
   }
 
   onEvent("Refreshing the recovery bundle from the Spark operators...");
+  // After a consolidation the swapped leaves may take a moment to become
+  // AVAILABLE on the operators, and a failed refresh at this point is the one
+  // state where "proceed with the saved bundle" is dangerous (its leaves were
+  // just spent) - so retry the export through the settling window. Without a
+  // consolidation the saved bundle is still valid and one attempt suffices.
+  const exportAttempts = consolidated ? Math.max(1, leafPollAttempts) : 1;
   try {
     // Read-only, so safe to abandon on timeout (unlike the swaps above).
     const bundle = await withTimeout(
-      exportBundle({
-        seed,
-        accountNumber,
-        network: normalizedNetwork,
-        ...(operatorSet ? { operatorSet } : {}),
-        ...(appVersion ? { appVersion } : {}),
-        ...(coordinatorUrl ? { coordinatorUrl } : {}),
-      }),
+      (async () => {
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            return await exportBundle({
+              seed,
+              accountNumber,
+              network: normalizedNetwork,
+              ...(operatorSet ? { operatorSet } : {}),
+              ...(appVersion ? { appVersion } : {}),
+              ...(coordinatorUrl ? { coordinatorUrl } : {}),
+            });
+          } catch (error) {
+            if (attempt >= exportAttempts) throw error;
+            onEvent(
+              `Bundle refresh attempt ${attempt} failed (${(error as Error).message}); retrying...`,
+            );
+            await new Promise<void>((resolve) => setTimeout(resolve, leafPollDelayMs));
+          }
+        }
+      })(),
       timeoutMs,
       "Bundle refresh",
     );

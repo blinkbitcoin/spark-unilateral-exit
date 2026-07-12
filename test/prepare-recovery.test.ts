@@ -148,6 +148,54 @@ describe("prepareRecovery", () => {
     expect(result.notes[0]).toMatch(/--no-consolidate/);
   });
 
+  it("retries the export through the post-consolidation settling window", async () => {
+    const wallet = fakeWallet({
+      leafSets: [
+        [10, 10, 10, 10, 10],
+        [2, 16, 32],
+      ],
+    });
+    // First export attempt hits the not-yet-settled window; the retry
+    // succeeds. Without a consolidation this would be a single attempt.
+    let attempts = 0;
+    const flakyExport = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("no available leaves");
+      return fakeExportBundle(wallet)();
+    };
+
+    const result = await prepareRecovery({
+      seed: "test seed",
+      network: "regtest",
+      walletFactory: async () => ({ wallet }),
+      exportBundle: flakyExport,
+      leafPollAttempts: 3,
+      leafPollDelayMs: 0,
+    });
+
+    expect(attempts).toBe(2);
+    expect(result.consolidated).toBe(true);
+    expect(result.refreshed).toBe(true);
+  });
+
+  it("does not retry the export when no consolidation ran", async () => {
+    let attempts = 0;
+    const result = await prepareRecovery({
+      seed: "test seed",
+      network: "regtest",
+      consolidate: false,
+      exportBundle: async () => {
+        attempts += 1;
+        throw new Error("operators unreachable");
+      },
+      leafPollAttempts: 3,
+      leafPollDelayMs: 0,
+    });
+
+    expect(attempts).toBe(1);
+    expect(result.refreshed).toBe(false);
+  });
+
   it("degrades to the saved bundle when the wallet has no leaves", async () => {
     const wallet = fakeWallet({ leafSets: [[]] });
 

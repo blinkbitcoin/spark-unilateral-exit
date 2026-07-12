@@ -32,7 +32,9 @@ describe("spark identity derivation", () => {
     expect(defaultAccountNumber("TESTNET")).toBe(1);
     expect(defaultAccountNumber("SIGNET")).toBe(1);
     expect(defaultAccountNumber("REGTEST")).toBe(0);
-    expect(defaultAccountNumber("LOCAL")).toBe(0);
+    // LOCAL defaults to 1, matching the JS SDK: only REGTEST maps to 0, and
+    // Network.LOCAL is a distinct enum member (the e2e wallet uses account 1).
+    expect(defaultAccountNumber("LOCAL")).toBe(1);
   });
 
   it("derives the mainnet identity key at m/8797555'/1'/0'", () => {

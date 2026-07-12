@@ -11,7 +11,7 @@
 // Mirrors app/self-custodial/recovery-bundle/exporter.ts in blink-mobile;
 // keep the two in sync.
 
-import { bytesToHex } from "@noble/curves/utils";
+import { bytesToHex, equalBytes } from "@noble/curves/utils";
 
 import { grpcWebUnaryCall, type FetchLike } from "./grpc-web.ts";
 import { deriveIdentityKeyPair, signChallenge, type IdentityKeyPair } from "./identity.ts";
@@ -38,11 +38,22 @@ const QUERY_NODES_PATH = "/spark.SparkService/query_nodes";
 const DEFAULT_PAGE_SIZE = 100;
 /** Chain walks converge in one refetch round; the cap only guards operator misbehavior. */
 const MAX_ANCESTOR_REFETCH_ROUNDS = 10;
+/**
+ * Upper bound on owner-query pages (200 pages x 100 nodes = 20k nodes, far
+ * beyond any real wallet). Guards against a misbehaving coordinator that
+ * keeps signaling more pages forever.
+ */
+const MAX_OWNER_QUERY_PAGES = 200;
+
+export type OperatorExportErrorReason =
+  | "no-leaves"
+  | "incomplete-chain"
+  | "paging-limit-exceeded";
 
 export class OperatorExportError extends Error {
-  readonly reason: "no-leaves" | "incomplete-chain";
+  readonly reason: OperatorExportErrorReason;
 
-  constructor(reason: "no-leaves" | "incomplete-chain", message: string) {
+  constructor(reason: OperatorExportErrorReason, message: string) {
     super(message);
     this.name = "OperatorExportError";
     this.reason = reason;
@@ -110,7 +121,13 @@ async function queryNodesByOwner(
   const nodes = new Map<string, DecodedTreeNode>();
   let offset = 0;
 
-  for (;;) {
+  for (let page = 0; ; page += 1) {
+    if (page >= MAX_OWNER_QUERY_PAGES) {
+      throw new OperatorExportError(
+        "paging-limit-exceeded",
+        `Owner query did not terminate within ${MAX_OWNER_QUERY_PAGES} pages`,
+      );
+    }
     const response = decodeQueryNodesResponse(
       await grpcWebUnaryCall({
         baseUrl: context.baseUrl,
@@ -160,10 +177,6 @@ async function queryNodesByIds(
   return nodes;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((byte, i) => byte === b[i]);
-}
-
 function isAvailableOwnerLeaf(
   node: DecodedTreeNode,
   identityPublicKey: Uint8Array,
@@ -171,7 +184,7 @@ function isAvailableOwnerLeaf(
   return (
     (node.treenodeStatus === TREE_NODE_STATUS_AVAILABLE ||
       node.status.toUpperCase() === "AVAILABLE") &&
-    bytesEqual(node.ownerIdentityPublicKey, identityPublicKey)
+    equalBytes(node.ownerIdentityPublicKey, identityPublicKey)
   );
 }
 
@@ -225,6 +238,9 @@ export async function fetchOwnedLeafSet({
   pageSize = DEFAULT_PAGE_SIZE,
   fetchImpl,
 }: FetchLeafSetOptions): Promise<OperatorLeafSet> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1) {
+    throw new Error(`pageSize must be a positive integer, got ${pageSize}`);
+  }
   const keyPair = deriveIdentityKeyPair(seed, network, accountNumber, passphrase);
 
   const context: QueryContext = {
@@ -241,26 +257,41 @@ export async function fetchOwnedLeafSet({
   );
 
   if (leaves.length === 0) {
+    // The identity and status histogram distinguish "wrong account/passphrase
+    // derived a different wallet" from "wallet genuinely empty" - the known
+    // footgun this error usually means.
+    const statusCounts: Record<string, number> = {};
+    for (const node of nodes.values()) {
+      const status = node.status || String(node.treenodeStatus);
+      statusCounts[status] = (statusCounts[status] ?? 0) + 1;
+    }
     throw new OperatorExportError(
       "no-leaves",
-      "Spark operators returned no available leaves for this wallet",
+      "Spark operators returned no available leaves for this wallet " +
+        `(identity=${bytesToHex(keyPair.publicKey)}, queriedNodes=${nodes.size}, ` +
+        `statuses=${JSON.stringify(statusCounts)})`,
     );
   }
 
   // The bulk owner query can omit tree roots on legacy mainnet trees; by-id
   // queries do not, so re-fetch missing ancestors until every chain closes.
+  // A round may itself be truncated by the response limit, so keep looping
+  // while rounds make progress and only fail when one resolves nothing.
   for (let round = 0; round < MAX_ANCESTOR_REFETCH_ROUNDS; round += 1) {
     const missing = findMissingAncestors(leaves, nodes);
     if (missing.length === 0) break;
     const fetched = await queryNodesByIds(context, missing);
-    const stillMissing = missing.filter((id) => !fetched.has(id));
-    if (stillMissing.length > 0) {
+    let progressed = false;
+    for (const [id, node] of fetched) {
+      if (!nodes.has(id)) progressed = true;
+      nodes.set(id, node);
+    }
+    if (!progressed) {
       throw new OperatorExportError(
         "incomplete-chain",
-        `Exit chain incomplete: ancestors not returned by operators: ${stillMissing.join(", ")}`,
+        `Exit chain incomplete: ancestors not returned by operators: ${missing.join(", ")}`,
       );
     }
-    for (const [id, node] of fetched) nodes.set(id, node);
   }
 
   const unresolved = findMissingAncestors(leaves, nodes);
