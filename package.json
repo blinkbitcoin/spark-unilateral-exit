@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "plan": "node src/cli.ts plan",
     "refresh-bundle": "node src/cli.ts refresh-bundle",
-    "refresh-recovery-bundle": "nix develop --command cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml --"
+    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle"
   },
   "dependencies": {
     "@buildonspark/spark-sdk": "^0.8.6",

@@ -25,30 +25,15 @@
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.cargo
-              pkgs.clippy
               pkgs.jq
               pkgs.nodejs_22
-              pkgs.rustc
-              pkgs.rustfmt
-            ];
-
-            nativeBuildInputs = [
-              pkgs.pkg-config
-              pkgs.protobuf
             ];
 
             buildInputs = [
               pkgs.cacert
-              pkgs.openssl
             ];
 
-            PROTOC = "${pkgs.protobuf}/bin/protoc";
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-
-            shellHook = ''
-              export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/.cargo-target}"
-            '';
           };
         }
       );

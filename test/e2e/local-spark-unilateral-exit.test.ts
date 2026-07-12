@@ -131,10 +131,10 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       const seedFile = path.join(tempDir, "seed.txt");
       await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
 
-      // Step 1: refresh-bundle (via standalone Rust tool, same as make refresh-recovery-bundle)
-      step("refresh-bundle (standalone Rust tool)");
+      // Step 1: refresh-bundle (direct operator export, same as make refresh-recovery-bundle)
+      step("refresh-bundle (direct operator export)");
       const bundlePath = path.join(tempDir, "bundle.json");
-      await exportBundleWithStandaloneTool(mnemonic!, tempDir, bundlePath);
+      await exportBundleWithCli(mnemonic!, tempDir, bundlePath);
       const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
       assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
 
@@ -304,51 +304,43 @@ async function claimSingleDeposit(
   );
 }
 
-async function exportBundleWithStandaloneTool(
-  mnemonic: string,
-  tempDir: string,
-  outFile: string,
-) {
+async function exportBundleWithCli(mnemonic: string, tempDir: string, outFile: string) {
   const seedFile = path.join(tempDir, "seed.txt");
   await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
 
-  const operatorArgs = [];
-  for (const operator of LOCAL_OPERATORS) {
-    const caCertFile = path.join(tempDir, `operator-${operator.id}.crt`);
-    await fs.writeFile(caCertFile, await fetchOperatorCertificate(operator.port));
-    operatorArgs.push("--operator");
-    operatorArgs.push(
-      [
-        `id=${operator.id}`,
-        `identifier=${operator.identifier}`,
-        `address=https://localhost:${operator.port}`,
-        `identity-public-key=${operator.identityPublicKey}`,
-        `ca-cert=${caCertFile}`,
-      ].join(","),
-    );
-  }
+  // The exporter only talks to the pool coordinator (operator 0). The local
+  // operators use self-signed certificates, so trust the coordinator's cert
+  // via NODE_EXTRA_CA_CERTS (fetch/undici honors it at process start).
+  const coordinator = LOCAL_OPERATORS[0]!;
+  const caCertFile = path.join(tempDir, `operator-${coordinator.id}.crt`);
+  await fs.writeFile(caCertFile, await fetchOperatorCertificate(coordinator.port));
 
   await execFileAsync(
-    "npm",
+    "node",
     [
-      "run",
-      "refresh-recovery-bundle",
-      "--",
+      "src/cli.ts",
+      "refresh-bundle",
       "--seed-file",
       seedFile,
       "--network",
       "regtest",
       "--account-number",
       "1",
+      "--coordinator",
+      `https://localhost:${coordinator.port}`,
       "--out",
       outFile,
       "--operator-set",
       "local-docker-compose",
       "--app-version",
       "local-e2e",
-      ...operatorArgs,
     ],
-    { cwd: repoRoot, timeout: 180_000, maxBuffer: 10 * 1024 * 1024 },
+    {
+      cwd: repoRoot,
+      timeout: 180_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, NODE_EXTRA_CA_CERTS: caCertFile },
+    },
   );
 }
 

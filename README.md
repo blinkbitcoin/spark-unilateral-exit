@@ -12,9 +12,9 @@ See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and 
 
 ## Prerequisites
 
-The `make` commands (and the Rust bundle exporter they wrap) expect the
-development environment from this repo's Nix flake, loaded automatically by
-direnv:
+Everything runs on Node 22+; there is no other toolchain. The repo ships a
+Nix flake that pins Node (and jq for the runbook snippets), loaded
+automatically by direnv:
 
 1. Install Nix — the [Determinate Systems installer](https://github.com/DeterminateSystems/nix-installer)
    is recommended (flakes enabled out of the box, clean uninstall, survives
@@ -26,13 +26,11 @@ direnv:
 
 2. Install [direnv](https://direnv.net/) and hook it into your shell.
 3. In the repo root, run `direnv allow` once; the [.envrc](.envrc) (`use flake`)
-   then loads Node, Rust, and the other pinned tools on every `cd` into the
-   repo.
+   then loads the pinned tools on every `cd` into the repo.
 4. Run `npm install` to fetch the JS dependencies.
 
-Without direnv, prefix commands with `nix develop --command` (the
-`refresh-recovery-bundle` target already does this for the Rust exporter), or
-bring your own Node 22+ and Rust toolchain.
+Without direnv, prefix commands with `nix develop --command`, or simply bring
+your own Node 22+.
 
 ## Current CLI
 
@@ -128,21 +126,9 @@ node src/cli.ts refresh-bundle \
   --app-version example-app
 ```
 
-The seed file may contain a Spark mnemonic or seed string accepted by the upstream SDK. When `--seed-file`, `--seed`, and `SPARK_SEED` are omitted, the CLI prompts for the seed with terminal echo disabled so typed or pasted wallet material is not displayed. Prefer `--seed-file` or the hidden prompt over `--seed` so shell history does not capture wallet material. `--operator-set` and `--app-version` are optional provenance metadata stored in the bundle. Store the resulting JSON encrypted in the mobile backup target; it contains the current Spark leaves needed for later offline recovery.
+The seed file may contain a BIP-39 mnemonic or a 64-byte hex seed. When `--seed-file`, `--seed`, and `SPARK_SEED` are omitted, the CLI prompts for the seed with terminal echo disabled so typed or pasted wallet material is not displayed. Prefer `--seed-file` or the hidden prompt over `--seed` so shell history does not capture wallet material. `--operator-set` and `--app-version` are optional provenance metadata stored in the bundle. Store the resulting JSON encrypted in the mobile backup target; it contains the current Spark leaves needed for later offline recovery.
 
-For wallets that need direct leaf export, use the standalone recovery-bundle exporter. It builds against the repo-local SDK snapshot under `vendor/breez-spark-sdk`. The npm script runs through the Nix flake so Rust, Node, and protobuf dependencies come from the repo shell:
-
-```sh
-npm run refresh-recovery-bundle -- \
-  --seed-file ../.spark-seed.txt \
-  --network mainnet \
-  --out ../recovery-bundle.json \
-  --account-number 1 \
-  --operator-set spark-mainnet \
-  --app-version example-app
-```
-
-The standalone exporter queries Spark operators with `include_parents=true` and writes both leaf nodes and ancestor nodes into the same bundle schema. The package builder uses those bundled ancestors as an offline `query_nodes` source when constructing unilateral-exit packages. `--account-number`, `--operator-set`, and `--app-version` are optional; use `--account-number` when the wallet used a non-default Spark account.
+The exporter does not open a Spark SDK wallet. It derives the wallet identity key from the seed (`m/8797555'/{account}'/0'`), authenticates to the Spark coordinator directly, and queries `query_nodes` with `include_parents=true` over gRPC-web (`src/operator/`). It writes both leaf nodes and all their ancestor nodes into the bundle, re-fetching any ancestors the bulk query omits (legacy mainnet trees) and refusing to write a bundle with an open exit chain. The package builder uses those bundled ancestors as an offline `query_nodes` source when constructing unilateral-exit packages. `--account-number`, `--operator-set`, and `--app-version` are optional; use `--account-number` when the wallet used a non-default Spark account, and `--coordinator` to target a non-default coordinator (for example a local stack). The same client implementation ships inside the Blink mobile app, so app-saved bundles and CLI-exported bundles are interchangeable.
 
 The same flows are available as Make targets:
 

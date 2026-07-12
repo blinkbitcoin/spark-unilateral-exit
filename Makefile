@@ -1,4 +1,3 @@
-NIX ?= nix develop --command
 NODE ?= node
 
 BUNDLE ?= ../recovery-bundle.json
@@ -70,18 +69,9 @@ help:
 test-e2e:
 	@./scripts/run-e2e.sh
 
+# The CLI backs up any existing bundle itself (writeFileWithBackup).
 refresh-recovery-bundle:
-	@if [ -f "$(BUNDLE)" ]; then \
-		bundle="$(BUNDLE)"; \
-		timestamp="$$(date -u +%Y%m%dT%H%M%SZ)"; \
-		case "$$bundle" in \
-			*.json) backup="$${bundle%.json}.$$timestamp.backup.json" ;; \
-			*) backup="$$bundle.$$timestamp.backup.json" ;; \
-		esac; \
-		cp -p "$$bundle" "$$backup"; \
-		echo "Saved existing bundle to $$backup"; \
-	fi
-	@$(NIX) cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml -- $(REFRESH_ARGS)
+	@$(NODE) src/cli.ts refresh-bundle $(REFRESH_ARGS)
 
 # Cooperative leaf consolidation (not an exit): swaps small leaves with the
 # SSP into the unilateral-exit-optimal denomination set so fewer leaves are

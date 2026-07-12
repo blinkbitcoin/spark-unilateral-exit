@@ -86,23 +86,11 @@ Operational notes:
 - Mobile should encrypt the bundle before uploading it to Google Drive, iCloud, or a local user-selected file location.
 - Refresh cadence should be event-driven plus periodic. Event-driven refresh captures state changes immediately; a periodic refresh handles missed app lifecycle events.
 
-### Rust SDK exporter
+### How the exporter works
 
-Some Spark wallet implementations do not expose leaves through the upstream `@buildonspark/spark-sdk` wallet API. For those wallets, use the standalone Rust exporter instead of modifying an SDK:
+The exporter needs no SDK wallet and no wallet API support: it talks to the Spark operators directly (`src/operator/`). It derives the wallet identity key from the seed (`m/8797555'/{account}'/0'`), completes the operators' challenge-response authentication, and pages through `query_nodes(owner, include_parents=true)` on the pool coordinator over gRPC-web. It stores leaf `treeNodeHex` values plus all bundled ancestor nodes in the `spark.unilateral-exit-bundle.v1` JSON schema, re-fetching by node id any ancestors the bulk query omits (the operators skip tree roots for legacy mainnet trees) and refusing to write a bundle with an open exit chain. The recovery package builder can then satisfy parent lookups from the bundle while offline.
 
-```sh
-npm run refresh-recovery-bundle -- \
-  --seed-file ../.spark-seed.txt \
-  --network mainnet \
-  --out ../recovery-bundle.json \
-  --account-number 1 \
-  --operator-set spark-mainnet \
-  --app-version example-app
-```
-
-The exporter lives in `tools/spark-recovery-bundle`, builds against the repo-local Rust SDK snapshot under `vendor/breez-spark-sdk`, and is run through the repo Nix flake. It authenticates to Spark operators from the seed, queries available leaves with `include_parents=true`, stores leaf `treeNodeHex` values plus bundled ancestor nodes, and writes the same `spark.unilateral-exit-bundle.v1` JSON schema. The recovery package builder can then satisfy parent lookups from the bundle while offline.
-
-`--account-number`, `--operator-set`, and `--app-version` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the vendored SDK default for the selected network.
+`--account-number`, `--operator-set`, `--app-version`, and `--coordinator` are optional. Use `--account-number` when the wallet used a non-default Spark account number; otherwise the exporter uses the Spark default for the selected network (0 on regtest/local, 1 elsewhere). `npm run refresh-recovery-bundle` remains as an alias for `refresh-bundle`.
 
 ### Make targets
 

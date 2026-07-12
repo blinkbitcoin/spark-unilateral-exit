@@ -264,6 +264,7 @@ async function main(): Promise<void> {
         consolidate: args["no-consolidate"] !== true,
         operatorSet: bundle.operatorSet,
         appVersion: bundle.appVersion,
+        coordinatorUrl: optionalValue(args.coordinator),
         onEvent: (message) => console.error(message),
       });
       prepareSummary.refreshed = prepared.refreshed;
@@ -389,10 +390,13 @@ async function main(): Promise<void> {
     if (args.out === true) throw new Error("--out requires a path");
     const bundle = await exportRecoveryBundleFromSeed({
       seed,
+      passphrase: optionalValue(args.passphrase) ?? "",
       accountNumber: args["account-number"],
       network: optionalValue(args.network) ?? "MAINNET",
       operatorSet: optionalValue(args["operator-set"]) ?? "spark-sdk",
       appVersion: optionalValue(args["app-version"]) ?? "unknown",
+      coordinatorUrl: optionalValue(args.coordinator),
+      pageSize: optionalNumber(args["page-size"], undefined, "--page-size"),
     });
     const output = `${serializeForJson(bundle)}\n`;
     const outPath = optionalValue(args.out);
@@ -531,7 +535,9 @@ function printHelp(): void {
   process.stdout.write(`spark-unilateral-exit
 
 Commands:
-  refresh-bundle   Query live Spark leaves from a seed and write a bundle
+  refresh-bundle   Query live Spark leaves and their full ancestor chains from
+                   the operators (seed-derived identity, no SDK wallet) and
+                   write a recovery bundle
   consolidate      Swap small leaves with the SSP into the fewest denominations so
                    fewer leaves are uneconomical to exit (refresh the bundle after)
   plan             Validate a saved recovery bundle and print a recovery plan
@@ -558,10 +564,14 @@ Required for offline recovery:
 Inputs for refresh-bundle:
   --seed-file <path>       File containing Spark seed or mnemonic; prompts when omitted
   --seed <value>           Spark seed or mnemonic; prefer --seed-file
+  --passphrase <value>     Optional BIP39 passphrase for mnemonic seeds
   --out <path>             Bundle output path; stdout when omitted
   --network <network>      MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
-  --account-number <n>     Spark account number; defaults to the SDK default for the
-                           network (0 on regtest, 1 elsewhere)
+  --account-number <n>     Spark account number; defaults to the Spark default for the
+                           network (0 on regtest/local, 1 elsewhere)
+  --coordinator <url>      Spark coordinator base URL; defaults to the public pool
+                           coordinator (required for LOCAL stacks)
+  --page-size <n>          query_nodes page size, default 100
 
 Optional provenance metadata for refresh-bundle:
   --operator-set <label>   Operator-set label stored in the bundle

@@ -1,4 +1,0 @@
-# Compiled CLI binaries. `make build` produces breez-cli; a bare `go build`
-# (no -o) names the binary `go` after this module's path tail (.../langs/go).
-/breez-cli
-/go

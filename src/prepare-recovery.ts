@@ -9,27 +9,28 @@
 // degrades to "proceed with the saved bundle" with a note instead of
 // aborting the recovery.
 //
-// One wallet session serves both steps so a consolidation is always followed
-// by an export of the leaves it produced.
+// Consolidation drives SSP swaps through an SDK wallet session; the bundle
+// export talks to the operators directly from the seed (src/operator/) and
+// needs no wallet at all.
 
 import { consolidateLeaves } from "./consolidate.ts";
 import {
-  defaultWalletFactory,
-  exportRecoveryBundleFromWallet,
+  exportRecoveryBundleFromSeed,
   normalizeAccountNumber,
   normalizeNetwork,
-  unwrapWallet,
 } from "./recovery-bundle.ts";
+import { defaultWalletFactory, unwrapWallet } from "./spark-wallet.ts";
 import type {
   AccountNumberInput,
   RecoveryBundle,
-  SparkLeaf,
   SparkWalletLike,
   WalletFactoryParams,
 } from "./types.ts";
 
 type WalletFactory = (params: WalletFactoryParams) => Promise<any>;
-type EncodeTreeNode = (leaf: SparkLeaf) => string;
+type ExportBundle = (
+  options: Parameters<typeof exportRecoveryBundleFromSeed>[0],
+) => Promise<RecoveryBundle>;
 
 export interface PrepareRecoveryOptions {
   seed: string;
@@ -40,6 +41,8 @@ export interface PrepareRecoveryOptions {
   multiplicity?: number;
   operatorSet?: string;
   appVersion?: string;
+  /** Spark coordinator base URL for the bundle export. */
+  coordinatorUrl?: string;
   /**
    * Bounds the wallet initialization and the bundle export, each falling back
    * to the saved bundle with a note. The consolidation swaps are deliberately
@@ -49,8 +52,9 @@ export interface PrepareRecoveryOptions {
    */
   timeoutMs?: number;
   walletFactory?: WalletFactory;
+  /** Injection seam for tests; defaults to the operator-client exporter. */
+  exportBundle?: ExportBundle;
   onEvent?: (message: string) => void;
-  encodeTreeNode?: EncodeTreeNode;
   leafPollAttempts?: number;
   leafPollDelayMs?: number;
 }
@@ -72,22 +76,92 @@ export async function prepareRecovery({
   multiplicity = 0,
   operatorSet,
   appVersion,
+  coordinatorUrl,
   timeoutMs = 120_000,
   walletFactory = defaultWalletFactory,
+  exportBundle = exportRecoveryBundleFromSeed,
   onEvent = () => {},
-  encodeTreeNode,
   leafPollAttempts = 6,
   leafPollDelayMs = 2_000,
 }: PrepareRecoveryOptions): Promise<PrepareRecoveryResult> {
   const notes: string[] = [];
   const normalizedNetwork = normalizeNetwork(network);
 
-  onEvent("Checking whether Spark operators are reachable to refresh the bundle...");
+  let consolidated = false;
+  if (consolidate) {
+    consolidated = await runConsolidation({
+      seed,
+      accountNumber,
+      network: normalizedNetwork,
+      multiplicity,
+      timeoutMs,
+      walletFactory,
+      onEvent,
+      leafPollAttempts,
+      leafPollDelayMs,
+      notes,
+    });
+  } else {
+    notes.push("Leaf consolidation skipped (--no-consolidate)");
+  }
+
+  onEvent("Refreshing the recovery bundle from the Spark operators...");
+  try {
+    // Read-only, so safe to abandon on timeout (unlike the swaps above).
+    const bundle = await withTimeout(
+      exportBundle({
+        seed,
+        accountNumber,
+        network: normalizedNetwork,
+        ...(operatorSet ? { operatorSet } : {}),
+        ...(appVersion ? { appVersion } : {}),
+        ...(coordinatorUrl ? { coordinatorUrl } : {}),
+      }),
+      timeoutMs,
+      "Bundle refresh",
+    );
+    onEvent(
+      `Refreshed recovery bundle from live leaves (${bundle.leaves.length} leaf/leaves)`,
+    );
+    return { bundle, refreshed: true, consolidated, notes };
+  } catch (error) {
+    notes.push(
+      `Bundle refresh failed (${(error as Error).message}); ` +
+        "proceeding with the saved recovery bundle",
+    );
+    return { bundle: null, refreshed: false, consolidated, notes };
+  }
+}
+
+async function runConsolidation({
+  seed,
+  accountNumber,
+  network,
+  multiplicity,
+  timeoutMs,
+  walletFactory,
+  onEvent,
+  leafPollAttempts,
+  leafPollDelayMs,
+  notes,
+}: {
+  seed: string;
+  accountNumber: AccountNumberInput;
+  network: string;
+  multiplicity: number;
+  timeoutMs: number;
+  walletFactory: WalletFactory;
+  onEvent: (message: string) => void;
+  leafPollAttempts: number;
+  leafPollDelayMs: number;
+  notes: string[];
+}): Promise<boolean> {
+  onEvent("Checking whether Spark operators are reachable to consolidate leaves...");
   let wallet: SparkWalletLike;
   const walletPromise = walletFactory({
     seed,
     accountNumber: normalizeAccountNumber(accountNumber),
-    network: normalizedNetwork,
+    network,
   });
   try {
     const unwrapped = unwrapWallet(
@@ -104,68 +178,35 @@ export async function prepareRecovery({
       .then((response) => unwrapWallet(response)?.cleanup?.())
       .catch(() => {});
     notes.push(
-      `Spark operators unreachable (${(error as Error).message}); ` +
-        "proceeding with the saved recovery bundle",
+      `Leaf consolidation skipped (${(error as Error).message}); ` +
+        "exiting with the current leaf set",
     );
-    return { bundle: null, refreshed: false, consolidated: false, notes };
+    return false;
   }
 
   try {
-    let consolidated = false;
-    if (consolidate) {
-      try {
-        const result = await consolidateLeaves({
-          wallet,
-          network: normalizedNetwork,
-          multiplicity,
-          onEvent,
-          leafPollAttempts,
-          leafPollDelayMs,
-        });
-        consolidated = result.executed;
-        if (result.executed) {
-          notes.push(
-            `Consolidated ${result.before.leafCount} leaves into ` +
-              `${result.after?.leafCount} before the exit` +
-              (result.converged ? "" : " (partially; further swaps were possible)"),
-          );
-        }
-      } catch (error) {
-        notes.push(
-          `Leaf consolidation skipped (${(error as Error).message}); ` +
-            "exiting with the current leaf set",
-        );
-      }
-    } else {
-      notes.push("Leaf consolidation skipped (--no-consolidate)");
-    }
-
-    try {
-      // Read-only, so safe to abandon on timeout (unlike the swaps above).
-      const bundle = await withTimeout(
-        exportRecoveryBundleFromWallet({
-          wallet,
-          network: normalizedNetwork,
-          ...(operatorSet ? { operatorSet } : {}),
-          ...(appVersion ? { appVersion } : {}),
-          ...(encodeTreeNode ? { encodeTreeNode } : {}),
-          leafPollAttempts,
-          leafPollDelayMs,
-        }),
-        timeoutMs,
-        "Bundle refresh",
-      );
-      onEvent(
-        `Refreshed recovery bundle from live leaves (${bundle.leaves.length} leaf/leaves)`,
-      );
-      return { bundle, refreshed: true, consolidated, notes };
-    } catch (error) {
+    const result = await consolidateLeaves({
+      wallet,
+      network,
+      multiplicity,
+      onEvent,
+      leafPollAttempts,
+      leafPollDelayMs,
+    });
+    if (result.executed) {
       notes.push(
-        `Bundle refresh failed (${(error as Error).message}); ` +
-          "proceeding with the saved recovery bundle",
+        `Consolidated ${result.before.leafCount} leaves into ` +
+          `${result.after?.leafCount} before the exit` +
+          (result.converged ? "" : " (partially; further swaps were possible)"),
       );
-      return { bundle: null, refreshed: false, consolidated, notes };
     }
+    return result.executed;
+  } catch (error) {
+    notes.push(
+      `Leaf consolidation skipped (${(error as Error).message}); ` +
+        "exiting with the current leaf set",
+    );
+    return false;
   } finally {
     await wallet.cleanup?.();
   }
