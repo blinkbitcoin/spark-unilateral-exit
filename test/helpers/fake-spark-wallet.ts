@@ -33,17 +33,6 @@ export function fakeSparkWallet({
         encoded: "aa",
       }));
     },
-    async getIdentityPublicKey() {
-      return "identity";
-    },
-    async getBalance() {
-      return {
-        satsBalance: {
-          owned: currentValues().reduce((sum, value) => sum + BigInt(value), 0n),
-        },
-        tokenBalances: new Map(),
-      };
-    },
     async *optimizeLeaves(
       multiplicity?: number,
     ): AsyncGenerator<OptimizeLeavesStep, void, void> {

@@ -147,27 +147,15 @@ export interface EsploraUtxo {
 }
 
 // ---------------------------------------------------------------------------
-// Spark SDK wallet seam (used by recovery-bundle export)
+// Spark SDK wallet seam (used by leaf consolidation)
 // ---------------------------------------------------------------------------
 
 export interface SparkLeaf {
   id?: string;
-  nodeId?: string;
-  treeNodeId?: string;
   status?: unknown;
   value?: bigint | number | string;
   valueSats?: bigint | number | string;
   [key: string]: unknown;
-}
-
-export interface WalletTokenBalances {
-  values(): Iterable<{ ownedBalance?: bigint | number | string }>;
-}
-
-export interface WalletBalance {
-  satsBalance?: { owned?: bigint | number | string | null };
-  balance?: bigint | number | string | null;
-  tokenBalances?: WalletTokenBalances;
 }
 
 export interface OptimizeLeavesStep {
@@ -178,8 +166,6 @@ export interface OptimizeLeavesStep {
 
 export interface SparkWalletLike {
   getLeaves(): Promise<SparkLeaf[]>;
-  getBalance?(): Promise<WalletBalance | undefined | null>;
-  getIdentityPublicKey?(): Promise<string | undefined>;
   experimental_syncWallet?(): Promise<void>;
   cleanup?(): Promise<void>;
   optimizeLeaves?(
@@ -189,7 +175,7 @@ export interface SparkWalletLike {
 
 export interface WalletFactoryParams {
   seed: string;
-  /** undefined lets the SDK pick its network default (0 regtest, 1 mainnet). */
+  /** undefined lets the SDK pick its network default (0 on regtest, 1 elsewhere). */
   accountNumber: number | undefined;
   network: string;
 }

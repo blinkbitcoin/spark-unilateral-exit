@@ -1,6 +1,0 @@
-framework module breez_sdk_sparkFFI {
-  umbrella header "breez_sdk_sparkFFI-umbrella.h"
-
-  export *
-  module * { export * }
-}

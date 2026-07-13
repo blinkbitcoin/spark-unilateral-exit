@@ -100,13 +100,6 @@ seed_keyshares() {
 }
 seed_keyshares
 
-# The E2E test shells out to `npm run refresh-recovery-bundle`, which runs the
-# standalone Rust tool via `cargo run`. Build it up front so that call is a fast
-# binary launch instead of a cold compile that overruns the test's own timeout
-# (a fresh CI cargo cache took >180s to compile and failed the test).
-echo "Prebuilding the recovery bundle tool"
-nix develop --command cargo build --manifest-path tools/spark-recovery-bundle/Cargo.toml
-
 sleep 15
 
 # On failure, dump recent Spark logs before the EXIT trap tears the stack down.

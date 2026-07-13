@@ -1,8 +1,30 @@
 import { describe, expect, it } from "vitest";
 
 import { prepareRecovery } from "../src/prepare-recovery.ts";
-import type { OptimizeLeavesStep } from "../src/types.ts";
+import type { OptimizeLeavesStep, RecoveryBundle, SparkWalletLike } from "../src/types.ts";
 import { fakeSparkWallet as fakeWallet } from "./helpers/fake-spark-wallet.ts";
+
+/**
+ * Fake operator-side exporter: reports the wallet's current leaf values, the
+ * way the real exporter reflects whatever leaf set the consolidation left
+ * behind on the operators.
+ */
+function fakeExportBundle(wallet: SparkWalletLike, network = "REGTEST") {
+  return async (options: { operatorSet?: string } = {}): Promise<RecoveryBundle> => {
+    const leaves = await wallet.getLeaves();
+    return {
+      schema: "spark.unilateral-exit-bundle.v1",
+      createdAt: "2026-06-15T00:00:00.000Z",
+      network,
+      operatorSet: options.operatorSet,
+      leaves: leaves.map((leaf, i) => ({
+        id: String(leaf.id ?? i),
+        valueSats: Number(leaf.value),
+        treeNodeHex: "aa",
+      })),
+    };
+  };
+}
 
 describe("prepareRecovery", () => {
   it("consolidates leaves and exports a fresh bundle when operators are reachable", async () => {
@@ -19,7 +41,7 @@ describe("prepareRecovery", () => {
       operatorSet: "test-operators",
       appVersion: "test",
       walletFactory: async () => ({ wallet }),
-      encodeTreeNode: (leaf) => String(leaf.encoded),
+      exportBundle: fakeExportBundle(wallet),
       leafPollAttempts: 1,
       leafPollDelayMs: 0,
     });
@@ -31,9 +53,7 @@ describe("prepareRecovery", () => {
     expect(result.bundle?.operatorSet).toBe("test-operators");
     // The exported bundle reflects the post-consolidation leaf set.
     expect(result.bundle?.leaves.map((l) => l.valueSats)).toEqual([2, 16, 32]);
-    expect(result.notes).toEqual([
-      "Consolidated 5 leaves into 3 before the exit",
-    ]);
+    expect(result.notes).toEqual(["Consolidated 5 leaves into 3 before the exit"]);
     expect(wallet.cleaned).toBe(true);
   });
 
@@ -44,6 +64,9 @@ describe("prepareRecovery", () => {
       walletFactory: async () => {
         throw new Error("connection refused");
       },
+      exportBundle: async () => {
+        throw new Error("connection refused");
+      },
     });
 
     expect(result).toMatchObject({
@@ -51,8 +74,9 @@ describe("prepareRecovery", () => {
       refreshed: false,
       consolidated: false,
     });
-    expect(result.notes[0]).toMatch(/operators unreachable.*connection refused/);
-    expect(result.notes[0]).toMatch(/saved recovery bundle/);
+    expect(result.notes[0]).toMatch(/consolidation skipped.*connection refused/i);
+    expect(result.notes[1]).toMatch(/Bundle refresh failed.*connection refused/);
+    expect(result.notes[1]).toMatch(/saved recovery bundle/);
   });
 
   it("times out a hanging wallet initialization and cleans up late wallets", async () => {
@@ -63,6 +87,10 @@ describe("prepareRecovery", () => {
       timeoutMs: 20,
       walletFactory: () =>
         new Promise((resolve) => setTimeout(() => resolve({ wallet }), 60)),
+      exportBundle: () =>
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("operators unreachable")), 60),
+        ),
     });
 
     expect(result.bundle).toBeNull();
@@ -86,7 +114,7 @@ describe("prepareRecovery", () => {
       seed: "test seed",
       network: "regtest",
       walletFactory: async () => ({ wallet }),
-      encodeTreeNode: (leaf) => String(leaf.encoded),
+      exportBundle: fakeExportBundle(wallet),
       leafPollAttempts: 1,
       leafPollDelayMs: 0,
     });
@@ -99,15 +127,17 @@ describe("prepareRecovery", () => {
     expect(wallet.cleaned).toBe(true);
   });
 
-  it("skips consolidation when disabled but still refreshes", async () => {
+  it("skips consolidation when disabled but still refreshes without a wallet", async () => {
     const wallet = fakeWallet({ leafSets: [[10, 10, 10]] });
 
     const result = await prepareRecovery({
       seed: "test seed",
       network: "regtest",
       consolidate: false,
-      walletFactory: async () => ({ wallet }),
-      encodeTreeNode: (leaf) => String(leaf.encoded),
+      walletFactory: async () => {
+        throw new Error("walletFactory must not be called with --no-consolidate");
+      },
+      exportBundle: fakeExportBundle(wallet),
       leafPollAttempts: 1,
       leafPollDelayMs: 0,
     });
@@ -118,6 +148,54 @@ describe("prepareRecovery", () => {
     expect(result.notes[0]).toMatch(/--no-consolidate/);
   });
 
+  it("retries the export through the post-consolidation settling window", async () => {
+    const wallet = fakeWallet({
+      leafSets: [
+        [10, 10, 10, 10, 10],
+        [2, 16, 32],
+      ],
+    });
+    // First export attempt hits the not-yet-settled window; the retry
+    // succeeds. Without a consolidation this would be a single attempt.
+    let attempts = 0;
+    const flakyExport = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("no available leaves");
+      return fakeExportBundle(wallet)();
+    };
+
+    const result = await prepareRecovery({
+      seed: "test seed",
+      network: "regtest",
+      walletFactory: async () => ({ wallet }),
+      exportBundle: flakyExport,
+      leafPollAttempts: 3,
+      leafPollDelayMs: 0,
+    });
+
+    expect(attempts).toBe(2);
+    expect(result.consolidated).toBe(true);
+    expect(result.refreshed).toBe(true);
+  });
+
+  it("does not retry the export when no consolidation ran", async () => {
+    let attempts = 0;
+    const result = await prepareRecovery({
+      seed: "test seed",
+      network: "regtest",
+      consolidate: false,
+      exportBundle: async () => {
+        attempts += 1;
+        throw new Error("operators unreachable");
+      },
+      leafPollAttempts: 3,
+      leafPollDelayMs: 0,
+    });
+
+    expect(attempts).toBe(1);
+    expect(result.refreshed).toBe(false);
+  });
+
   it("degrades to the saved bundle when the wallet has no leaves", async () => {
     const wallet = fakeWallet({ leafSets: [[]] });
 
@@ -125,6 +203,9 @@ describe("prepareRecovery", () => {
       seed: "test seed",
       network: "regtest",
       walletFactory: async () => ({ wallet }),
+      exportBundle: async () => {
+        throw new Error("no available leaves");
+      },
       leafPollAttempts: 1,
       leafPollDelayMs: 0,
     });
@@ -136,4 +217,3 @@ describe("prepareRecovery", () => {
     expect(wallet.cleaned).toBe(true);
   });
 });
-

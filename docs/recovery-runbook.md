@@ -151,7 +151,7 @@ make refresh-recovery-bundle \
   APP_VERSION=example-app
 ```
 
-If `SEED_FILE` is omitted, the Rust exporter prompts for the Spark seed with
+If `SEED_FILE` is omitted, the exporter prompts for the Spark seed with
 terminal echo disabled.
 
 Confirm the bundle has recoverable leaves:

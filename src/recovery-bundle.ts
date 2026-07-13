@@ -1,299 +1,155 @@
+// Recovery-bundle export: a snapshot of the wallet's Spark leaves and their
+// full ancestor transaction chains, fetched straight from the Spark operators
+// while they are online. This is the only data (besides the seed) a
+// unilateral exit needs, and it cannot be reconstructed from the seed alone
+// once the operators are gone.
+//
+// The exporter authenticates and queries the operators directly (see
+// src/operator/) instead of spinning up a Spark SDK wallet: the SDK's
+// getLeaves() never exposed ancestor chains, and the wallet init pulled in
+// network sync, token state, and background optimization this export never
+// needed. The same client implementation ships inside the Blink mobile app.
+
 import { bytesToHex } from "@noble/curves/utils";
-import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
 import { validateRecoveryBundle } from "./bundle.ts";
-import type {
-  AccountNumberInput,
-  BundleBalances,
-  BundleLeaf,
-  RecoveryBundle,
-  SparkLeaf,
-  SparkWalletLike,
-  WalletBalance,
-  WalletFactoryParams,
-  WalletTokenBalances,
-} from "./types.ts";
+import {
+  fetchOwnedLeafSet,
+  OperatorExportError,
+  SPARK_COORDINATOR_URL,
+  type OperatorExportErrorReason,
+} from "./operator/exporter.ts";
+import { TREE_NODE_STATUS_AVAILABLE, type DecodedTreeNode } from "./operator/messages.ts";
+import type { FetchLike } from "./operator/grpc-web.ts";
+import type { AccountNumberInput, RecoveryBundle } from "./types.ts";
 
 const DEFAULT_SCHEMA = "spark.unilateral-exit-bundle.v1";
 const DEFAULT_OPERATOR_SET = "spark-sdk";
 
-// The wallet factory and encodeTreeNode are dependency-injection seams. In
-// production they call into the Spark SDK (dynamically imported, unchecked
-// under skipLibCheck); in tests they are replaced by fakes. `any` here reflects
-// the deliberately dynamic shape at these boundaries.
-// TODO: narrow these to concrete SDK types once @buildonspark/spark-sdk ships
-// stable public typings for the wallet and TreeNode shapes.
-type WalletFactory = (params: WalletFactoryParams) => Promise<any>;
-type EncodeTreeNode = (leaf: any) => string;
+export { SPARK_COORDINATOR_URL };
 
 export class RecoveryBundleExportError extends Error {
-  constructor(message: string) {
+  readonly reason?: OperatorExportErrorReason;
+
+  constructor(message: string, reason?: OperatorExportErrorReason) {
     super(message);
     this.name = "RecoveryBundleExportError";
+    this.reason = reason;
   }
 }
 
-interface ExportFromSeedOptions {
+export interface ExportFromSeedOptions {
   seed?: string;
+  passphrase?: string;
   accountNumber?: AccountNumberInput;
   network?: string;
   operatorSet?: string;
   appVersion?: string;
-  walletFactory?: WalletFactory;
+  /** Spark coordinator base URL; defaults to the public pool coordinator. */
+  coordinatorUrl?: string;
+  pageSize?: number;
   now?: () => Date;
-  encodeTreeNode?: EncodeTreeNode;
-  leafPollAttempts?: number;
-  leafPollDelayMs?: number;
-  cleanupWallet?: boolean;
+  /** Injection seam for tests; defaults to global fetch. */
+  fetchImpl?: FetchLike;
 }
 
 export async function exportRecoveryBundleFromSeed({
   seed,
+  passphrase = "",
   accountNumber,
   network = "MAINNET",
   operatorSet = DEFAULT_OPERATOR_SET,
   appVersion = "unknown",
-  walletFactory = defaultWalletFactory,
+  coordinatorUrl,
+  pageSize,
   now = () => new Date(),
-  encodeTreeNode = defaultEncodeTreeNode,
-  leafPollAttempts = 6,
-  leafPollDelayMs = 2_000,
-  cleanupWallet = true,
+  fetchImpl,
 }: ExportFromSeedOptions = {}): Promise<RecoveryBundle> {
   if (!isNonEmptyString(seed)) {
     throw new RecoveryBundleExportError("Spark seed or mnemonic is required");
   }
   const normalizedNetwork = normalizeNetwork(network);
-  const wallet = unwrapWallet(
-    await walletFactory({
-      seed,
-      accountNumber: normalizeAccountNumber(accountNumber),
-      network: normalizedNetwork,
-    }),
-  );
 
-  if (!wallet) {
-    throw new RecoveryBundleExportError("Spark wallet initialization returned no wallet");
-  }
-
-  try {
-    return await exportRecoveryBundleFromWallet({
-      wallet,
-      network: normalizedNetwork,
-      operatorSet,
-      appVersion,
-      now,
-      encodeTreeNode,
-      leafPollAttempts,
-      leafPollDelayMs,
-    });
-  } finally {
-    if (cleanupWallet) await wallet.cleanup?.();
-  }
-}
-
-interface ExportFromWalletOptions {
-  wallet: SparkWalletLike;
-  network?: string;
-  operatorSet?: string;
-  appVersion?: string;
-  now?: () => Date;
-  encodeTreeNode?: EncodeTreeNode;
-  leafPollAttempts?: number;
-  leafPollDelayMs?: number;
-}
-
-export async function exportRecoveryBundleFromWallet({
-  wallet,
-  network = "MAINNET",
-  operatorSet = DEFAULT_OPERATOR_SET,
-  appVersion = "unknown",
-  now = () => new Date(),
-  encodeTreeNode = defaultEncodeTreeNode,
-  leafPollAttempts = 1,
-  leafPollDelayMs = 0,
-}: ExportFromWalletOptions): Promise<RecoveryBundle> {
-  if (!wallet?.getLeaves) {
-    throw new RecoveryBundleExportError("A Spark wallet with getLeaves() is required");
-  }
-
-  const leaves = await pollLeaves({
-    wallet,
-    attempts: leafPollAttempts,
-    delayMs: leafPollDelayMs,
-  });
-  if (!Array.isArray(leaves) || leaves.length === 0) {
+  // The public pool coordinator serves every non-local network (the target
+  // network travels in each request), but a LOCAL stack is only reachable at
+  // its own address - falling through to the public pool would just produce
+  // a misleading no-leaves error.
+  if (normalizedNetwork === "LOCAL" && !isNonEmptyString(coordinatorUrl)) {
     throw new RecoveryBundleExportError(
-      "Spark wallet has no leaves to export for offline recovery",
+      "--coordinator is required for LOCAL networks (e.g. https://localhost:8535)",
     );
   }
 
-  const balance = await wallet.getBalance?.();
+  let leafSet;
+  try {
+    leafSet = await fetchOwnedLeafSet({
+      seed,
+      passphrase,
+      network: normalizedNetwork,
+      accountNumber: normalizeAccountNumber(accountNumber),
+      coordinatorUrl: coordinatorUrl ?? SPARK_COORDINATOR_URL,
+      pageSize,
+      fetchImpl,
+    });
+  } catch (error) {
+    if (error instanceof OperatorExportError) {
+      throw new RecoveryBundleExportError(error.message, error.reason);
+    }
+    throw error;
+  }
+
   const bundle = {
     schema: DEFAULT_SCHEMA,
     createdAt: now().toISOString(),
-    network: normalizeNetwork(network),
+    network: normalizedNetwork,
     operatorSet: isNonEmptyString(operatorSet) ? operatorSet : DEFAULT_OPERATOR_SET,
-    walletIdentityPublicKey: await wallet.getIdentityPublicKey?.(),
-    sparkSdkVersion: "unknown",
+    walletIdentityPublicKey: leafSet.identityPublicKeyHex,
+    sparkSdkVersion: "none (direct operator export)",
     appVersion,
-    leaves: leaves.map((leaf, index) =>
-      exportLeaf({ leaf, index, encodeTreeNode }),
-    ),
-    balances: exportBalances({ balance, leaves }),
+    leaves: leafSet.leaves.map(exportLeaf),
+    nodes: leafSet.nodes.map((node) => ({
+      id: node.id,
+      treeNodeHex: bytesToHex(node.raw),
+    })),
+    balances: {
+      btcSats: leafSet.totalSats.toString(),
+      usdb: {
+        amount: "unknown",
+        status: "not-covered-by-bitcoin-unilateral-exit",
+      },
+    },
   };
 
   return validateRecoveryBundle(bundle);
 }
 
-export async function pollLeaves({
-  wallet,
-  attempts,
-  delayMs,
-}: {
-  wallet: SparkWalletLike;
-  attempts: number;
-  delayMs: number;
-}): Promise<SparkLeaf[]> {
-  const maxAttempts = Math.max(1, Number(attempts) || 1);
-  let leaves: SparkLeaf[] = [];
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    await wallet.experimental_syncWallet?.();
-    leaves = await wallet.getLeaves();
-    if (Array.isArray(leaves) && leaves.length > 0) return leaves;
-    if (attempt < maxAttempts && delayMs > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-  return leaves;
-}
-
-interface SparkWalletModule {
-  SparkWallet: {
-    initialize(config: {
-      mnemonicOrSeed: string;
-      accountNumber: number | undefined;
-      options: {
-        network: string;
-        optimizationOptions?: { auto?: boolean; multiplicity?: number };
-      };
-    }): Promise<unknown>;
-  };
-}
-
-// SparkWallet.initialize resolves to { wallet, ... } while injected factories
-// and fakes may return the wallet directly; this is the single place that
-// assumption about the SDK's return shape lives.
-export function unwrapWallet(walletResponse: any): SparkWalletLike | undefined {
-  return (walletResponse?.wallet ?? walletResponse) || undefined;
-}
-
-export async function defaultWalletFactory({ seed, accountNumber, network }: WalletFactoryParams) {
-  const { SparkWallet } = (await import(
-    "@buildonspark/spark-sdk"
-  )) as unknown as SparkWalletModule;
-  return SparkWallet.initialize({
-    mnemonicOrSeed: seed,
-    accountNumber,
-    options: {
-      network,
-      // The SDK defaults to auto:true with multiplicity 1: after any sync or
-      // claim it may launch background SSP swaps on its own. That would race
-      // bundle exports with leaf churn and, right after a multiplicity-0
-      // consolidation, start re-fragmenting the leaf set toward the
-      // transfer-friendly ladder until cleanup() kills it mid-claim. This
-      // tool only ever swaps leaves explicitly, so keep the wallet passive.
-      optimizationOptions: { auto: false },
-    },
-  });
-}
-
-function exportLeaf({
-  leaf,
-  index,
-  encodeTreeNode,
-}: {
-  leaf: SparkLeaf;
-  index: number;
-  encodeTreeNode: EncodeTreeNode;
-}): BundleLeaf {
-  const id = leaf.id ?? leaf.nodeId ?? leaf.treeNodeId;
-  if (!isNonEmptyString(id)) {
-    throw new RecoveryBundleExportError(`Spark leaf ${index} is missing an id`);
-  }
-
-  const valueSats = normalizeLeafValue(leaf.value ?? leaf.valueSats);
+function exportLeaf(leaf: DecodedTreeNode) {
   return {
-    id,
-    status: leaf.status ? String(leaf.status) : undefined,
-    valueSats,
-    treeNodeHex: encodeTreeNode(leaf),
+    id: leaf.id,
+    status:
+      leaf.status ||
+      (leaf.treenodeStatus === TREE_NODE_STATUS_AVAILABLE
+        ? "AVAILABLE"
+        : String(leaf.treenodeStatus)),
+    valueSats: leafValueAsNumber(leaf),
+    treeNodeHex: bytesToHex(leaf.raw),
   };
 }
 
-function defaultEncodeTreeNode(leaf: SparkLeaf): string {
-  return bytesToHex(TreeNode.encode(leaf as unknown as TreeNode).finish());
-}
-
-function exportBalances({
-  balance,
-  leaves,
-}: {
-  balance: WalletBalance | undefined | null;
-  leaves: SparkLeaf[];
-}): BundleBalances {
-  return {
-    btcSats:
-      normalizeOptionalBalance(balance?.satsBalance?.owned) ??
-      normalizeOptionalBalance(balance?.balance) ??
-      leaves
-        .reduce(
-          (sum, leaf) => sum + BigInt(normalizeLeafValue(leaf.value ?? leaf.valueSats ?? 0n)),
-          0n,
-        )
-        .toString(),
-    usdb: {
-      amount: normalizeTokenBalances(balance?.tokenBalances),
-      status: "not-covered-by-bitcoin-unilateral-exit",
-    },
-  };
-}
-
-function normalizeTokenBalances(
-  tokenBalances: WalletTokenBalances | undefined,
-): string {
-  if (!tokenBalances || typeof tokenBalances.values !== "function") return "unknown";
-  let total = 0n;
-  for (const tokenBalance of tokenBalances.values()) {
-    total += BigInt(tokenBalance?.ownedBalance ?? 0n);
-  }
-  return total.toString();
-}
-
-function normalizeOptionalBalance(
-  value: bigint | number | string | null | undefined,
-): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  return BigInt(value).toString();
-}
-
-function normalizeLeafValue(value: bigint | number | string | undefined): number {
-  const normalized = BigInt(value ?? 0n);
-  if (normalized < 0n) {
-    throw new RecoveryBundleExportError("Spark leaf value cannot be negative");
-  }
-  const asNumber = Number(normalized);
-  if (!Number.isSafeInteger(asNumber)) {
+function leafValueAsNumber(leaf: DecodedTreeNode): number {
+  const value = Number(leaf.valueSats);
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw new RecoveryBundleExportError(
-      `Spark leaf value is too large for bundle valueSats: ${normalized}`,
+      `Spark leaf ${leaf.id} has an invalid value for bundle valueSats: ${leaf.valueSats}`,
     );
   }
-  return asNumber;
+  return value;
 }
 
-// undefined lets SparkWallet.initialize pick its network default (0 on
-// regtest, 1 on mainnet) - the same rule the Rust bundle tool follows, so all
-// commands land on the same wallet identity unless an account is given.
+// undefined lets the exporter pick the Spark default account for the network
+// (0 on regtest, 1 everywhere else including local) - the same rule the Spark
+// SDK follows, so all commands land on the same wallet identity unless an
+// account is given.
 export function normalizeAccountNumber(
   value: AccountNumberInput,
 ): number | undefined {

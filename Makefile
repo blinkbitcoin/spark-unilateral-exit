@@ -1,4 +1,3 @@
-NIX ?= nix develop --command
 NODE ?= node
 
 BUNDLE ?= ../recovery-bundle.json
@@ -11,6 +10,11 @@ NETWORK ?= mainnet
 ACCOUNT_NUMBER ?=
 OPERATOR_SET ?=
 APP_VERSION ?=
+# Spark coordinator base URL; required for LOCAL stacks, defaults to the
+# public pool coordinator elsewhere.
+COORDINATOR ?=
+PASSPHRASE ?=
+PAGE_SIZE ?=
 
 DESTINATION ?=
 FEE_RATE ?= 1
@@ -23,6 +27,7 @@ ESPLORA_ARGS ?= $(if $(ESPLORA_URL),--esplora-url $(ESPLORA_URL),)
 
 SEED_ARGS = $(if $(SEED_FILE),--seed-file $(SEED_FILE),)
 ACCOUNT_ARGS = $(if $(ACCOUNT_NUMBER),--account-number $(ACCOUNT_NUMBER),)
+COORDINATOR_ARGS = $(if $(COORDINATOR),--coordinator $(COORDINATOR),)
 
 REFRESH_ARGS = \
 	$(if $(SEED_FILE),--seed-file $(SEED_FILE),) \
@@ -30,7 +35,10 @@ REFRESH_ARGS = \
 	--out $(BUNDLE) \
 	$(if $(ACCOUNT_NUMBER),--account-number $(ACCOUNT_NUMBER),) \
 	$(if $(OPERATOR_SET),--operator-set $(OPERATOR_SET),) \
-	$(if $(APP_VERSION),--app-version $(APP_VERSION),)
+	$(if $(APP_VERSION),--app-version $(APP_VERSION),) \
+	$(COORDINATOR_ARGS) \
+	$(if $(PASSPHRASE),--passphrase $(PASSPHRASE),) \
+	$(if $(PAGE_SIZE),--page-size $(PAGE_SIZE),)
 
 MULTIPLICITY ?=
 DRY_RUN ?=
@@ -70,18 +78,9 @@ help:
 test-e2e:
 	@./scripts/run-e2e.sh
 
+# The CLI backs up any existing bundle itself (writeFileWithBackup).
 refresh-recovery-bundle:
-	@if [ -f "$(BUNDLE)" ]; then \
-		bundle="$(BUNDLE)"; \
-		timestamp="$$(date -u +%Y%m%dT%H%M%SZ)"; \
-		case "$$bundle" in \
-			*.json) backup="$${bundle%.json}.$$timestamp.backup.json" ;; \
-			*) backup="$$bundle.$$timestamp.backup.json" ;; \
-		esac; \
-		cp -p "$$bundle" "$$backup"; \
-		echo "Saved existing bundle to $$backup"; \
-	fi
-	@$(NIX) cargo run --manifest-path tools/spark-recovery-bundle/Cargo.toml -- $(REFRESH_ARGS)
+	@$(NODE) src/cli.ts refresh-bundle $(REFRESH_ARGS)
 
 # Cooperative leaf consolidation (not an exit): swaps small leaves with the
 # SSP into the unilateral-exit-optimal denomination set so fewer leaves are
@@ -157,6 +156,7 @@ recover: require-seed-file
 		--fee-rate $(FEE_RATE) \
 		$(ACCOUNT_ARGS) \
 		$(ESPLORA_ARGS) \
+		$(COORDINATOR_ARGS) \
 		$(if $(INCLUDE_UNECONOMICAL),--include-uneconomical,) \
 		$(if $(MIN_NET_SATS),--min-net-sats $(MIN_NET_SATS),) \
 		$(if $(FAN_OUT),--fan-out,) \

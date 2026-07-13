@@ -75,7 +75,7 @@ Mapping to the CLI/adapter phases in the
 
 | Screen | Adapter/CLI phase |
 | --- | --- |
-| A2 Recovery Backup | `refresh-bundle` (Rust exporter path for Blink) |
+| A2 Recovery Backup | `refresh-bundle` (direct operator export, shared with the app) |
 | B2 Backup Check | bundle decrypt + validate + `plan` (dry) |
 | B3 Destination | destination validation |
 | B4 Fee Selection | fee-rate input, `cpfp-address` `requiredSats` estimate |

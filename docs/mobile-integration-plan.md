@@ -288,10 +288,12 @@ recoverable. See the open questions in
 Blink mobile's self-custodial mode uses the Breez Spark SDK
 (`@breeztech/breez-sdk-spark-react-native`), which does not expose leaves
 through the upstream `@buildonspark/spark-sdk` wallet API. Bundle export for
-Blink therefore follows the Rust exporter path (`tools/spark-recovery-bundle`,
-built against `vendor/breez-spark-sdk`); the open integration question is
-whether that exporter logic ships as a Breez SDK API, a mobile binding of this
-repo's tooling, or a Blink-owned native module.
+Blink therefore talks to the Spark operators directly: a dependency-light
+TypeScript client (seed-derived identity auth + `query_nodes` over gRPC-web)
+that lives in this repo under `src/operator/` and ships inside the Blink app
+(`app/self-custodial/recovery-bundle/`). Both produce the same
+`spark.unilateral-exit-bundle.v1` documents, so app-saved bundles feed this
+tooling directly.
 
 Integration anchors that already exist in the app:
 

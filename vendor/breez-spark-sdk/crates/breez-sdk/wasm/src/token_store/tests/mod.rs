@@ -1,2 +1,0 @@
-mod mysql;
-mod postgres;

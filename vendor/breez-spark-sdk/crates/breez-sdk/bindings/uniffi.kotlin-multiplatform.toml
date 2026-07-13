@@ -1,7 +1,0 @@
-# Kotlin Multi Platform https://gobley.dev/docs/bindgen#bindgen-configuration
-package_name = "breez_sdk_spark.bindings"
-cdylib_name = "breez_sdk_spark_bindings"
-kotlin_multiplatform = true
-kotlin_targets = ["jvm", "android", "native"]
-kotlin_target_version = "1.9.21"
-disable_java_cleaner = true

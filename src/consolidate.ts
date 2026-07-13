@@ -12,13 +12,8 @@
 // math) so the effect can be inspected with --dry-run, and executes it by
 // draining the SDK generator round by round until the leaf set converges.
 
-import {
-  defaultWalletFactory,
-  normalizeAccountNumber,
-  normalizeNetwork,
-  pollLeaves,
-  unwrapWallet,
-} from "./recovery-bundle.ts";
+import { normalizeAccountNumber, normalizeNetwork } from "./recovery-bundle.ts";
+import { defaultWalletFactory, pollLeaves, unwrapWallet } from "./spark-wallet.ts";
 import type {
   AccountNumberInput,
   SparkLeaf,
