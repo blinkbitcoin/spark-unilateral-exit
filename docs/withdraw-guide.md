@@ -62,7 +62,7 @@ The bundle should contain:
 - Balance metadata as seen when the bundle was saved.
 - Asset metadata for Bitcoin and USDB/Dollar balance state.
 
-The bundle is sensitive even without private keys because it reveals wallet graph metadata. Mobile must encrypt it client-side before writing it to Files, Google Drive, iCloud, or any backend storage.
+The bundle is sensitive even without private keys because it reveals wallet graph metadata. Mobile must encrypt it client-side before writing it to Files, Google Drive, iCloud, or any backend storage. The one exception is an explicit, user-initiated export (share sheet, copy to clipboard): that plaintext hand-off is exactly what this tooling consumes, and the app must warn the user that the exported file reveals balance and payment structure and should be kept private.
 
 ## Keeping the bundle fresh
 
@@ -81,7 +81,7 @@ Operational notes:
 
 - Prefer `--seed-file` (mode `0600`) or the hidden prompt; avoid passing real seeds via `--seed` (captured in shell history and `ps`). `SPARK_SEED` is acceptable but is visible to other processes via `ps e`/`/proc`.
 - `--operator-set` and `--app-version` are optional provenance metadata stored in the bundle.
-- The command initializes the Spark wallet from the seed, forces a wallet sync when the SDK exposes that API, queries `getLeaves()`, serializes each `TreeNode`, and writes a bundle matching this repo's recovery schema.
+- The command derives the wallet identity key from the seed and exports the bundle directly from the Spark operators (no SDK wallet involved - see "How the exporter works" below), serializing each `TreeNode` exactly as the operators sent it and writing a bundle matching this repo's recovery schema.
 - The command fails if no leaves are present. An empty bundle cannot recover funds offline.
 - Mobile should encrypt the bundle before uploading it to Google Drive, iCloud, or a local user-selected file location.
 - Refresh cadence should be event-driven plus periodic. Event-driven refresh captures state changes immediately; a periodic refresh handles missed app lifecycle events.
