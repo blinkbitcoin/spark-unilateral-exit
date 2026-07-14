@@ -180,7 +180,7 @@ and separately storing a keypair — means there is no extra key to back up: the
 same seed that owns the wallet reproduces the funding key on demand. It never
 collides with Spark's own keys or a standard BIP44/49/84/86 wallet on the seed.
 The `cpfp-address`, `watch-cpfp`, and `sign-packages` commands all use this
-derivation (see `deriveCpfpFundingKey` in `src/cpfp-funding.js`).
+derivation (see `deriveCpfpFundingKey` in `src/cpfp-funding.ts`).
 
 Recovery flow:
 
@@ -192,7 +192,7 @@ Recovery flow:
    funded UTXO confirms, constructs all exit packages using the recovery bundle
    and that UTXO.
 4. App signs all CPFP PSBTs in-process using `signPackages()` from
-   `src/sign.js`, re-deriving the funding key from the seed — no external
+   `src/sign.ts`, re-deriving the funding key from the seed — no external
    wallet, key file, or Bitcoin Core node needed.
 5. App broadcasts signed packages sequentially via Esplora
    (`POST /txs/package`).
