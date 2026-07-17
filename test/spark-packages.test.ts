@@ -119,10 +119,12 @@ describe("reattachPendingRefunds", () => {
     expect(refundForLeaf).not.toHaveBeenCalled();
   });
 
-  it("does nothing when there is no funding UTXO to fee-bump the refund", async () => {
+  it("throws when a pending refund has no funding UTXO (empty would read as complete)", async () => {
     const packages: LeafPackage[] = [{ leafId: "L1", txPackages: [] }];
-    await reattachPendingRefunds(packages, bundle, [], 5, "REGTEST", baseDeps());
-    expect(packages[0]!.txPackages).toEqual([]);
+    await expect(
+      reattachPendingRefunds(packages, bundle, [], 5, "REGTEST", baseDeps()),
+    ).rejects.toThrow(/no funding UTXO left for 1 pending refund.*L1/);
+    expect(packages[0]!.txPackages).toEqual([]); // not falsely funded
   });
 
   const twoLeafBundle = {
@@ -153,13 +155,15 @@ describe("reattachPendingRefunds", () => {
     expect(packages[1]!.txPackages).toHaveLength(1);
   });
 
-  it("leaves later refunds unattached when the funding UTXOs run out", async () => {
+  it("funds what it can, then throws naming the leaves left unfunded when UTXOs run out", async () => {
     const packages: LeafPackage[] = [
       { leafId: "L1", txPackages: [] },
       { leafId: "L2", txPackages: [] },
     ];
-    await reattachPendingRefunds(packages, twoLeafBundle, [CPFP_UTXO], 5, "REGTEST", baseDeps());
-    expect(packages[0]!.txPackages).toHaveLength(1); // first funded
+    await expect(
+      reattachPendingRefunds(packages, twoLeafBundle, [CPFP_UTXO], 5, "REGTEST", baseDeps()),
+    ).rejects.toThrow(/no funding UTXO left for 1 pending refund.*L2/);
+    expect(packages[0]!.txPackages).toHaveLength(1); // first still funded before the throw
     expect(packages[1]!.txPackages).toEqual([]); // no UTXO left, not falsely funded
   });
 
