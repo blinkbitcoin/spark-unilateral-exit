@@ -131,6 +131,9 @@ interface EstimateCpfpFundingOptions {
   minNetSats?: bigint | number | string;
   includeUneconomical?: boolean;
   sparkClient?: unknown;
+  // Injectable for tests (mirrors auto-exit's seams); defaults to the real
+  // SDK-backed package builder.
+  constructPackages?: typeof constructSparkPackages;
 }
 
 export async function estimateCpfpFunding({
@@ -142,18 +145,30 @@ export async function estimateCpfpFunding({
   minNetSats = 0n,
   includeUneconomical = false,
   sparkClient,
+  constructPackages = constructSparkPackages,
 }: EstimateCpfpFundingOptions) {
   const normalizedFeeRate = validateFeeRate(feeRate);
-  const placeholderUtxo: CpfpUtxo = {
-    txid: PLACEHOLDER_TXID,
-    vout: 0,
-    value: PLACEHOLDER_VALUE_SATS,
-    script: fundingScript,
-    publicKey: fundingPublicKey,
-  };
-  const packages = await constructSparkPackages({
+  // One placeholder per leaf, not one total: on a resumed recovery every
+  // fully-broadcast leaf's pending refund needs its own funding UTXO
+  // (reattachPendingRefunds never shares one and throws when it runs out), so
+  // a single placeholder would abort estimation whenever two or more refunds
+  // are pending, and before the throw existed it silently under-counted the
+  // refund fee bumps. Extra placeholders cannot skew the estimate: fee bumps
+  // select UTXOs largest-value-first and stop once the fee is covered, so
+  // every fee bump spends exactly one placeholder-sized input either way.
+  const placeholderUtxos: CpfpUtxo[] = Array.from(
+    { length: Math.max(1, bundle.leaves?.length ?? 0) },
+    (_, index) => ({
+      txid: PLACEHOLDER_TXID,
+      vout: index,
+      value: PLACEHOLDER_VALUE_SATS,
+      script: fundingScript,
+      publicKey: fundingPublicKey,
+    }),
+  );
+  const packages = await constructPackages({
     bundle,
-    cpfpUtxos: [placeholderUtxo],
+    cpfpUtxos: placeholderUtxos,
     feeRate: normalizedFeeRate,
     sparkClient,
   });

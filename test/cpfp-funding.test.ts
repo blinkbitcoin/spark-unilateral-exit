@@ -1,12 +1,18 @@
 import { describe, it, expect } from "vitest";
 
+import { bytesToHex, hexToBytes } from "@noble/curves/utils";
+import { Transaction } from "@scure/btc-signer";
+
 import {
   createFundingWatchLogger,
   deriveCpfpFundingKey,
+  estimateCpfpFunding,
   pickFundingUtxo,
   watchCpfpFunding,
   CpfpFundingError,
 } from "../src/cpfp-funding.ts";
+import { reattachPendingRefunds } from "../src/spark-packages.ts";
+import type { CpfpUtxo, LeafPackage, RecoveryBundle } from "../src/types.ts";
 
 const SEED =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -224,5 +230,74 @@ describe("watchCpfpFunding", () => {
         sleep: async () => {},
       }),
     ).rejects.toThrow(/script and publicKey/);
+  });
+});
+
+// The estimate builds packages from placeholder UTXOs. On a resumed recovery with
+// two or more fully-broadcast leaves, reattachPendingRefunds needs one UTXO per
+// pending refund, so a single placeholder would make the estimate throw (and,
+// before the throw existed, silently under-count the pending-refund fee bumps).
+// This pins the fix: one placeholder per leaf, every pending refund counted.
+describe("estimateCpfpFunding", () => {
+  const FUNDING_SCRIPT = `0014${"11".repeat(20)}`;
+  const FUNDING_PUBKEY = `02${"22".repeat(32)}`;
+  const bundle = {
+    network: "REGTEST",
+    leaves: [
+      { id: "L1", treeNodeHex: "aa" },
+      { id: "L2", treeNodeHex: "bb" },
+    ],
+  } as unknown as RecoveryBundle;
+
+  // A minimal v3 fee-bump PSBT whose input minus output equals feeSats, so the
+  // estimate's PSBT fee reader sees a known per-refund fee.
+  function refundFeeBumpPsbtHex(feeSats: bigint): string {
+    const tx = new Transaction({ version: 3 });
+    tx.addInput({
+      txid: hexToBytes("cc".repeat(32)),
+      index: 0,
+      witnessUtxo: { script: hexToBytes(FUNDING_SCRIPT), amount: 10_000n },
+    });
+    tx.addOutput({ script: hexToBytes(FUNDING_SCRIPT), amount: 10_000n - feeSats });
+    return bytesToHex(tx.toPSBT());
+  }
+
+  it("counts both fee bumps and does not throw with 2 pending refunds", async () => {
+    const received: CpfpUtxo[][] = [];
+    const result = await estimateCpfpFunding({
+      bundle,
+      feeRate: 5,
+      fundingScript: FUNDING_SCRIPT,
+      fundingPublicKey: FUNDING_PUBKEY,
+      bufferSats: 0n,
+      // Stub only the SDK package builder, then run the REAL
+      // reattachPendingRefunds over its output: the estimate's placeholder
+      // count is held to the same one-UTXO-per-pending-refund contract
+      // production enforces, so a regression to a single placeholder throws
+      // here exactly as it would in cpfp-address or auto-exit startup.
+      constructPackages: async ({ cpfpUtxos, feeRate }) => {
+        received.push(cpfpUtxos);
+        const packages: LeafPackage[] = [
+          { leafId: "L1", txPackages: [] },
+          { leafId: "L2", txPackages: [] },
+        ];
+        await reattachPendingRefunds(packages, bundle, cpfpUtxos, feeRate, "REGTEST", {
+          isTxBroadcast: async () => false,
+          buildRefundFeeBump: () => refundFeeBumpPsbtHex(1_000n),
+          refundForLeaf: () => ({ txHex: "refundhex", completedTxids: ["tid"] }),
+        });
+        return packages;
+      },
+    });
+    // One placeholder per leaf: same synthetic txid, distinct vouts.
+    expect(received[0]).toHaveLength(2);
+    expect(received[0]!.map((u) => u.vout)).toEqual([0, 1]);
+    expect(new Set(received[0]!.map((u) => u.txid)).size).toBe(1);
+    expect(received[0]!.every((u) => u.script === FUNDING_SCRIPT)).toBe(true);
+    // Both pending refunds' fee bumps are in the estimate.
+    expect(result.feeBumpTxCount).toBe(2);
+    expect(result.totalFeeSats).toBe("2000");
+    expect(result.requiredSats).toBe("2000");
+    expect(result.perLeaf.map((l) => l.feeBumpTxCount)).toEqual([1, 1]);
   });
 });

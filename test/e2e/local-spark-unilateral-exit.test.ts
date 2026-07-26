@@ -352,7 +352,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       // round: the round-1 UTXO is consumed by broadcasting the exit chain, so the
       // resumed round-2 re-attach needs a new one. The local stack has no Esplora,
       // so a per-call mock serves the real funding UTXO to watch-cpfp.
-      const fundCpfpUtxo = async (roundLabel: string): Promise<string> => {
+      const fundCpfpUtxo = async (): Promise<string> => {
         const { stdout: cpfpAddressOut } = await runCli([
           "cpfp-address",
           "--bundle", bundlePath,
@@ -408,7 +408,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       // Round 1: build + sign the full exit (exit-chain node steps + the
       // CSV-timelocked refund as the last txPackage).
       step("round 1: fund CPFP + build/sign the full exit");
-      const cpfpUtxoStr = await fundCpfpUtxo("round1");
+      const cpfpUtxoStr = await fundCpfpUtxo();
       const packagesPath = path.join(tempDir, "packages.json");
       const { stdout: packageOut } = await runCli([
         "package",
@@ -465,7 +465,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       // Branch B: with a fresh UTXO, the resumed run re-attaches the SAME
       // CSV-timelocked refund (the exit-chain nodes are on chain and skipped).
       step("round 2: fresh CPFP utxo -> resumed package re-attaches the refund");
-      const cpfpUtxoStr2 = await fundCpfpUtxo("round2");
+      const cpfpUtxoStr2 = await fundCpfpUtxo();
       const packages2Path = path.join(tempDir, "packages-resumed.json");
       const { stdout: package2Out } = await runCli([
         "package",
