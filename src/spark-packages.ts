@@ -264,6 +264,36 @@ function refundVariant(txHex: string): { txid: string; txHex: string } {
   return { txid: refundTxidFromHex(txHex), txHex };
 }
 
+// The operator's alternative to the CPFP exit route for a leaf: directTx spends
+// the same parent output as the leaf's nodeTx, and directRefundTx claims
+// directTx's output after a CSV delay, with the mining fee baked into the
+// transaction instead of paid by a P2A anchor child.
+export interface DirectPathTxs {
+  directTxid: string;
+  directRefundTxHex: string;
+  directRefundTxid: string;
+}
+
+// A TreeNode carries the direct route next to the CPFP one. The operator
+// chainwatcher broadcasts it when it completes an exit on its own, which
+// permanently invalidates the bundle's CPFP chain (both routes spend the same
+// output). Expose the route so auto-exit can recognize a lost broadcast race
+// and pivot to tracking the direct refund instead of resubmitting a dead
+// package forever.
+export function decodeDirectPathFromTreeNode(
+  treeNodeHex: string,
+): DirectPathTxs | null {
+  const node = TreeNode.decode(hexToBytes(treeNodeHex));
+  if (!node.directTx || node.directTx.length === 0) return null;
+  if (!node.directRefundTx || node.directRefundTx.length === 0) return null;
+  const directRefundTxHex = bytesToHex(node.directRefundTx);
+  return {
+    directTxid: refundTxidFromHex(bytesToHex(node.directTx)),
+    directRefundTxHex,
+    directRefundTxid: refundTxidFromHex(directRefundTxHex),
+  };
+}
+
 // Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser
 // must allow unknown outputs/inputs (mirrors auto-exit.ts parseTransaction).
 function refundTxidFromHex(txHex: string): string {

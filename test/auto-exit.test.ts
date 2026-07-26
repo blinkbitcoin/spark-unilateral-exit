@@ -409,3 +409,206 @@ describe("autoExit", () => {
     expect(submitted).toEqual(["tx-A1", "tx-A2", "tx-R1", "tx-B1", "tx-R2"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Direct-path race: the operator chainwatcher can complete a leaf's exit with
+// the TreeNode's self-fee-paying direct transactions, which spend the same
+// output as the bundle's CPFP node txs. Once that happens the CPFP chain is
+// permanently invalid and every package submission fails
+// bad-txns-inputs-missingorspent. These tests pin the pivot: recognize the
+// spend, track the direct refund, and never loop on the dead package.
+//
+// Scenario: L1's head tx-A1 spends parent-A0:0, which the operator's tx-D1
+// (confirmed at height 100) already took; tx-DR1 is the direct refund,
+// CSV 550 after tx-D1, so it matures at height 650.
+// ---------------------------------------------------------------------------
+
+describe("autoExit direct-path race", () => {
+  function makeRaceFakes({
+    tip = 150,
+    spender = "tx-D1",
+    directRefundOnChain = false,
+  }: { tip?: number; spender?: string; directRefundOnChain?: boolean } = {}) {
+    const { deps, submitted, confirmed } = makeFakes();
+    const broadcasts: string[] = [];
+    confirmed.set("tx-D1", 100);
+    if (directRefundOnChain) confirmed.set("tx-DR1", 120);
+    const raceDeps: Partial<AutoExitDeps> = {
+      ...deps,
+      submitPkg: async (txs) => {
+        const parent = txs[0]!;
+        if (parent.startsWith("tx-A")) {
+          throw new Error(
+            'Package rejected by the node ("transaction failed": tx-A1: bad-txns-inputs-missingorspent)',
+          );
+        }
+        submitted.push(parent);
+        confirmed.set(parent, 100);
+        return { package_msg: "success" };
+      },
+      broadcastTx: async (txHex) => {
+        broadcasts.push(txHex);
+        confirmed.set(txHex, 130);
+        return txHex;
+      },
+      fetchTip: async () => tip,
+      fetchOutspend: async (txid, vout) =>
+        txid === "parent-A0" && vout === 0
+          ? {
+              spent: true,
+              txid: spender,
+              status: { confirmed: true, block_height: 100 },
+            }
+          : null,
+      inputOutpointOf: (txHex) =>
+        txHex === "tx-A1" ? { txidCandidates: ["parent-A0"], vout: 0 } : null,
+      directPathOf: (treeNodeHex) =>
+        treeNodeHex === "aa"
+          ? {
+              directTxid: "tx-D1",
+              directRefundTxHex: "tx-DR1",
+              directRefundTxid: "tx-DR1",
+            }
+          : null,
+      heightLockOf: (txHex) =>
+        txHex === "tx-DR1"
+          ? { blocks: 550, prevTxidCandidates: ["tx-D1"] }
+          : deps.heightLockOf!(txHex),
+    };
+    return { deps: raceDeps, submitted, broadcasts, confirmed };
+  }
+
+  it("pivots to the timelocked direct refund instead of looping on the dead package", async () => {
+    const { deps, submitted, broadcasts } = makeRaceFakes();
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps,
+    });
+
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")).toMatchObject({
+      status: "waiting-timelock",
+      maturityHeight: 650,
+      refundTxid: "tx-DR1",
+    });
+    // The dead CPFP chain was never submitted; the untouched leaf proceeded.
+    expect(submitted).toEqual(["tx-B1"]);
+    expect(broadcasts).toHaveLength(0);
+    // The sweep-compatible packages file points at the direct refund.
+    expect(
+      result.packages.find((p) => p.leafId === "L1")?.txPackages?.[0]?.tx,
+    ).toBe("tx-DR1");
+    expect(result.earliestMaturityHeight).toBe(650);
+  });
+
+  it("broadcasts the mature direct refund plainly (self-paying, no package)", async () => {
+    const { deps, broadcasts } = makeRaceFakes({ tip: 2_200 });
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps,
+    });
+
+    expect(broadcasts).toEqual(["tx-DR1"]);
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")).toMatchObject({
+      status: "exit-broadcast",
+      refundTxid: "tx-DR1",
+    });
+    expect(byId.get("L2")?.status).toBe("exit-broadcast");
+  });
+
+  it("reports completion when the direct refund is already on chain", async () => {
+    const { deps, broadcasts } = makeRaceFakes({ directRefundOnChain: true });
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps,
+    });
+
+    expect(broadcasts).toHaveLength(0);
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")).toMatchObject({
+      status: "exit-broadcast",
+      refundTxid: "tx-DR1",
+    });
+  });
+
+  it("fails the leaf loudly when the node input was spent by an unknown transaction", async () => {
+    const { deps, broadcasts } = makeRaceFakes({ spender: "tx-EVIL" });
+    const events: string[] = [];
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps,
+      onEvent: (m) => events.push(m),
+    });
+
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")?.status).toBe("failed");
+    expect(byId.get("L1")?.lastError).toContain("tx-EVIL");
+    expect(events.some((e) => e.includes("tx-EVIL"))).toBe(true);
+    expect(broadcasts).toHaveLength(0);
+    // The unaffected leaf still completes.
+    expect(byId.get("L2")?.status).toBe("waiting-timelock");
+  });
+
+  it("still defers an ordinary unconfirmed-dependency rejection", async () => {
+    const { deps, submitted, confirmed } = makeFakes();
+    let failures = 1;
+    const raceDeps: Partial<AutoExitDeps> = {
+      ...deps,
+      submitPkg: async (txs) => {
+        const parent = txs[0]!;
+        if (parent === "tx-A1" && failures > 0) {
+          failures -= 1;
+          throw new Error(
+            'Package rejected by the node ("transaction failed": tx-A1: bad-txns-inputs-missingorspent)',
+          );
+        }
+        submitted.push(parent);
+        confirmed.set(parent, 100);
+        return { package_msg: "success" };
+      },
+      // The outpoint exists but is unspent: the parent is just not confirmed
+      // yet, so the leaf must defer and retry, not pivot or fail.
+      fetchOutspend: async () => ({ spent: false }),
+      inputOutpointOf: (txHex) =>
+        txHex === "tx-A1" ? { txidCandidates: ["parent-A0"], vout: 0 } : null,
+      directPathOf: (treeNodeHex) =>
+        treeNodeHex === "aa"
+          ? {
+              directTxid: "tx-D1",
+              directRefundTxHex: "tx-DR1",
+              directRefundTxid: "tx-DR1",
+            }
+          : null,
+    };
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: raceDeps,
+    });
+
+    // The retry after the transient rejection sticks and the chain drains.
+    expect(submitted).toEqual(["tx-A1", "tx-A2", "tx-B1"]);
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")?.status).toBe("waiting-timelock");
+  });
+});

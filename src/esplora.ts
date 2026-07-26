@@ -1,4 +1,8 @@
-import type { EsploraTransaction, EsploraUtxo } from "./types.ts";
+import type {
+  EsploraOutspend,
+  EsploraTransaction,
+  EsploraUtxo,
+} from "./types.ts";
 
 const DEFAULT_URLS = new Map<string, string>([
   ["MAINNET", "https://blockstream.info/api"],
@@ -92,6 +96,27 @@ export async function getTransaction(
     );
   }
   return response.json() as Promise<EsploraTransaction>;
+}
+
+// Reports what spent txid:vout, if anything. Returns null when the endpoint
+// does not know the transaction at all, which also lets callers that hold a
+// txid of ambiguous byte order try both and keep the one that resolves.
+export async function getOutspend(
+  txid: string,
+  vout: number,
+  baseUrl: string,
+): Promise<EsploraOutspend | null> {
+  const url = `${baseUrl}/tx/${txid}/outspend/${vout}`;
+  const response = await fetchWithTimeout(url, { method: "GET" });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const body = await safeText(response);
+    throw new EsploraError(
+      `Failed to fetch outspend (HTTP ${response.status}): ${body}`,
+      { status: response.status, body, url },
+    );
+  }
+  return response.json() as Promise<EsploraOutspend>;
 }
 
 export async function getAddressUtxos(

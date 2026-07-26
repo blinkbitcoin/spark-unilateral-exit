@@ -4,8 +4,10 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { p2tr, Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
+import { deriveCpfpFundingKey } from "../src/cpfp-funding.ts";
 import {
   constructSparkPackages,
+  decodeDirectPathFromTreeNode,
   decodeRefundFromTreeNode,
   reattachPendingRefunds,
   type RefundReattachDeps,
@@ -261,3 +263,59 @@ function testTransaction(amount: bigint): Transaction {
   tx.finalize();
   return tx;
 }
+
+// The direct path is the operator chainwatcher's self-fee-paying exit route,
+// embedded in the TreeNode next to the CPFP transactions. auto-exit uses this
+// decode to recognize when the operator won the broadcast race.
+describe("decodeDirectPathFromTreeNode", () => {
+  const KEY = deriveCpfpFundingKey({
+    seed: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    network: "REGTEST",
+    accountNumber: 0,
+  });
+
+  function buildTx(prevTxid: string, sequence?: number) {
+    const tx = new Transaction();
+    tx.addInput({
+      txid: prevTxid,
+      index: 0,
+      ...(sequence !== undefined ? { sequence } : {}),
+      witnessUtxo: { script: hexToBytes(KEY.script), amount: 50_000n },
+    });
+    tx.addOutput({ script: hexToBytes(KEY.script), amount: 49_000n });
+    tx.sign(KEY.privateKey);
+    tx.finalize();
+    return { bytes: hexToBytes(tx.hex), hex: tx.hex, id: tx.id };
+  }
+
+  const encodeNode = (partial: Parameters<typeof TreeNode.fromPartial>[0]) =>
+    bytesToHex(TreeNode.encode(TreeNode.fromPartial(partial)).finish());
+
+  it("returns the direct txid and the direct refund tx from a TreeNode", () => {
+    const directTx = buildTx("ab".repeat(32));
+    const directRefundTx = buildTx("cd".repeat(32), 550);
+    const treeNodeHex = encodeNode({
+      id: "L1",
+      directTx: directTx.bytes,
+      directRefundTx: directRefundTx.bytes,
+    });
+
+    const decoded = decodeDirectPathFromTreeNode(treeNodeHex);
+    expect(decoded).toEqual({
+      directTxid: directTx.id,
+      directRefundTxHex: directRefundTx.hex,
+      directRefundTxid: directRefundTx.id,
+    });
+  });
+
+  it("returns null when the TreeNode carries no direct path", () => {
+    const nodeOnly = encodeNode({ id: "L1", nodeTx: buildTx("ab".repeat(32)).bytes });
+    expect(decodeDirectPathFromTreeNode(nodeOnly)).toBeNull();
+
+    const missingRefund = encodeNode({
+      id: "L1",
+      directTx: buildTx("ab".repeat(32)).bytes,
+    });
+    expect(decodeDirectPathFromTreeNode(missingRefund)).toBeNull();
+  });
+});
