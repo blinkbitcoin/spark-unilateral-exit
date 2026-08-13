@@ -280,6 +280,492 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
       await wallet.cleanup?.();
     }
   });
+
+  // Resumability regression for the fix on PR #12: once a leaf's exit chain is
+  // broadcast, the SDK's package builder returns an EMPTY package for that leaf
+  // (its node tx is on chain, so it is skipped, and the refund is only emitted
+  // alongside the node step). reattachPendingRefunds re-attaches the still-pending
+  // CSV-timelocked refund on the resumed run. This exercises both branches of the
+  // review-followup change end to end against the live stack:
+  //   A) with no funding UTXO left, `package` must THROW rather than emit a
+  //      falsely-complete (empty) package that reads as "exit done";
+  //   B) with a fresh UTXO, the refund is re-attached and is genuinely spendable
+  //      (broadcast + sweep to the destination).
+  // In LOCAL mode the SDK's isTxBroadcast asks regtest bitcoind directly (via the
+  // faucet), so broadcasting only the exit chain is enough to drive the resumed
+  // state — no Esplora needed for the on-chain check.
+  it("resumed run re-attaches the timelocked refund, and refuses to emit a falsely-complete package with no CPFP UTXO", async () => {
+    const startedAt = Date.now();
+    let lastStepAt = startedAt;
+    const step = (label: string) => {
+      const now = Date.now();
+      const total = ((now - startedAt) / 1000).toFixed(1);
+      const delta = ((now - lastStepAt) / 1000).toFixed(1);
+      lastStepAt = now;
+      console.error(`[e2e-resume +${total}s Δ${delta}s] ${label}`);
+    };
+
+    const faucet = BitcoinFaucet.getInstance();
+    const { Signer } = signerTypes[0]!;
+    step("initializing Spark wallet");
+    const { wallet, mnemonic } = await retry(
+      () =>
+        SparkWalletTesting.initialize({
+          accountNumber: 1,
+          options: { network: "LOCAL" },
+          signer: new Signer(),
+        }),
+      "initialize Spark wallet",
+    );
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-e2e-resume-"));
+
+    try {
+      step("claiming Spark deposit leaf");
+      const leaf = await retry(
+        () => claimSingleDeposit(wallet, faucet, 100_000n),
+        "claim Spark deposit leaf",
+        20,
+      );
+      const seedFile = path.join(tempDir, "seed.txt");
+      await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
+
+      step("refresh-bundle (direct operator export)");
+      const bundlePath = path.join(tempDir, "bundle.json");
+      await exportBundleWithCli(mnemonic!, tempDir, bundlePath);
+      const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
+      assertBundleContainsLeaf(recoveryBundle, leaf, { requireBundledNodes: true });
+
+      // The exporter writes network REGTEST, which routes the SDK's on-chain check
+      // (isTxBroadcast, used by the package builder to skip already-broadcast nodes)
+      // to a public regtest Esplora that cannot see our local stack's transactions.
+      // Point the bundle at LOCAL so that check queries the local regtest bitcoind
+      // (via the faucet) and actually detects the broadcast exit chain — the
+      // precondition for reattachPendingRefunds to engage on the resumed run. The
+      // happy-path test never needs this because nothing is on chain during its
+      // single package build.
+      const localBundle = JSON.parse(await fs.readFile(bundlePath, "utf8"));
+      localBundle.network = "LOCAL";
+      await fs.writeFile(bundlePath, JSON.stringify(localBundle));
+
+      // Derive + fund + watch a fresh seed-derived CPFP UTXO. Called once per
+      // round: the round-1 UTXO is consumed by broadcasting the exit chain, so the
+      // resumed round-2 re-attach needs a new one. The local stack has no Esplora,
+      // so a per-call mock serves the real funding UTXO to watch-cpfp.
+      const fundCpfpUtxo = async (): Promise<string> => {
+        const { stdout: cpfpAddressOut } = await runCli([
+          "cpfp-address",
+          "--bundle", bundlePath,
+          "--seed-file", seedFile,
+          "--network", "LOCAL",
+          "--account-number", "1",
+          "--fee-rate", "5",
+        ]);
+        const cpfpInfo = JSON.parse(cpfpAddressOut);
+        expect(cpfpInfo.cpfpAddress).toMatch(/^bcrt1q/);
+        const requiredSats = BigInt(cpfpInfo.requiredSats);
+        expect(requiredSats).toBeGreaterThan(0n);
+
+        const fundingTx = await faucet.sendToAddress(cpfpInfo.cpfpAddress, requiredSats);
+        await faucet.mineBlocksAndWaitForMiningToComplete(6);
+        const fundingVout = findOutputIndex(
+          fundingTx,
+          hexToBytes(cpfpInfo.script),
+          requiredSats,
+        );
+        const esplora = await startMockEsplora({
+          utxo: {
+            txid: fundingTx.id,
+            vout: fundingVout,
+            value: Number(requiredSats),
+            status: { confirmed: true, block_height: 1 },
+          },
+          tipHeight: 1,
+        });
+        try {
+          const { stdout: watchOut } = await runCli([
+            "watch-cpfp",
+            "--seed-file", seedFile,
+            "--network", "LOCAL",
+            "--account-number", "1",
+            "--min-sats", requiredSats.toString(),
+            "--min-confirmations", "1",
+            "--poll-interval", "1",
+            "--timeout", "30",
+            "--esplora-url", esplora.url,
+          ]);
+          const watched = JSON.parse(watchOut);
+          expect(watched.txid).toBe(fundingTx.id);
+          expect(watched.cpfpUtxo).toContain(cpfpInfo.script);
+          return watched.cpfpUtxo as string;
+        } finally {
+          await esplora.close();
+        }
+      };
+
+      const destination = await faucet.getNewAddress();
+
+      // Round 1: build + sign the full exit (exit-chain node steps + the
+      // CSV-timelocked refund as the last txPackage).
+      step("round 1: fund CPFP + build/sign the full exit");
+      const cpfpUtxoStr = await fundCpfpUtxo();
+      const packagesPath = path.join(tempDir, "packages.json");
+      const { stdout: packageOut } = await runCli([
+        "package",
+        "--bundle", bundlePath,
+        "--destination", destination,
+        "--fee-rate", "5",
+        "--cpfp-utxo", cpfpUtxoStr,
+      ]);
+      await fs.writeFile(packagesPath, packageOut);
+      const round1 = JSON.parse(packageOut);
+      expect(round1.packages).toHaveLength(1);
+      const round1TxPackages = round1.packages[0].txPackages;
+      expect(round1TxPackages.length).toBeGreaterThanOrEqual(2);
+      // The last txPackage for a leaf is its Spark refund transaction.
+      const refundTxHex = round1TxPackages[round1TxPackages.length - 1].tx;
+
+      const signedPath = path.join(tempDir, "packages-signed.json");
+      await runCli([
+        "sign-packages",
+        "--packages", packagesPath,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--account-number", "1",
+        "--out", signedPath,
+      ]);
+      const signed = JSON.parse(await fs.readFile(signedPath, "utf8"));
+
+      // Broadcast ONLY the exit chain (every txPackage except the refund), leaving
+      // the refund un-broadcast. This is the resumed state the SDK sees as "leaf
+      // node on chain, refund still pending".
+      step("broadcast the exit chain only (leave the refund pending)");
+      const exitChainTxPackages = signed.packages[0].txPackages.slice(0, -1);
+      expect(exitChainTxPackages.length).toBeGreaterThanOrEqual(1);
+      for (const txPkg of exitChainTxPackages) {
+        await broadcastSignedPackageAndMineTimelock(faucet, txPkg);
+      }
+
+      // Branch A: with no CPFP UTXO left, a resumed `package` must surface the
+      // stranded refund as an error, NOT emit an empty (falsely-complete) package.
+      step("resumed package with NO cpfp utxo must throw");
+      await expect(
+        runCli([
+          "package",
+          "--bundle", bundlePath,
+          "--destination", destination,
+          "--fee-rate", "5",
+        ]),
+      ).rejects.toMatchObject({
+        stderr: expect.stringMatching(
+          new RegExp(`no funding UTXO left for 1 pending refund.*${leaf.id}`),
+        ),
+      });
+
+      // Branch B: with a fresh UTXO, the resumed run re-attaches the SAME
+      // CSV-timelocked refund (the exit-chain nodes are on chain and skipped).
+      step("round 2: fresh CPFP utxo -> resumed package re-attaches the refund");
+      const cpfpUtxoStr2 = await fundCpfpUtxo();
+      const packages2Path = path.join(tempDir, "packages-resumed.json");
+      const { stdout: package2Out } = await runCli([
+        "package",
+        "--bundle", bundlePath,
+        "--destination", destination,
+        "--fee-rate", "5",
+        "--cpfp-utxo", cpfpUtxoStr2,
+      ]);
+      await fs.writeFile(packages2Path, package2Out);
+      const round2 = JSON.parse(package2Out);
+      expect(round2.packages).toHaveLength(1);
+      const round2TxPackages = round2.packages[0].txPackages;
+      expect(round2TxPackages).toHaveLength(1); // only the re-attached refund
+      expect(round2TxPackages[0].tx).toBe(refundTxHex); // same refund, re-attached
+      expect(round2TxPackages[0].feeBumpPsbt).toBeTruthy();
+
+      // The re-attached refund is genuinely spendable: sign, broadcast, and sweep.
+      step("sign + broadcast the re-attached refund");
+      const signed2Path = path.join(tempDir, "packages-resumed-signed.json");
+      await runCli([
+        "sign-packages",
+        "--packages", packages2Path,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--account-number", "1",
+        "--out", signed2Path,
+      ]);
+      const signed2 = JSON.parse(await fs.readFile(signed2Path, "utf8"));
+      expect(signed2.packages[0].txPackages).toHaveLength(1);
+      for (const txPkg of signed2.packages[0].txPackages) {
+        await broadcastSignedPackageAndMineTimelock(faucet, txPkg);
+      }
+
+      step("sweep the re-attached refund to the destination");
+      const { stdout: sweepOut } = await runCli([
+        "sweep",
+        "--packages", packages2Path,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--destination", destination,
+        "--account-number", "1",
+        "--fee-rate", "1",
+      ]);
+      const sweepResult = JSON.parse(sweepOut);
+      expect(sweepResult.destination).toBe(destination);
+      expect(sweepResult.sweeps).toHaveLength(1);
+      expect(sweepResult.sweeps[0]).toMatchObject({
+        leafId: leaf.id,
+        refundVout: 0,
+      });
+
+      step("broadcast sweep tx + confirm destination");
+      const sweepTxid = await faucet.broadcastTx(sweepResult.sweeps[0].sweepTx);
+      expect(sweepTxid).toBe(sweepResult.sweeps[0].sweepTxid);
+      await faucet.mineBlocksAndWaitForMiningToComplete(1);
+      const sweepTxInfo = await faucet.getRawTransaction(sweepTxid);
+      expect(sweepTxInfo.confirmations).toBeGreaterThan(0);
+      assertSweepPaysDestination(sweepResult.sweeps[0], destination);
+      step("done");
+    } finally {
+      await wallet.cleanup?.();
+    }
+  });
+
+  // The multi-leaf resumed case from the PR #16 review: with TWO leaves whose
+  // exit chains are fully broadcast (both refunds pending), the estimation path
+  // must keep working — estimateCpfpFunding feeds the package builder one
+  // placeholder UTXO per leaf, so the resumed estimate funds every pending
+  // refund and counts both fee bumps. Before that fix the single placeholder
+  // made the refund re-attach throw inside the estimate, deadlocking the very
+  // command (`cpfp-address`) that tells the operator how to fund the recovery.
+  // Round 1 exits each leaf from its OWN bundle+UTXO (the one-leaf-per-call
+  // shape auto-exit uses) so the two exit chains' fee-bump ancestry stays
+  // independent of the never-broadcast round-1 refund bumps.
+  it("multi-leaf resumed run: estimates funding for both pending refunds and re-attaches each from its own UTXO", async () => {
+    const startedAt = Date.now();
+    let lastStepAt = startedAt;
+    const step = (label: string) => {
+      const now = Date.now();
+      const total = ((now - startedAt) / 1000).toFixed(1);
+      const delta = ((now - lastStepAt) / 1000).toFixed(1);
+      lastStepAt = now;
+      console.error(`[e2e-multi +${total}s Δ${delta}s] ${label}`);
+    };
+
+    const faucet = BitcoinFaucet.getInstance();
+    const { Signer } = signerTypes[0]!;
+    step("initializing Spark wallet");
+    const { wallet, mnemonic } = await retry(
+      () =>
+        SparkWalletTesting.initialize({
+          accountNumber: 1,
+          options: { network: "LOCAL" },
+          signer: new Signer(),
+        }),
+      "initialize Spark wallet",
+    );
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "spark-e2e-multi-"));
+
+    try {
+      step("claiming two Spark deposit leaves");
+      const leaves = await claimTwoDeposits(wallet, faucet, 100_000n);
+      const seedFile = path.join(tempDir, "seed.txt");
+      await fs.writeFile(seedFile, `${mnemonic}\n`, { mode: 0o600 });
+
+      step("refresh-bundle (direct operator export)");
+      const bundlePath = path.join(tempDir, "bundle.json");
+      await exportBundleWithCli(mnemonic!, tempDir, bundlePath);
+      const recoveryBundle = parseRecoveryBundle(await fs.readFile(bundlePath, "utf8"));
+      expect(recoveryBundle.leaves).toHaveLength(2);
+      expect(recoveryBundle.leaves.map((l) => l.id).sort()).toEqual(
+        leaves.map((l) => l.id).sort(),
+      );
+
+      // Same LOCAL rewrite as the single-leaf resumed test: route the SDK's
+      // on-chain check at the local regtest bitcoind so it can see the
+      // broadcast exit chains.
+      const localBundle = JSON.parse(await fs.readFile(bundlePath, "utf8"));
+      localBundle.network = "LOCAL";
+      await fs.writeFile(bundlePath, JSON.stringify(localBundle));
+
+      const cpfpAddressFor = async (whichBundle: string) =>
+        JSON.parse(
+          (
+            await runCli([
+              "cpfp-address",
+              "--bundle", whichBundle,
+              "--seed-file", seedFile,
+              "--network", "LOCAL",
+              "--account-number", "1",
+              "--fee-rate", "5",
+            ])
+          ).stdout,
+        );
+
+      // Fund the derived CPFP address with a dedicated UTXO and emit the
+      // --cpfp-utxo string directly (format documented by watch-cpfp); the
+      // single-leaf tests already cover the watch-cpfp path.
+      const fundUtxo = async (
+        info: { cpfpAddress: string; script: string; publicKey: string },
+        sats: bigint,
+      ): Promise<string> => {
+        const fundingTx = await faucet.sendToAddress(info.cpfpAddress, sats);
+        await faucet.mineBlocksAndWaitForMiningToComplete(6);
+        const vout = findOutputIndex(fundingTx, hexToBytes(info.script), sats);
+        return `${fundingTx.id}:${vout}:${sats}:${info.script}:${info.publicKey}`;
+      };
+
+      const destination = await faucet.getNewAddress();
+
+      // Round 1: exit each leaf independently (own bundle, own UTXO), then
+      // broadcast ONLY the exit chains, leaving both refunds pending.
+      const refundHexByLeaf = new Map<string, string>();
+      for (const [index, leaf] of recoveryBundle.leaves.entries()) {
+        step(`round 1, leaf ${index}: fund + package/sign + broadcast exit chain`);
+        const leafBundlePath = path.join(tempDir, `bundle-leaf-${index}.json`);
+        await fs.writeFile(
+          leafBundlePath,
+          JSON.stringify({ ...localBundle, leaves: [localBundle.leaves.find(
+            (l: { id: string }) => l.id === leaf.id,
+          )] }),
+        );
+        const info = await cpfpAddressFor(leafBundlePath);
+        const cpfpUtxoStr = await fundUtxo(info, BigInt(info.requiredSats));
+        const { stdout: packageOut } = await runCli([
+          "package",
+          "--bundle", leafBundlePath,
+          "--destination", destination,
+          "--fee-rate", "5",
+          "--cpfp-utxo", cpfpUtxoStr,
+        ]);
+        const round1 = JSON.parse(packageOut);
+        expect(round1.packages).toHaveLength(1);
+        const txPackages = round1.packages[0].txPackages;
+        expect(txPackages.length).toBeGreaterThanOrEqual(2);
+        refundHexByLeaf.set(leaf.id!, txPackages[txPackages.length - 1].tx);
+
+        const packagesPath = path.join(tempDir, `packages-leaf-${index}.json`);
+        await fs.writeFile(packagesPath, packageOut);
+        const signedPath = path.join(tempDir, `packages-leaf-${index}-signed.json`);
+        await runCli([
+          "sign-packages",
+          "--packages", packagesPath,
+          "--seed-file", seedFile,
+          "--network", "LOCAL",
+          "--account-number", "1",
+          "--out", signedPath,
+        ]);
+        const signed = JSON.parse(await fs.readFile(signedPath, "utf8"));
+        const exitChain = signed.packages[0].txPackages.slice(0, -1);
+        expect(exitChain.length).toBeGreaterThanOrEqual(1);
+        for (const txPkg of exitChain) {
+          await broadcastSignedPackageAndMineTimelock(faucet, txPkg);
+        }
+      }
+
+      // The review's deadlock case: a resumed estimate over the FULL bundle,
+      // two pending refunds. Must succeed and count BOTH refund fee bumps.
+      step("resumed cpfp-address over the full bundle must estimate, not throw");
+      const resumedInfo = await cpfpAddressFor(bundlePath);
+      expect(resumedInfo.feeBumpTxCount).toBe(2);
+      expect(resumedInfo.perLeaf).toHaveLength(2);
+      for (const perLeaf of resumedInfo.perLeaf) {
+        expect(perLeaf.feeBumpTxCount).toBe(1);
+        expect(BigInt(perLeaf.feeSats)).toBeGreaterThan(0n);
+      }
+      expect(BigInt(resumedInfo.requiredSats)).toBeGreaterThan(
+        BigInt(resumedInfo.bufferSats),
+      );
+
+      // One UTXO cannot fund two pending refunds: the resumed package must
+      // throw naming the unfunded remainder, never emit a falsely-complete
+      // (empty) package.
+      step("resumed package with ONE utxo for TWO pending refunds must throw");
+      const loneUtxo = await fundUtxo(resumedInfo, BigInt(resumedInfo.requiredSats));
+      await expect(
+        runCli([
+          "package",
+          "--bundle", bundlePath,
+          "--destination", destination,
+          "--fee-rate", "5",
+          "--cpfp-utxo", loneUtxo,
+        ]),
+      ).rejects.toMatchObject({
+        stderr: expect.stringMatching(/no funding UTXO left for 1 pending refund/),
+      });
+
+      // With one UTXO per pending refund, both refunds are re-attached
+      // byte-identical to round 1's.
+      step("resumed package with one utxo per refund re-attaches BOTH refunds");
+      const secondUtxo = await fundUtxo(resumedInfo, BigInt(resumedInfo.requiredSats));
+      const packages2Path = path.join(tempDir, "packages-resumed.json");
+      const { stdout: package2Out } = await runCli([
+        "package",
+        "--bundle", bundlePath,
+        "--destination", destination,
+        "--fee-rate", "5",
+        "--cpfp-utxo", loneUtxo,
+        "--cpfp-utxo", secondUtxo,
+      ]);
+      await fs.writeFile(packages2Path, package2Out);
+      const round2 = JSON.parse(package2Out);
+      expect(round2.packages).toHaveLength(2);
+      for (const pkg of round2.packages) {
+        expect(pkg.txPackages).toHaveLength(1); // only the re-attached refund
+        expect(pkg.txPackages[0].tx).toBe(refundHexByLeaf.get(pkg.leafId));
+        expect(pkg.txPackages[0].feeBumpPsbt).toBeTruthy();
+      }
+
+      step("sign + broadcast both re-attached refunds");
+      const signed2Path = path.join(tempDir, "packages-resumed-signed.json");
+      await runCli([
+        "sign-packages",
+        "--packages", packages2Path,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--account-number", "1",
+        "--out", signed2Path,
+      ]);
+      const signed2 = JSON.parse(await fs.readFile(signed2Path, "utf8"));
+      expect(signed2.packages).toHaveLength(2);
+      for (const pkg of signed2.packages) {
+        expect(pkg.txPackages).toHaveLength(1);
+        await broadcastSignedPackageAndMineTimelock(faucet, pkg.txPackages[0]);
+      }
+
+      step("sweep both re-attached refunds to the destination");
+      const { stdout: sweepOut } = await runCli([
+        "sweep",
+        "--packages", packages2Path,
+        "--seed-file", seedFile,
+        "--network", "LOCAL",
+        "--destination", destination,
+        "--account-number", "1",
+        "--fee-rate", "1",
+      ]);
+      const sweepResult = JSON.parse(sweepOut);
+      expect(sweepResult.destination).toBe(destination);
+      expect(sweepResult.sweeps).toHaveLength(2);
+      expect(sweepResult.sweeps.map((s: { leafId: string }) => s.leafId).sort()).toEqual(
+        [...refundHexByLeaf.keys()].sort(),
+      );
+
+      step("broadcast sweep txs + confirm destination");
+      for (const sweep of sweepResult.sweeps) {
+        const sweepTxid = await faucet.broadcastTx(sweep.sweepTx);
+        expect(sweepTxid).toBe(sweep.sweepTxid);
+      }
+      await faucet.mineBlocksAndWaitForMiningToComplete(1);
+      for (const sweep of sweepResult.sweeps) {
+        const sweepTxInfo = await faucet.getRawTransaction(sweep.sweepTxid);
+        expect(sweepTxInfo.confirmations).toBeGreaterThan(0);
+        assertSweepPaysDestination(sweep, destination);
+      }
+      step("done");
+    } finally {
+      await wallet.cleanup?.();
+    }
+  });
 });
 
 async function claimSingleDeposit(
@@ -300,6 +786,28 @@ async function claimSingleDeposit(
       return leaves[0]!;
     },
     "wait for claimed Spark leaf",
+    20,
+  );
+}
+
+async function claimTwoDeposits(
+  wallet: SparkWalletTesting,
+  faucet: BitcoinFaucet,
+  amount: bigint,
+) {
+  await createNewTree(wallet, randomUUID(), faucet, amount);
+  await createNewTree(wallet, randomUUID(), faucet, amount);
+
+  return retry(
+    async () => {
+      await wallet.experimental_syncWallet?.();
+      const leaves = await wallet.getLeaves();
+      if (leaves.length !== 2) {
+        throw new Error(`Expected two claimed leaves, got ${leaves.length}`);
+      }
+      return leaves;
+    },
+    "wait for two claimed Spark leaves",
     20,
   );
 }

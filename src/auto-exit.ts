@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 
+import { errMessage } from "./errors.ts";
 import {
   buildFanOutTransaction,
   createFundingWatchLogger,
@@ -350,7 +351,7 @@ export async function autoExit({
           `Leaf ${state.leafId}: submitted package (parent ${parentTxid}, ${txPackages.length - 1} remaining after confirmation)`,
         );
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errMessage(error);
         if (/missingorspent|TRUC|already in mempool|txn-already|bip68|non-final/i.test(message)) {
           // Dependency not confirmed yet or already submitted; try again next round.
           waitingDependency = true;
@@ -414,7 +415,7 @@ function recordLeafError(
   error: unknown,
   log: (message: string) => void,
 ) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errMessage(error);
   state.lastError = message;
   state.failureCount = (state.failureCount ?? 0) + 1;
   if (state.failureCount >= MAX_LEAF_FAILURES) {
@@ -501,7 +502,7 @@ async function waitForConfirmation(
       if (attempt % 10 === 0) log(`Still waiting for ${txid} to confirm`);
     } catch (error) {
       consecutiveErrors += 1;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errMessage(error);
       log(`Esplora poll failed (${message}); retrying`);
     }
     const backoff = Math.min(2 ** consecutiveErrors, 8);

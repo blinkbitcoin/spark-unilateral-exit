@@ -1,4 +1,5 @@
 import { getNodeHexStrings } from "./bundle.ts";
+import { errMessage } from "./errors.ts";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
@@ -81,7 +82,7 @@ export async function constructSparkPackages({
         undefined,
         undefined,
       ).feeBumpPsbt,
-    refundForLeaf,
+    refundForLeaf: decodeRefundFromTreeNode,
   });
   return packages;
 }
@@ -143,6 +144,7 @@ export async function reattachPendingRefunds(
   // conflict at broadcast. No funds are lost (they stay in the node/refund outputs);
   // re-run with one distinct UTXO per pending refund. auto-exit is immune (1/call).
   const availableUtxos = [...cpfpUtxos];
+  const unfundedLeafIds: string[] = [];
   for (const pkg of packages) {
     // A non-empty list means the exit chain is still being broadcast; the SDK
     // emits the refund itself on the round that broadcasts the leaf node.
@@ -176,7 +178,10 @@ export async function reattachPendingRefunds(
       // throws. That is precisely the "refund not yet broadcast" case this
       // re-attach exists for, so treat a throw as not-on-chain and re-attach,
       // exactly as the SDK's own node-tx check swallows the same error. A refund
-      // that IS on chain returns parseable JSON, so this only ever masks 404s.
+      // that IS on chain returns parseable JSON. The catch also masks transport
+      // errors (esplora unreachable, timeouts), where an already-broadcast
+      // refund gets re-attached anyway; that is benign — its broadcast then
+      // fails missing-or-spent and the leaf is deferred and retried.
       let broadcast = false;
       try {
         broadcast = await deps.isTxBroadcast(txid, network);
@@ -189,10 +194,15 @@ export async function reattachPendingRefunds(
       }
     }
     if (alreadyExited) continue;
-    // Out of funding -> leave this leaf's refund for a later run with more UTXOs
-    // rather than double-spending one UTXO across refunds.
+    // Out of funding: never double-spend one UTXO across refunds, and never
+    // leave the package silently empty (the caller reads empty as "exit
+    // complete"). Record the leaf and throw below, same surface-don't-swallow
+    // treatment as the decode and fee-bump failures.
     const utxo = availableUtxos.shift();
-    if (!utxo) continue;
+    if (!utxo) {
+      unfundedLeafIds.push(String(pkg.leafId));
+      continue;
+    }
     // Same rationale as the decode above: surface a fee-bump failure rather than
     // skip (a skip reads as complete and re-strands the refund).
     let feeBumpPsbt: string;
@@ -209,9 +219,15 @@ export async function reattachPendingRefunds(
       { tx: refund.txHex, feeBumpPsbt },
     ];
   }
+  if (unfundedLeafIds.length > 0) {
+    throw new Error(
+      `reattachPendingRefunds: no funding UTXO left for ${unfundedLeafIds.length} pending refund(s) ` +
+        `(leaves: ${unfundedLeafIds.join(", ")}); re-run with one CPFP UTXO per pending refund`,
+    );
+  }
 }
 
-function refundForLeaf(
+function decodeRefundFromTreeNode(
   treeNodeHex: string,
 ): { txHex: string; completedTxids: string[] } | null {
   const node = TreeNode.decode(hexToBytes(treeNodeHex));
@@ -236,10 +252,6 @@ function refundTxidFromHex(txHex: string): string {
     allowUnknownInputs: true,
     disableScriptCheck: true,
   }).id;
-}
-
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 function createBundleSparkClient(
