@@ -349,6 +349,10 @@ node src/cli.ts sweep \
   --account-number <spark-account-number>
 ```
 
+`--destination` is mandatory and must come from the trusted operator or wallet
+UI. The command never falls back to a destination embedded in the packages
+file.
+
 Broadcast the signed sweep transactions (Esplora networks only):
 
 ```sh

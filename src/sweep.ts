@@ -58,7 +58,7 @@ interface ConstructSweepTransactionsOptions {
   passphrase?: string;
   network: string;
   packages: unknown;
-  destination?: string;
+  destination: string;
   feeRate: number;
   accountNumber?: AccountNumberInput;
   dustLimitSats?: bigint | number;
@@ -76,9 +76,11 @@ export function constructSweepTransactions({
 }: ConstructSweepTransactionsOptions): SweepResult {
   const networkConfig = networkConfigFor(network);
   const packageJson = validatePackageJson(packages);
-  const destinationAddress = destination ?? packageJson.destination;
+  const destinationAddress = String(destination ?? "").trim();
   if (!destinationAddress) {
-    throw new SweepError("--destination is required when package JSON has no destination");
+    throw new SweepError(
+      "--destination is required; the untrusted package JSON destination is never used",
+    );
   }
   validateAddress(destinationAddress, networkConfig.btc);
   const normalizedFeeRate = validateFeeRate(feeRate);

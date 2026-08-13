@@ -30,6 +30,7 @@ describe("sweep construction", () => {
         destination: refundKey!.address,
         packages: [{ leafId, txPackages: [{ tx: refundTx.hex }] }],
       },
+      destination: refundKey!.address!,
       feeRate: 1,
       accountNumber: 1,
     });
@@ -71,10 +72,68 @@ describe("sweep construction", () => {
           destination: refundKey!.address,
           packages: [{ leafId: "leaf-1", txPackages: [{ tx: refundTx.hex }] }],
         },
+        destination: refundKey!.address!,
         feeRate: 1,
         accountNumber: 1,
       }),
     ).toThrow(SweepError);
+  });
+
+  it("requires a trusted destination instead of falling back to package JSON", () => {
+    const leafId = "leaf-1";
+    const refundKey = deriveRefundKeyCandidates({
+      seed: SEED,
+      network: "REGTEST",
+      leafId,
+      accountNumber: 1,
+    }).find((candidate) => candidate.label === "node signing key");
+    const refundTx = createSignedRefundTx(refundKey!.script, 10_000n);
+
+    expect(() =>
+      constructSweepTransactions({
+        seed: SEED,
+        network: "REGTEST",
+        packages: {
+          destination: refundKey!.address,
+          packages: [{ leafId, txPackages: [{ tx: refundTx.hex }] }],
+        },
+        destination: undefined as unknown as string,
+        feeRate: 1,
+        accountNumber: 1,
+      }),
+    ).toThrow(/--destination is required.*package JSON destination is never used/);
+  });
+
+  it("uses the explicit destination when package JSON contains another address", () => {
+    const leafId = "leaf-1";
+    const refundKey = deriveRefundKeyCandidates({
+      seed: SEED,
+      network: "REGTEST",
+      leafId,
+      accountNumber: 1,
+    }).find((candidate) => candidate.label === "node signing key");
+    const packageAddress = deriveRefundKeyCandidates({
+      seed: SEED,
+      network: "REGTEST",
+      leafId: "tampered-package-value",
+      accountNumber: 1,
+    }).find((candidate) => candidate.label === "node signing key")!.address;
+    const refundTx = createSignedRefundTx(refundKey!.script, 10_000n);
+
+    const result = constructSweepTransactions({
+      seed: SEED,
+      network: "REGTEST",
+      packages: {
+        destination: packageAddress,
+        packages: [{ leafId, txPackages: [{ tx: refundTx.hex }] }],
+      },
+      destination: refundKey!.address!,
+      feeRate: 1,
+      accountNumber: 1,
+    });
+
+    expect(packageAddress).not.toBe(refundKey!.address);
+    expect(result.destination).toBe(refundKey!.address);
   });
 });
 
