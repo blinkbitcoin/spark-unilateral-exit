@@ -111,6 +111,56 @@ describe("submitPackage", () => {
     ).rejects.toThrow(EsploraError);
   });
 
+  // Bitcoin Core's submitpackage reports policy rejections with HTTP 200; the
+  // verdict is package_msg plus per-transaction error strings. This is the
+  // exact response a mainnet mempool.space returned for a package whose parent
+  // input had already been spent, which the tool used to misread as a
+  // successful submit followed by a mempool eviction.
+  it("throws when the node rejects the package inside an HTTP 200", async () => {
+    const wtxid = "ab".repeat(32);
+    const txid = "cd".repeat(32);
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            package_msg: "transaction failed",
+            "tx-results": {
+              [wtxid]: { txid, error: "bad-txns-inputs-missingorspent" },
+            },
+            "replaced-transactions": [],
+          }),
+        ),
+    });
+
+    const error = (await submitPackage(["aa", "bb"], "https://example.com").catch(
+      (e) => e,
+    )) as EsploraError;
+    expect(error).toBeInstanceOf(EsploraError);
+    expect(error.message).toContain("transaction failed");
+    expect(error.message).toContain(txid);
+    expect(error.message).toContain("bad-txns-inputs-missingorspent");
+  });
+
+  it("accepts a package_msg success verdict", async () => {
+    const verdict = {
+      package_msg: "success",
+      "tx-results": {
+        ["ab".repeat(32)]: { txid: "cd".repeat(32), vsize: 111 },
+      },
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify(verdict)),
+    });
+
+    await expect(submitPackage(["aa", "bb"], "https://example.com")).resolves.toEqual(
+      verdict,
+    );
+  });
+
   it("throws EsploraError on network failure", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
 

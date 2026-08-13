@@ -138,11 +138,49 @@ async function handlePackageResponse(
       { status: response.status, body, url },
     );
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(body);
+    parsed = JSON.parse(body);
   } catch {
     return body;
   }
+  throwIfPackageRejected(parsed, url, body);
+  return parsed;
+}
+
+// Bitcoin Core's submitpackage reports policy rejections with HTTP 200: the
+// verdict lives in package_msg plus per-transaction error strings in
+// tx-results. Treating 200 as acceptance turns every policy rejection (fee
+// below the mempool floor, TRUC topology, spent inputs) into a phantom
+// "submitted" that callers later misread as a mempool eviction, so surface
+// the verdict as an error here. Endpoints whose response carries no
+// package_msg are left alone: absence of a verdict is not a rejection.
+function throwIfPackageRejected(
+  parsed: unknown,
+  url: string,
+  body: string,
+): void {
+  if (typeof parsed !== "object" || parsed === null) return;
+  const packageMsg = (parsed as Record<string, unknown>)["package_msg"];
+  if (typeof packageMsg !== "string" || packageMsg === "success") return;
+  const txResults = (parsed as Record<string, unknown>)["tx-results"];
+  const txErrors: string[] = [];
+  if (typeof txResults === "object" && txResults !== null) {
+    for (const [wtxid, result] of Object.entries(
+      txResults as Record<string, unknown>,
+    )) {
+      if (typeof result !== "object" || result === null) continue;
+      const record = result as Record<string, unknown>;
+      if (typeof record.error !== "string" || record.error.length === 0) continue;
+      const txid = typeof record.txid === "string" ? record.txid : wtxid;
+      txErrors.push(`${txid}: ${record.error}`);
+    }
+  }
+  const detail = txErrors.length > 0 ? `: ${txErrors.join("; ")}` : "";
+  throw new EsploraError(
+    `Package rejected by the node ("${packageMsg}"${detail})`,
+    { status: 200, body, url },
+  );
 }
 
 async function fetchWithTimeout(
