@@ -15,11 +15,19 @@ function makeTestPackage({
   outputPrivateKey = fundingPrivateKey,
   fundingAmount = 10_000n,
   outputAmount = 8_000n,
+  parentAnchorCount = 1,
+  childAnchorCount = 1,
+  includeFundingInput = true,
+  childOutputCount = 1,
 }: {
   fundingPrivateKey: Uint8Array;
   outputPrivateKey?: Uint8Array;
   fundingAmount?: bigint;
   outputAmount?: bigint;
+  parentAnchorCount?: number;
+  childAnchorCount?: number;
+  includeFundingInput?: boolean;
+  childOutputCount?: number;
 }) {
   const fundingPayment = p2wpkh(
     secp256k1.getPublicKey(fundingPrivateKey, true),
@@ -35,23 +43,34 @@ function makeTestPackage({
     index: 0,
     witnessUtxo: { amount: 1_000n, script: fundingPayment.script },
   });
-  parentTx.addOutput({ amount: 0n, script: anchorScript });
+  for (let index = 0; index < parentAnchorCount; index += 1) {
+    parentTx.addOutput({ amount: 0n, script: anchorScript });
+  }
   parentTx.addOutput({ amount: 900n, script: fundingPayment.script });
   parentTx.sign(fundingPrivateKey);
   parentTx.finalize();
 
   const childTx = new Transaction({ version: 3, allowUnknownOutputs: true });
-  childTx.addInput({
-    txid: "22".repeat(32),
-    index: 0,
-    witnessUtxo: { amount: fundingAmount, script: fundingPayment.script },
-  });
-  childTx.addInput({
-    txid: parentTx.id,
-    index: 0,
-    witnessUtxo: { amount: 0n, script: anchorScript },
-  });
-  childTx.addOutput({ amount: outputAmount, script: outputPayment.script });
+  if (includeFundingInput) {
+    childTx.addInput({
+      txid: "22".repeat(32),
+      index: 0,
+      witnessUtxo: { amount: fundingAmount, script: fundingPayment.script },
+    });
+  }
+  for (let index = 0; index < childAnchorCount; index += 1) {
+    childTx.addInput({
+      txid: parentTx.id,
+      index: 0,
+      witnessUtxo: { amount: 0n, script: anchorScript },
+    });
+  }
+  for (let index = 0; index < childOutputCount; index += 1) {
+    childTx.addOutput({
+      amount: index === 0 ? outputAmount : 1n,
+      script: outputPayment.script,
+    });
+  }
 
   return {
     parentTxHex: parentTx.hex,
@@ -60,6 +79,15 @@ function makeTestPackage({
 }
 
 describe("signPsbt", () => {
+  it("rejects malformed transaction data", () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const pkg = makeTestPackage({ fundingPrivateKey: privateKey });
+
+    expect(() => signPsbt("not-hex", privateKey, pkg.parentTxHex)).toThrow(
+      /contains invalid transaction data/,
+    );
+  });
+
   it("signs owned funding inputs and skips the parent-bound anchor input", () => {
     const privateKey = secp256k1.utils.randomPrivateKey();
     const pkg = makeTestPackage({ fundingPrivateKey: privateKey });
@@ -114,6 +142,115 @@ describe("signPsbt", () => {
       signPsbt(pkg.psbtHex, privateKey, differentParent.parentTxHex),
     ).toThrow(/anchor input is not bound/);
   });
+
+  it.each([
+    { parentAnchorCount: 0, expectedCount: 0 },
+    { parentAnchorCount: 2, expectedCount: 2 },
+  ])(
+    "rejects a parent with $expectedCount ephemeral anchors",
+    ({ parentAnchorCount, expectedCount }) => {
+      const privateKey = secp256k1.utils.randomPrivateKey();
+      const pkg = makeTestPackage({
+        fundingPrivateKey: privateKey,
+        parentAnchorCount,
+      });
+
+      expect(() =>
+        signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex),
+      ).toThrow(
+        `parent must contain exactly one ephemeral anchor output, got ${expectedCount}`,
+      );
+    },
+  );
+
+  it("rejects a funding input without a positive witness UTXO", () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const pkg = makeTestPackage({
+      fundingPrivateKey: privateKey,
+      fundingAmount: 0n,
+    });
+
+    expect(() => signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex)).toThrow(
+      "input 0 is missing a positive witness UTXO",
+    );
+  });
+
+  it.each([
+    { childAnchorCount: 0, expectedCount: 0 },
+    { childAnchorCount: 2, expectedCount: 2 },
+  ])(
+    "rejects a fee-bump transaction spending $expectedCount anchors",
+    ({ childAnchorCount, expectedCount }) => {
+      const privateKey = secp256k1.utils.randomPrivateKey();
+      const pkg = makeTestPackage({
+        fundingPrivateKey: privateKey,
+        childAnchorCount,
+      });
+
+      expect(() =>
+        signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex),
+      ).toThrow(`must spend exactly one ephemeral anchor, got ${expectedCount}`);
+    },
+  );
+
+  it("rejects a fee-bump transaction without a CPFP funding input", () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const pkg = makeTestPackage({
+      fundingPrivateKey: privateKey,
+      includeFundingInput: false,
+    });
+
+    expect(() => signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex)).toThrow(
+      "has no CPFP funding input owned by the supplied key",
+    );
+  });
+
+  it.each([0, 2])(
+    "rejects a fee-bump transaction with %i change outputs",
+    (childOutputCount) => {
+      const privateKey = secp256k1.utils.randomPrivateKey();
+      const pkg = makeTestPackage({
+        fundingPrivateKey: privateKey,
+        childOutputCount,
+      });
+
+      expect(() =>
+        signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex),
+      ).toThrow(
+        `must have exactly one CPFP change output, got ${childOutputCount}`,
+      );
+    },
+  );
+
+  it("rejects a zero-valued change output", () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const pkg = makeTestPackage({
+      fundingPrivateKey: privateKey,
+      outputAmount: 0n,
+    });
+
+    expect(() => signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex)).toThrow(
+      /change output is not a positive output owned/,
+    );
+  });
+
+  it.each([
+    { outputAmount: 10_000n, description: "zero" },
+    { outputAmount: 10_001n, description: "negative" },
+  ])(
+    "rejects a $description fee",
+    ({ outputAmount }) => {
+      const privateKey = secp256k1.utils.randomPrivateKey();
+      const pkg = makeTestPackage({
+        fundingPrivateKey: privateKey,
+        outputAmount,
+      });
+
+      expect(() => signPsbt(pkg.psbtHex, privateKey, pkg.parentTxHex)).toThrow(
+        "has a non-positive fee",
+      );
+    },
+  );
 });
 
 describe("signPackages", () => {
