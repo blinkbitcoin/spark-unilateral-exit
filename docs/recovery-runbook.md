@@ -470,6 +470,10 @@ make sweep \
   > sweep-transactions.json
 ```
 
+Always supply `DESTINATION` from a trusted operator or wallet UI. The sweep
+command deliberately ignores any `destination` stored in the packages JSON,
+because that recovery artifact may be stale or tampered with.
+
 The command:
 
 - reads the `package` output,

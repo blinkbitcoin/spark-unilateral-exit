@@ -401,7 +401,7 @@ async function main(): Promise<void> {
       passphrase: optionalValue(args.passphrase) ?? "",
       network: required(args.network, "--network"),
       packages,
-      destination: optionalValue(args.destination),
+      destination: required(args.destination, "--destination"),
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
@@ -690,7 +690,7 @@ Inputs for sweep:
   --packages <path>         JSON produced by package
   --seed-file <path>        File containing Spark seed or mnemonic; prompts when omitted
   --network <network>       MAINNET, REGTEST, TESTNET, SIGNET, or LOCAL
-  --destination <address>   Destination; defaults to package JSON destination
+  --destination <address>   Required trusted destination; package JSON is ignored
   --fee-rate <number>      Sweep fee rate in sat/vbyte
   --account-number <n>     Spark account number used by the wallet
 
