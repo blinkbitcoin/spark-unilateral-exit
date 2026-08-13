@@ -22,6 +22,11 @@ export interface SeedPromptOptions {
   output?: HiddenLineOutput;
 }
 
+export interface ConfirmationPromptOptions {
+  input?: HiddenLineInput;
+  output?: HiddenLineOutput;
+}
+
 export async function loadSeed(
   args: CliArgs,
   options: SeedPromptOptions = {},
@@ -97,6 +102,53 @@ export function readHiddenLine(
     };
 
     input.setRawMode!(true);
+    input.resume();
+    input.on("data", onData);
+    output.write(prompt);
+  });
+}
+
+export async function readConfirmation(
+  prompt: string,
+  {
+    input = process.stdin as unknown as HiddenLineInput,
+    output = process.stderr as unknown as HiddenLineOutput,
+  }: ConfirmationPromptOptions = {},
+): Promise<boolean> {
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error(
+      "An interactive terminal is required to approve signing; inspect the summary and pass --yes only for trusted automation",
+    );
+  }
+
+  return new Promise<boolean>((resolve, reject) => {
+    let value = "";
+    const cleanup = () => {
+      input.off("data", onData);
+      input.pause();
+    };
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString("utf8")) {
+        if (char === "\u0003") {
+          cleanup();
+          output.write("\n");
+          reject(new Error("Signing approval cancelled"));
+          return;
+        }
+        if (char === "\r" || char === "\n") {
+          cleanup();
+          output.write("\n");
+          resolve(value.trim().toLowerCase() === "yes");
+          return;
+        }
+        if (char === "\u007f" || char === "\b") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        if (char >= " ") value += char;
+      }
+    };
+
     input.resume();
     input.on("data", onData);
     output.write(prompt);

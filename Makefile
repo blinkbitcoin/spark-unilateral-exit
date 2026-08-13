@@ -22,6 +22,7 @@ CPFP_UTXO ?=
 CPFP_ARGS ?= $(if $(CPFP_UTXO),--cpfp-utxo $(CPFP_UTXO),)
 KEY_FILE ?=
 SIGNED_PACKAGES ?= recovery-packages-signed.json
+YES ?=
 ESPLORA_URL ?=
 ESPLORA_ARGS ?= $(if $(ESPLORA_URL),--esplora-url $(ESPLORA_URL),)
 
@@ -113,6 +114,7 @@ sign-packages: require-signing-key
 	@$(NODE) src/cli.ts sign-packages \
 		--packages $(PACKAGES) \
 		$(if $(KEY_FILE),--key-file $(KEY_FILE),$(SEED_ARGS) --network $(NETWORK) $(ACCOUNT_ARGS)) \
+		$(if $(YES),--yes,) \
 		--out $(SIGNED_PACKAGES)
 
 cpfp-address:

@@ -67,7 +67,11 @@ export interface AutoExitDeps {
   fetchTx: (txid: string, baseUrl: string) => Promise<EsploraTransaction | null>;
   submitPkg: (txs: string[], baseUrl: string) => Promise<unknown>;
   broadcastTx: (txHex: string, baseUrl: string) => Promise<string>;
-  signChild: (psbtHex: string, privateKey: Uint8Array) => string;
+  signChild: (
+    psbtHex: string,
+    privateKey: Uint8Array,
+    parentTxHex: string,
+  ) => string;
   txIdOf: (txHex: string) => string;
   heightLockOf: (txHex: string) => HeightLock | null;
   sleep: (ms: number) => Promise<void>;
@@ -343,7 +347,11 @@ export async function autoExit({
       }
 
       try {
-        const signedChild = d.signChild(head.feeBumpPsbt, key.privateKey);
+        const signedChild = d.signChild(
+          head.feeBumpPsbt,
+          key.privateKey,
+          head.tx,
+        );
         await d.submitPkg([head.tx, signedChild], baseUrl);
         submitted.push({ state, parentTxid });
         log(

@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadSeed, readHiddenLine } from "../src/cli-input.ts";
+import {
+  loadSeed,
+  readConfirmation,
+  readHiddenLine,
+} from "../src/cli-input.ts";
 
 describe("CLI seed input", () => {
   afterEach(() => {
@@ -42,6 +46,37 @@ describe("CLI seed input", () => {
     await expect(seed).resolves.toBe("pasted secret seed");
     expect(output.text()).toBe("Spark seed or mnemonic: \n");
     expect(input.rawModes).toEqual([true, false]);
+  });
+
+  it("requires the full word yes for signing approval", async () => {
+    const input = createTtyInput();
+    const output = createTtyOutput();
+
+    const approval = readConfirmation("Type yes to sign: ", { input, output });
+    input.write("yes\n");
+
+    await expect(approval).resolves.toBe(true);
+    expect(output.text()).toBe("Type yes to sign: \n");
+  });
+
+  it("treats any response other than yes as declined", async () => {
+    const input = createTtyInput();
+    const output = createTtyOutput();
+
+    const approval = readConfirmation("Type yes to sign: ", { input, output });
+    input.write("y\n");
+
+    await expect(approval).resolves.toBe(false);
+  });
+
+  it("refuses non-interactive signing approval", async () => {
+    const input = createTtyInput();
+    const output = createTtyOutput();
+    input.isTTY = false;
+
+    await expect(
+      readConfirmation("Type yes to sign: ", { input, output }),
+    ).rejects.toThrow(/interactive terminal.*--yes/);
   });
 });
 
