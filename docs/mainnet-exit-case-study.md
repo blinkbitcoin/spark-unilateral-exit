@@ -1,5 +1,11 @@
 # Case study: a real Spark unilateral exit on Bitcoin mainnet
 
+> **Follow-up (2026-08-14):** The four exits later completed through their
+> pre-signed `directTx -> directRefundTx` branches, apparently after automated
+> watchtower intervention. This required no fresh operator permission, but it
+> did change the on-chain path, fees, and transactions that had to be swept.
+> See [Who participated after the unilateral exit began?](mainnet-exit-case-study-follow-up.md).
+
 This is a write-up of an actual unilateral exit performed with this repo on
 2026-07-08, recovering a real mainnet Spark wallet without relying on Spark
 operators for the exit itself. Everything below — transaction IDs, amounts,
