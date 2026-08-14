@@ -7,7 +7,7 @@ import {
   broadcastSweeps,
   checkTransactionStatus,
 } from "./broadcast.ts";
-import { loadSeed } from "./cli-input.ts";
+import { loadSeed, readConfirmation } from "./cli-input.ts";
 import { parseCpfpUtxo, serializeForJson } from "./cpfp.ts";
 import {
   assertSeedOnlyIsNotOfflineRecoverable,
@@ -17,7 +17,7 @@ import { consolidateLeavesFromSeed } from "./consolidate.ts";
 import { prepareRecovery } from "./prepare-recovery.ts";
 import { exportRecoveryBundleFromSeed } from "./recovery-bundle.ts";
 import { packagesFileLeafIds, writeFileWithBackup } from "./safe-files.ts";
-import { signPackages } from "./sign.ts";
+import { signPackages, summarizePackages } from "./sign.ts";
 import { constructSparkPackages } from "./spark-packages.ts";
 import { autoExit } from "./auto-exit.ts";
 import {
@@ -376,7 +376,23 @@ async function main(): Promise<void> {
     );
     const privateKey = await resolveCpfpPrivateKey(args);
     const packages = input.packages ?? input;
-    const signed = signPackages({ packages, privateKey });
+    const summaries = summarizePackages({ packages, privateKey });
+    console.error("Validated CPFP signing summary:");
+    for (const summary of summaries) {
+      console.error(
+        `  leaf ${summary.leafId} package ${summary.packageIndex}: ` +
+          `${summary.fundingInputCount} funding input(s), ` +
+          `${summary.fundingInputSats} sats in, ${summary.changeOutputSats} sats ` +
+          `back to the CPFP key, ${summary.feeSats} sats fee; parent ${summary.parentTxid}`,
+      );
+    }
+    const approved =
+      args.yes === true ||
+      (await readConfirmation(
+        `Type yes to sign ${summaries.length} validated CPFP transaction(s): `,
+      ));
+    if (!approved) throw new Error("Signing declined");
+    const signed = signPackages({ packages, privateKey, approved: true });
     const output = serializeForJson({ ...input, packages: signed });
     if (args.out === true) throw new Error("--out requires a path");
     const outPath = optionalValue(args.out);
@@ -685,6 +701,8 @@ Inputs for sign-packages:
   --network <network>      Required with --seed-file to derive the funding key
   --account-number <n>     Account number for the funding key derivation, default 0
   --out <path>             Output path for signed packages; stdout when omitted
+  --yes                    Approve after printing the validated signing summary;
+                           use only when a trusted caller already reviewed it
 
 Inputs for sweep:
   --packages <path>         JSON produced by package

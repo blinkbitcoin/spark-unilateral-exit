@@ -330,6 +330,11 @@ node src/cli.ts sign-packages \
   --out recovery-packages-signed.json
 ```
 
+The command validates CPFP input ownership, binds the anchor to each companion
+parent transaction, verifies change returns to the CPFP key, prints input/change
+and fee totals, and requires `yes` confirmation before signing. Use `--yes` only
+when trusted automation has already reviewed that summary.
+
 Broadcast the signed packages, then check confirmations (Esplora networks only: MAINNET/TESTNET/SIGNET):
 
 ```sh
