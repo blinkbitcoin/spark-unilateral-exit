@@ -405,7 +405,17 @@ async function main(): Promise<void> {
       feeRate: Number(required(args["fee-rate"], "--fee-rate")),
       accountNumber: args["account-number"],
     });
-    emitJson(sweeps);
+    if (args.out === true) throw new Error("--out requires a path");
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      const written = writeFileWithBackup(outPath, `${serializeForJson(sweeps)}\n`);
+      if (written.backupPath) {
+        console.error(`Backed up previous sweep transactions to ${written.backupPath}`);
+      }
+      console.error(`Wrote signed sweep transactions to ${outPath}`);
+    } else {
+      emitJson(sweeps);
+    }
     return;
   }
 
@@ -693,6 +703,7 @@ Inputs for sweep:
   --destination <address>   Required trusted destination; package JSON is ignored
   --fee-rate <number>      Sweep fee rate in sat/vbyte
   --account-number <n>     Spark account number used by the wallet
+  --out <path>             Write signed sweeps to a file; stdout when omitted
 
 Seed-only mode is intentionally rejected for offline recovery.
 `);

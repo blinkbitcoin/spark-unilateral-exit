@@ -157,7 +157,12 @@ make sweep \
   NETWORK=mainnet \
   DESTINATION=bc1qexampledestination000000000000000000000000 \
   FEE_RATE=1 \
-  ACCOUNT_NUMBER=1
+  ACCOUNT_NUMBER=1 \
+  SWEEPS=sweep-transactions.json
+
+make broadcast-sweep \
+  SWEEPS=sweep-transactions.json \
+  NETWORK=mainnet
 ```
 
 Derive a CPFP funding address from the seed and estimate the sats to send it, then watch for the funds and capture the ready-to-use `--cpfp-utxo` value:

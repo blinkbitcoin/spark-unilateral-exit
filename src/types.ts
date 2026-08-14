@@ -84,6 +84,11 @@ export interface LeafPackage {
   // JSON documents may carry an explicit null leafId; the code guards on it.
   leafId?: string | null;
   txPackages?: TxPackage[];
+  /**
+   * Exact refund variant already observed on chain. Internal package-building
+   * marker used by auto-exit to preserve the transaction needed by `sweep`.
+   */
+  sweepTx?: string;
   [key: string]: unknown;
 }
 
