@@ -191,8 +191,11 @@ Recovery flow:
 3. App watches the funding address (`watch-cpfp`) and, once a sufficiently
    funded UTXO confirms, constructs all exit packages using the recovery bundle
    and that UTXO.
-4. App signs all CPFP PSBTs in-process using `signPackages()` from
-   `src/sign.ts`, re-deriving the funding key from the seed — no external
+4. App calls `summarizePackages()` from `src/sign.ts`, displays each validated
+   funding-input/change/fee summary for user approval, then calls
+   `signPackages({ ..., approved: true })` in-process. The signing boundary
+   independently verifies CPFP input ownership, the parent anchor, and the
+   change output while re-deriving the funding key from the seed — no external
    wallet, key file, or Bitcoin Core node needed.
 5. App broadcasts signed packages sequentially via Esplora
    (`POST /txs/package`).

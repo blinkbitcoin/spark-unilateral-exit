@@ -225,6 +225,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         "--seed-file", seedFile,
         "--network", "LOCAL",
         "--account-number", "1",
+        "--yes",
         "--out", signedPath,
       ]);
       const signedJson = JSON.parse(await fs.readFile(signedPath, "utf8"));
@@ -1031,4 +1032,3 @@ function packageSubmitSucceeded(result: unknown) {
     return error === undefined || error === null || error === "";
   });
 }
-
