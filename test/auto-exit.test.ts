@@ -4,6 +4,7 @@ import { Transaction } from "@scure/btc-signer";
 
 import {
   autoExit,
+  firstInputOutpoint,
   relativeHeightLock,
   transactionIdFromHex,
   type AutoExitDeps,
@@ -101,6 +102,37 @@ describe("relativeHeightLock", () => {
       feeRate: 1,
     });
     expect(relativeHeightLock(txHex)).toBeNull();
+  });
+});
+
+describe("firstInputOutpoint", () => {
+  it("reads the first input's outpoint from a real transaction with both byte orders", () => {
+    // Non-palindromic txid so the byte-reversal candidate differs from the
+    // display-order one; non-zero vout so the index is actually read.
+    const prevTxid = "abcd".repeat(16);
+    const reversed = "cdab".repeat(16);
+    const tx = new Transaction();
+    tx.addInput({
+      txid: prevTxid,
+      index: 3,
+      sequence: 2000,
+      witnessUtxo: { script: hexToBytes(KEY.script), amount: 50_000n },
+    });
+    tx.addOutput({ script: hexToBytes(KEY.script), amount: 49_000n });
+    tx.sign(KEY.privateKey);
+    tx.finalize();
+
+    const outpoint = firstInputOutpoint(tx.hex);
+    expect(outpoint?.vout).toBe(3);
+    expect(outpoint?.txidCandidates).toHaveLength(2);
+    // The display-order txid the wallet knows must be among the candidates,
+    // whatever order the raw serialization stores.
+    expect(outpoint?.txidCandidates).toContain(prevTxid);
+    expect(outpoint?.txidCandidates).toContain(reversed);
+    // Same candidate handling as relativeHeightLock, so an Esplora probe that
+    // resolves one resolves the other.
+    const lock = relativeHeightLock(tx.hex);
+    expect(lock?.prevTxidCandidates).toEqual(outpoint?.txidCandidates);
   });
 });
 
@@ -610,5 +642,124 @@ describe("autoExit direct-path race", () => {
     expect(submitted).toEqual(["tx-A1", "tx-A2", "tx-B1"]);
     const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
     expect(byId.get("L1")?.status).toBe("waiting-timelock");
+  });
+
+  it("counts a failure when every outspend lookup errors instead of waiting forever", async () => {
+    const { deps } = makeRaceFakes();
+    const raceDeps: Partial<AutoExitDeps> = {
+      ...deps,
+      // Esplora is unreachable for both byte-order candidates: chain state is
+      // unknown, so the leaf must accumulate failures and give up, not defer
+      // as if the outpoint were merely unspent.
+      fetchOutspend: async () => {
+        throw new Error("connect ECONNREFUSED");
+      },
+      inputOutpointOf: (txHex) =>
+        txHex === "tx-A1"
+          ? { txidCandidates: ["parent-A0", "parent-A0-rev"], vout: 0 }
+          : null,
+    };
+    const events: string[] = [];
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: raceDeps,
+      onEvent: (m) => events.push(m),
+    });
+
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")?.status).toBe("failed");
+    expect(byId.get("L1")?.lastError).toContain("direct-path check failed");
+    expect(byId.get("L1")?.lastError).toContain("ECONNREFUSED");
+    expect(byId.get("L1")?.failureCount).toBe(5);
+    expect(events.some((e) => e.includes("direct-path check failed"))).toBe(true);
+    // The unaffected leaf still completes.
+    expect(byId.get("L2")?.status).toBe("waiting-timelock");
+  });
+
+  it("resolves via the second byte-order candidate when the first is unknown", async () => {
+    const { deps, submitted, broadcasts } = makeRaceFakes();
+    const lookups: string[] = [];
+    const raceDeps: Partial<AutoExitDeps> = {
+      ...deps,
+      // First candidate 404s (wrong byte order); the second answers. The
+      // pivot must proceed exactly as if the first candidate had matched.
+      fetchOutspend: async (txid, vout) => {
+        lookups.push(txid);
+        if (txid === "parent-A0-wrong-order") return null;
+        return txid === "parent-A0" && vout === 0
+          ? {
+              spent: true,
+              txid: "tx-D1",
+              status: { confirmed: true, block_height: 100 },
+            }
+          : null;
+      },
+      inputOutpointOf: (txHex) =>
+        txHex === "tx-A1"
+          ? { txidCandidates: ["parent-A0-wrong-order", "parent-A0"], vout: 0 }
+          : null,
+    };
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: raceDeps,
+    });
+
+    expect(lookups).toContain("parent-A0-wrong-order");
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")).toMatchObject({
+      status: "waiting-timelock",
+      maturityHeight: 650,
+      refundTxid: "tx-DR1",
+    });
+    expect(submitted).toEqual(["tx-B1"]);
+    expect(broadcasts).toHaveLength(0);
+  });
+
+  it("still resolves when the first candidate errors but the second answers", async () => {
+    const { deps } = makeRaceFakes();
+    const raceDeps: Partial<AutoExitDeps> = {
+      ...deps,
+      // A definitive answer from either candidate outweighs a retained
+      // lookup error from the other.
+      fetchOutspend: async (txid, vout) => {
+        if (txid === "parent-A0-flaky") throw new Error("HTTP 502");
+        return txid === "parent-A0" && vout === 0
+          ? {
+              spent: true,
+              txid: "tx-D1",
+              status: { confirmed: true, block_height: 100 },
+            }
+          : null;
+      },
+      inputOutpointOf: (txHex) =>
+        txHex === "tx-A1"
+          ? { txidCandidates: ["parent-A0-flaky", "parent-A0"], vout: 0 }
+          : null,
+    };
+    const events: string[] = [];
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: raceDeps,
+      onEvent: (m) => events.push(m),
+    });
+
+    const byId = new Map(result.leaves.map((l) => [l.leafId, l]));
+    expect(byId.get("L1")).toMatchObject({
+      status: "waiting-timelock",
+      refundTxid: "tx-DR1",
+    });
+    expect(events.some((e) => e.includes("direct-path check failed"))).toBe(false);
   });
 });

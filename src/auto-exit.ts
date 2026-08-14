@@ -443,9 +443,15 @@ export async function autoExit({
               refundHexes,
             });
           } catch (raceError) {
-            log(
-              `Leaf ${state.leafId}: direct-path check failed (${errMessage(raceError)}); deferring`,
+            // Chain state is unknown, not "dependency unconfirmed": count the
+            // failure so a persistent lookup outage surfaces instead of the
+            // leaf silently retrying forever.
+            recordLeafError(
+              state,
+              new AutoExitError(`direct-path check failed: ${errMessage(raceError)}`),
+              log,
             );
+            continue;
           }
           if (resolved) continue;
         }
@@ -625,17 +631,27 @@ async function resolveDirectPathRace({
   if (!outpoint) return false;
 
   let spender: string | undefined;
+  let definitive = false;
+  let lookupError: unknown;
   for (const candidate of outpoint.txidCandidates) {
     let outspend: EsploraOutspend | null = null;
     try {
       outspend = await d.fetchOutspend(candidate, outpoint.vout, baseUrl);
-    } catch {
+    } catch (error) {
+      // A failed lookup is not evidence the outpoint is unspent; keep the
+      // error and let the other byte-order candidate try to answer.
+      lookupError = error;
       continue;
     }
     if (!outspend) continue; // unknown txid: wrong byte order (or parent not seen)
+    definitive = true;
     if (outspend.spent && outspend.txid) spender = outspend.txid;
     break;
   }
+  // Without a definitive response the chain state is unknown, not unspent.
+  // Propagate the lookup failure so the caller counts it instead of treating
+  // the missingorspent rejection as an ordinary dependency wait forever.
+  if (!definitive && lookupError !== undefined) throw lookupError;
   if (!spender) return false; // outpoint unspent: ordinary dependency wait
   if (spender === d.txIdOf(headTxHex)) return false; // our own head is on chain
 
@@ -748,6 +764,16 @@ export function transactionIdFromHex(txHex: string): string {
   return parseTransaction(txHex).id;
 }
 
+// Both display byte orders of a parsed input's prev txid. Parsers expose the
+// txid in serialization order, Esplora expects display order; callers probe
+// with both candidates and keep the one the endpoint recognizes.
+function txidByteOrderCandidates(rawTxid: Uint8Array | ArrayLike<number>): string[] {
+  const hex = bytesToHex(
+    rawTxid instanceof Uint8Array ? rawTxid : new Uint8Array(rawTxid),
+  );
+  return [hex, bytesToHex(new Uint8Array([...hexToBytes(hex)].reverse()))];
+}
+
 // Reads a BIP68 relative height lock from the transaction's first input.
 // Returns null when the sequence disables relative locks or encodes a
 // time-based lock (Spark refunds use height-based locks).
@@ -760,12 +786,10 @@ export function relativeHeightLock(txHex: string): HeightLock | null {
   const blocks = sequence & 0xffff;
   if (blocks === 0) return null;
   const rawTxid = input?.txid;
-  const candidates: string[] = [];
-  if (rawTxid) {
-    const hex = bytesToHex(rawTxid instanceof Uint8Array ? rawTxid : new Uint8Array(rawTxid));
-    candidates.push(hex, bytesToHex(new Uint8Array([...hexToBytes(hex)].reverse())));
-  }
-  return { blocks, prevTxidCandidates: candidates };
+  return {
+    blocks,
+    prevTxidCandidates: rawTxid ? txidByteOrderCandidates(rawTxid) : [],
+  };
 }
 
 // First-input outpoint with both txid byte orders as candidates, mirroring
@@ -775,14 +799,8 @@ export function firstInputOutpoint(txHex: string): InputOutpoint | null {
   const input = tx.getInput(0);
   const rawTxid = input?.txid;
   if (!rawTxid) return null;
-  const hex = bytesToHex(
-    rawTxid instanceof Uint8Array ? rawTxid : new Uint8Array(rawTxid),
-  );
   return {
-    txidCandidates: [
-      hex,
-      bytesToHex(new Uint8Array([...hexToBytes(hex)].reverse())),
-    ],
+    txidCandidates: txidByteOrderCandidates(rawTxid),
     vout: input?.index ?? 0,
   };
 }
