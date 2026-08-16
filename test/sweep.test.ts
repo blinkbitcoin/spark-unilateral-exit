@@ -54,6 +54,35 @@ describe("sweep construction", () => {
     expect(sweepTx.id).toBe(result.sweeps[0]!.sweepTxid);
   });
 
+  it("spends the preserved terminal refund when txPackages is empty", () => {
+    const leafId = "leaf-direct-refund";
+    const refundKey = deriveRefundKeyCandidates({
+      seed: SEED,
+      network: "REGTEST",
+      leafId,
+      accountNumber: 1,
+    }).find((candidate) => candidate.label === "node signing key");
+    const refundTx = createSignedRefundTx(refundKey!.script, 10_000n);
+
+    const result = constructSweepTransactions({
+      seed: SEED,
+      network: "REGTEST",
+      packages: {
+        packages: [{ leafId, txPackages: [], sweepTx: refundTx.hex }],
+      },
+      destination: refundKey!.address!,
+      feeRate: 1,
+      accountNumber: 1,
+    });
+
+    expect(result.sweeps).toHaveLength(1);
+    expect(result.sweeps[0]).toMatchObject({
+      leafId,
+      refundTxid: refundTx.id,
+      refundValueSats: "10000",
+    });
+  });
+
   it("fails closed when the seed does not match the refund output", () => {
     const refundKey = deriveRefundKeyCandidates({
       seed: SEED,

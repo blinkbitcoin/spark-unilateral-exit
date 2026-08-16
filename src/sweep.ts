@@ -90,7 +90,11 @@ export function constructSweepTransactions({
 
   const sweeps: LeafSweep[] = [];
   for (const leafPackage of packageJson.packages) {
-    const refundTxHex = lastTxPackage(leafPackage)?.tx;
+    // A completed alternate branch is persisted as sweepTx because the SDK's
+    // txPackages can still describe the now-impossible branch. Prefer that
+    // exact on-chain terminal refund in both auto-exit and standalone
+    // package -> sweep flows.
+    const refundTxHex = leafPackage.sweepTx || lastTxPackage(leafPackage)?.tx;
     if (!refundTxHex) {
       throw new SweepError(`Leaf ${leafPackage?.leafId ?? "unknown"} has no refund tx`);
     }

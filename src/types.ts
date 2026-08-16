@@ -85,8 +85,8 @@ export interface LeafPackage {
   leafId?: string | null;
   txPackages?: TxPackage[];
   /**
-   * Exact refund variant already observed on chain. Internal package-building
-   * marker used by auto-exit to preserve the transaction needed by `sweep`.
+   * Exact terminal refund variant already observed on chain. Package builders
+   * preserve it for `sweep` when a competing direct branch wins.
    */
   sweepTx?: string;
   [key: string]: unknown;
