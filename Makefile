@@ -22,6 +22,7 @@ CPFP_UTXO ?=
 CPFP_ARGS ?= $(if $(CPFP_UTXO),--cpfp-utxo $(CPFP_UTXO),)
 KEY_FILE ?=
 SIGNED_PACKAGES ?= recovery-packages-signed.json
+SWEEPS ?=
 ESPLORA_URL ?=
 ESPLORA_ARGS ?= $(if $(ESPLORA_URL),--esplora-url $(ESPLORA_URL),)
 
@@ -47,7 +48,7 @@ OFFLINE ?=
 NO_CONSOLIDATE ?=
 
 .PHONY: help refresh-recovery-bundle consolidate plan package sign-packages sweep \
-	test-e2e cpfp-address watch-cpfp broadcast recover
+	broadcast-sweep test-e2e cpfp-address watch-cpfp broadcast recover
 
 help:
 	@echo "Targets:"
@@ -58,7 +59,8 @@ help:
 	@echo "  make plan BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make package BUNDLE=../recovery-bundle.json DESTINATION=<bitcoin-address> FEE_RATE=1 CPFP_UTXO=<txid:vout:value:script:pubkey>"
 	@echo "  make sign-packages PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt   # or KEY_FILE=cpfp-key.hex"
-	@echo "  make sweep PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt NETWORK=mainnet DESTINATION=<bitcoin-address> FEE_RATE=1"
+	@echo "  make sweep PACKAGES=recovery-packages.json SEED_FILE=../spark-seed.txt NETWORK=mainnet DESTINATION=<bitcoin-address> FEE_RATE=1 [SWEEPS=sweep-transactions.json]"
+	@echo "  make broadcast-sweep SWEEPS=sweep-transactions.json NETWORK=mainnet"
 	@echo "  make test-e2e   # run the local unilateral-exit E2E against a running Spark stack"
 	@echo ""
 	@echo "Seed-derived simple flow (fund -> package -> autosign -> Esplora broadcast):"
@@ -171,9 +173,16 @@ sweep: require-destination
 		--network $(NETWORK) \
 		--destination $(DESTINATION) \
 		--fee-rate $(FEE_RATE) \
-		$(if $(ACCOUNT_NUMBER),--account-number $(ACCOUNT_NUMBER),)
+		$(if $(ACCOUNT_NUMBER),--account-number $(ACCOUNT_NUMBER),) \
+		$(if $(SWEEPS),--out $(SWEEPS),)
 
-.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file
+broadcast-sweep: require-sweeps
+	@$(NODE) src/cli.ts broadcast-sweep \
+		--sweeps $(SWEEPS) \
+		--network $(NETWORK) \
+		$(ESPLORA_ARGS)
+
+.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file require-sweeps
 
 require-destination:
 	@: $(if $(DESTINATION),,$(error DESTINATION is required))
@@ -186,3 +195,6 @@ require-signing-key:
 
 require-seed-file:
 	@: $(if $(SEED_FILE)$(SPARK_SEED),,$(error SEED_FILE or the SPARK_SEED environment variable is required))
+
+require-sweeps:
+	@: $(if $(SWEEPS),,$(error SWEEPS is required))

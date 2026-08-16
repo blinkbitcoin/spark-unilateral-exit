@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { secp256k1 } from "@noble/curves/secp256k1";
+import { bytesToHex, hexToBytes } from "@noble/curves/utils";
+import { p2tr, Transaction } from "@scure/btc-signer";
+import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
 import {
   constructSparkPackages,
+  decodeRefundFromTreeNode,
   reattachPendingRefunds,
   type RefundReattachDeps,
 } from "../src/spark-packages.ts";
@@ -45,7 +50,10 @@ describe("reattachPendingRefunds", () => {
     buildRefundFeeBump: (hex) => `psbt-${hex}`,
     refundForLeaf: () => ({
       txHex: "refundhex",
-      completedTxids: ["cpfp-refund-txid", "direct-refund-txid"],
+      completionVariants: [
+        { txid: "cpfp-refund-txid", txHex: "refundhex" },
+        { txid: "direct-refund-txid", txHex: "directrefundhex" },
+      ],
     }),
   });
 
@@ -71,6 +79,7 @@ describe("reattachPendingRefunds", () => {
       buildRefundFeeBump,
     });
     expect(packages[0]!.txPackages).toEqual([]);
+    expect(packages[0]!.sweepTx).toBe("refundhex");
     expect(buildRefundFeeBump).not.toHaveBeenCalled();
   });
 
@@ -100,23 +109,40 @@ describe("reattachPendingRefunds", () => {
       buildRefundFeeBump,
     });
     expect(packages[0]!.txPackages).toEqual([]);
+    expect(packages[0]!.sweepTx).toBe("directrefundhex");
     expect(buildRefundFeeBump).not.toHaveBeenCalled();
   });
 
-  it("does not touch a leaf whose exit chain is still being broadcast", async () => {
+  it("keeps a leaf's existing package when no terminal refund variant is broadcast", async () => {
     const packages: LeafPackage[] = [
       { leafId: "L1", txPackages: [{ tx: "node", feeBumpPsbt: "p" }] },
     ];
     const refundForLeaf = vi.fn(() => ({
       txHex: "refundhex",
-      completedTxids: ["cpfp-refund-txid"],
+      completionVariants: [{ txid: "cpfp-refund-txid", txHex: "refundhex" }],
     }));
     await reattachPendingRefunds(packages, bundle, [CPFP_UTXO], 5, "REGTEST", {
       ...baseDeps(),
       refundForLeaf,
     });
     expect(packages[0]!.txPackages).toEqual([{ tx: "node", feeBumpPsbt: "p" }]);
-    expect(refundForLeaf).not.toHaveBeenCalled();
+    expect(packages[0]!.sweepTx).toBeUndefined();
+    expect(refundForLeaf).toHaveBeenCalledOnce();
+  });
+
+  it("replaces an impossible SDK package with the exact alternate refund on chain", async () => {
+    const packages: LeafPackage[] = [
+      { leafId: "L1", txPackages: [{ tx: "losing-node-branch", feeBumpPsbt: "p" }] },
+    ];
+    await reattachPendingRefunds(packages, bundle, [CPFP_UTXO], 5, "REGTEST", {
+      ...baseDeps(),
+      isTxBroadcast: async (txid) => txid === "direct-refund-txid",
+    });
+    expect(packages[0]).toMatchObject({
+      leafId: "L1",
+      txPackages: [],
+      sweepTx: "directrefundhex",
+    });
   });
 
   it("throws when a pending refund has no funding UTXO (empty would read as complete)", async () => {
@@ -194,3 +220,44 @@ describe("reattachPendingRefunds", () => {
     ).rejects.toThrow(/leaf L1.*No UTXOs available/);
   });
 });
+
+describe("decodeRefundFromTreeNode", () => {
+  it("includes directRefundTx as a terminal sweep variant", () => {
+    const refundTx = testTransaction(10_000n);
+    const directFromCpfpRefundTx = testTransaction(9_000n);
+    const directRefundTx = testTransaction(8_000n);
+    const treeNodeHex = bytesToHex(
+      TreeNode.encode(
+        TreeNode.create({
+          refundTx: hexToBytes(refundTx.hex),
+          directFromCpfpRefundTx: hexToBytes(directFromCpfpRefundTx.hex),
+          directRefundTx: hexToBytes(directRefundTx.hex),
+        }),
+      ).finish(),
+    );
+
+    const decoded = decodeRefundFromTreeNode(treeNodeHex);
+    expect(decoded?.completionVariants).toEqual([
+      { txid: refundTx.id, txHex: refundTx.hex },
+      { txid: directFromCpfpRefundTx.id, txHex: directFromCpfpRefundTx.hex },
+      { txid: directRefundTx.id, txHex: directRefundTx.hex },
+    ]);
+  });
+});
+
+function testTransaction(amount: bigint): Transaction {
+  const privateKey = new Uint8Array(32).fill(2);
+  const xonly = secp256k1.getPublicKey(privateKey, true).slice(1);
+  const output = p2tr(xonly);
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({
+    txid: "00".repeat(32),
+    index: 0,
+    witnessUtxo: { amount: amount + 1_000n, script: output.script },
+    tapInternalKey: xonly,
+  });
+  tx.addOutput({ script: output.script, amount });
+  tx.sign(privateKey);
+  tx.finalize();
+  return tx;
+}

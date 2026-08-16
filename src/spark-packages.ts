@@ -105,7 +105,10 @@ export interface RefundReattachDeps {
   // it with the self-fee-paying direct variant, which spends the same node output).
   refundForLeaf: (
     treeNodeHex: string,
-  ) => { txHex: string; completedTxids: string[] } | null;
+  ) => {
+    txHex: string;
+    completionVariants: Array<{ txid: string; txHex: string }>;
+  } | null;
 }
 
 // The SDK's package builder skips any node whose transaction is already on chain,
@@ -146,9 +149,6 @@ export async function reattachPendingRefunds(
   const availableUtxos = [...cpfpUtxos];
   const unfundedLeafIds: string[] = [];
   for (const pkg of packages) {
-    // A non-empty list means the exit chain is still being broadcast; the SDK
-    // emits the refund itself on the round that broadcasts the leaf node.
-    if ((pkg.txPackages?.length ?? 0) > 0) continue;
     if (pkg.leafId == null) continue;
     const leaf = leafById.get(pkg.leafId);
     if (!leaf?.treeNodeHex) continue;
@@ -167,11 +167,13 @@ export async function reattachPendingRefunds(
       );
     }
     if (!refund) continue;
-    // If any refund variant is already on chain, the exit is genuinely complete;
-    // leave the list empty so the caller reports success instead of looping on a
-    // refund that can no longer spend the (already-spent) node output.
-    let alreadyExited = false;
-    for (const txid of refund.completedTxids) {
+    // Check every terminal refund before trusting the SDK's remaining package
+    // list. Spark's chainwatcher may have completed the alternate
+    // directTx -> directRefundTx branch. In that case the SDK can still return
+    // the now-impossible nodeTx branch, whose input is already spent. Preserve
+    // the exact on-chain refund so auto-exit can replace the sweep packages file.
+    let completedVariant: { txid: string; txHex: string } | undefined;
+    for (const variant of refund.completionVariants) {
       // The SDK's isTxBroadcast rejects (rather than returning false) when the
       // esplora endpoint answers a not-found txid with a non-JSON 404 body — e.g.
       // mempool.space on mainnet returns "Transaction not found", and .json()
@@ -184,16 +186,24 @@ export async function reattachPendingRefunds(
       // fails missing-or-spent and the leaf is deferred and retried.
       let broadcast = false;
       try {
-        broadcast = await deps.isTxBroadcast(txid, network);
+        broadcast = await deps.isTxBroadcast(variant.txid, network);
       } catch {
         broadcast = false;
       }
       if (broadcast) {
-        alreadyExited = true;
+        completedVariant = variant;
         break;
       }
     }
-    if (alreadyExited) continue;
+    if (completedVariant) {
+      pkg.txPackages = [];
+      pkg.sweepTx = completedVariant.txHex;
+      continue;
+    }
+
+    // A non-empty list means the exit chain is still being broadcast; the SDK
+    // emits the refund itself on the round that broadcasts the leaf node.
+    if ((pkg.txPackages?.length ?? 0) > 0) continue;
     // Out of funding: never double-spend one UTXO across refunds, and never
     // leave the package silently empty (the caller reads empty as "exit
     // complete"). Record the leaf and throw below, same surface-don't-swallow
@@ -227,21 +237,31 @@ export async function reattachPendingRefunds(
   }
 }
 
-function decodeRefundFromTreeNode(
+export function decodeRefundFromTreeNode(
   treeNodeHex: string,
-): { txHex: string; completedTxids: string[] } | null {
+): {
+  txHex: string;
+  completionVariants: Array<{ txid: string; txHex: string }>;
+} | null {
   const node = TreeNode.decode(hexToBytes(treeNodeHex));
   if (!node.refundTx || node.refundTx.length === 0) return null;
   const txHex = bytesToHex(node.refundTx);
-  const completedTxids = [refundTxidFromHex(txHex)];
-  // The operator chainwatcher completes the exit with the self-fee-paying direct
-  // refund (a different txid spending the same node output); treat it as done too.
+  const completionVariants = [refundVariant(txHex)];
+  // A self-fee-paying refund can spend the CPFP node transaction directly.
   if (node.directFromCpfpRefundTx && node.directFromCpfpRefundTx.length > 0) {
-    completedTxids.push(
-      refundTxidFromHex(bytesToHex(node.directFromCpfpRefundTx)),
-    );
+    completionVariants.push(refundVariant(bytesToHex(node.directFromCpfpRefundTx)));
   }
-  return { txHex, completedTxids };
+  // The chainwatcher can instead take the alternate direct node branch and
+  // complete it with directRefundTx. Its output is controlled by the same
+  // user refund key and is therefore the transaction `sweep` must spend.
+  if (node.directRefundTx && node.directRefundTx.length > 0) {
+    completionVariants.push(refundVariant(bytesToHex(node.directRefundTx)));
+  }
+  return { txHex, completionVariants };
+}
+
+function refundVariant(txHex: string): { txid: string; txHex: string } {
+  return { txid: refundTxidFromHex(txHex), txHex };
 }
 
 // Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser

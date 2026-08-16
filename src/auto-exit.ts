@@ -200,7 +200,13 @@ export async function autoExit({
     [...states.values()].filter((s) => s.status === "pending");
 
   // Ensure initial funding exists before starting rounds.
-  let utxos = await confirmedFundingUtxos(d, key.address, baseUrl);
+  let utxos = await confirmedFundingUtxosWithRetry(
+    d,
+    key.address,
+    baseUrl,
+    pollIntervalMs,
+    log,
+  );
   if (utxos.length === 0) {
     log(
       `No confirmed funding at ${key.address}; send at least ${estimate.requiredSats} sats and leave this running`,
@@ -221,7 +227,13 @@ export async function autoExit({
         log,
       }),
     });
-    utxos = await confirmedFundingUtxos(d, key.address, baseUrl);
+    utxos = await confirmedFundingUtxosWithRetry(
+      d,
+      key.address,
+      baseUrl,
+      pollIntervalMs,
+      log,
+    );
   }
 
   let rounds = 0;
@@ -234,7 +246,13 @@ export async function autoExit({
           .join(", ")}`,
       );
     }
-    utxos = await confirmedFundingUtxos(d, key.address, baseUrl);
+    utxos = await confirmedFundingUtxosWithRetry(
+      d,
+      key.address,
+      baseUrl,
+      pollIntervalMs,
+      log,
+    );
     const active = pendingLeaves();
     if (utxos.length === 0) {
       log("No spendable confirmed funding UTXO yet; waiting");
@@ -277,11 +295,12 @@ export async function autoExit({
     let waitingDependency = false;
     for (let i = 0; i < sortedActive.length; i += 1) {
       const state = sortedActive[i]!;
-      const utxo = utxos[i];
-      if (!utxo) {
-        waitingDependency = true;
-        break;
-      }
+      const assignedUtxo = utxos[i];
+      // Completion detection does not spend funding, so it can safely reuse
+      // the first UTXO while checking leaves beyond the number of available
+      // UTXOs. A still-pending package may only proceed with its own assigned
+      // UTXO; that guard sits immediately after the completion check below.
+      const constructionUtxo = assignedUtxo ?? utxos[0]!;
       const leaf = leafById.get(state.leafId);
       if (!leaf) {
         state.status = "failed";
@@ -292,12 +311,27 @@ export async function autoExit({
       try {
         packages = await d.constructPackages({
           bundle: { ...bundle, leaves: [leaf] },
-          cpfpUtxos: [toCpfpUtxo(utxo, key.script, key.publicKey)],
+          cpfpUtxos: [toCpfpUtxo(constructionUtxo, key.script, key.publicKey)],
           feeRate,
         });
       } catch (error) {
         recordLeafError(state, error, log);
         continue;
+      }
+      const sweepTx = packages[0]?.sweepTx;
+      if (sweepTx) {
+        const sweepTxid = d.txIdOf(sweepTx);
+        refundHexes.set(state.leafId, sweepTx);
+        state.refundTxid = sweepTxid;
+        state.status = "exit-broadcast";
+        log(
+          `Leaf ${state.leafId}: refund variant already broadcast (${sweepTxid}); ready to sweep`,
+        );
+        continue;
+      }
+      if (!assignedUtxo) {
+        waitingDependency = true;
+        break;
       }
       const txPackages = packages[0]?.txPackages ?? [];
       if (txPackages.length === 0) {
@@ -327,7 +361,14 @@ export async function autoExit({
       const lock = d.heightLockOf(head.tx);
       if (lock) {
         const maturity = await lockMaturityHeight(d, lock, baseUrl);
-        const tip = await d.fetchTip(baseUrl);
+        let tip: number;
+        try {
+          tip = await d.fetchTip(baseUrl);
+        } catch (error) {
+          waitingDependency = true;
+          log(`Esplora tip fetch failed (${errMessage(error)}); retrying`);
+          continue;
+        }
         if (maturity === null) {
           waitingDependency = true;
           log(`Leaf ${state.leafId}: timelocked parent not confirmed yet; waiting`);
@@ -437,6 +478,26 @@ async function confirmedFundingUtxos(
       (u) => u?.status?.confirmed && BigInt(u.value ?? 0) >= MIN_USABLE_UTXO_SATS,
     )
     .sort((a, b) => Number(BigInt(b.value) - BigInt(a.value)));
+}
+
+async function confirmedFundingUtxosWithRetry(
+  d: AutoExitDeps,
+  address: string,
+  baseUrl: string,
+  pollIntervalMs: number,
+  log: (message: string) => void,
+): Promise<EsploraUtxo[]> {
+  let consecutiveErrors = 0;
+  for (;;) {
+    try {
+      return await confirmedFundingUtxos(d, address, baseUrl);
+    } catch (error) {
+      consecutiveErrors += 1;
+      log(`Esplora funding fetch failed (${errMessage(error)}); retrying`);
+      const backoff = Math.min(2 ** consecutiveErrors, 8);
+      await d.sleep(pollIntervalMs * backoff);
+    }
+  }
 }
 
 function toCpfpUtxo(

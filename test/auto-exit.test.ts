@@ -270,6 +270,101 @@ describe("autoExit", () => {
     expect(submitted).toEqual(["tx-B1"]);
   });
 
+  it("preserves the exact alternate refund transaction for sweep", async () => {
+    const { deps, submitted } = makeFakes();
+    const constructPackages = deps.constructPackages!;
+    const events: string[] = [];
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: {
+        ...deps,
+        constructPackages: (async (options) =>
+          options.bundle.leaves[0]!.id === "L1"
+            ? [{ leafId: "L1", txPackages: [], sweepTx: "tx-direct-refund-L1" }]
+            : constructPackages(options)) as AutoExitDeps["constructPackages"],
+      },
+      onEvent: (message) => events.push(message),
+    });
+
+    expect(submitted).toEqual(["tx-B1"]);
+    expect(result.leaves.find((leaf) => leaf.leafId === "L1")).toMatchObject({
+      status: "exit-broadcast",
+      refundTxid: "tx-direct-refund-L1",
+    });
+    expect(result.packages).toContainEqual({
+      leafId: "L1",
+      txPackages: [{ tx: "tx-direct-refund-L1" }],
+    });
+    expect(events).toContain(
+      "Leaf L1: refund variant already broadcast (tx-direct-refund-L1); ready to sweep",
+    );
+  });
+
+  it("reconciles multiple completed refunds in one round with one funding UTXO", async () => {
+    const { deps, submitted } = makeFakes();
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: {
+        ...deps,
+        constructPackages: (async ({ bundle }) => {
+          const leafId = bundle.leaves[0]!.id;
+          return [
+            { leafId, txPackages: [], sweepTx: `tx-direct-refund-${leafId}` },
+          ];
+        }) as AutoExitDeps["constructPackages"],
+      },
+    });
+
+    expect(submitted).toEqual([]);
+    expect(result.rounds).toBe(1);
+    expect(result.packages.map((pkg) => pkg.txPackages?.[0]?.tx).sort()).toEqual([
+      "tx-direct-refund-L1",
+      "tx-direct-refund-L2",
+    ]);
+  });
+
+  it("retries transient funding and tip fetch failures", async () => {
+    const { deps } = makeFakes();
+    const fetchUtxos = deps.fetchUtxos!;
+    const fetchTip = deps.fetchTip!;
+    let fundingFailures = 1;
+    let tipFailures = 1;
+    const events: string[] = [];
+    const result = await autoExit({
+      bundle: BUNDLE,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: {
+        ...deps,
+        fetchUtxos: async (...args) => {
+          if (fundingFailures-- > 0) throw new Error("fetch failed");
+          return fetchUtxos(...args);
+        },
+        fetchTip: async (...args) => {
+          if (tipFailures-- > 0) throw new Error("fetch failed");
+          return fetchTip(...args);
+        },
+      },
+      onEvent: (message) => events.push(message),
+    });
+
+    expect(result.leaves.find((leaf) => leaf.leafId === "L1")?.status).toBe(
+      "waiting-timelock",
+    );
+    expect(events.some((event) => event.includes("funding fetch failed"))).toBe(true);
+    expect(events.some((event) => event.includes("tip fetch failed"))).toBe(true);
+  });
+
   it("recovers when a submitted package is evicted from the mempool", async () => {
     const { deps, submitted, confirmed } = makeFakes();
     // First submission of tx-A1 is "accepted" but never appears anywhere

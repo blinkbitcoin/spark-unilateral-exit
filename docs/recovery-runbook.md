@@ -467,7 +467,7 @@ make sweep \
   DESTINATION=<bitcoin-address> \
   FEE_RATE=1 \
   ACCOUNT_NUMBER=1 \
-  > sweep-transactions.json
+  SWEEPS=sweep-transactions.json
 ```
 
 Always supply `DESTINATION` from a trusted operator or wallet UI. The sweep
@@ -482,7 +482,8 @@ The command:
 - verifies a candidate matches refund transaction output 0,
 - builds a one-input, one-output Taproot key-path spend to `DESTINATION`,
 - signs the sweep transaction, and
-- prints signed raw transaction hex.
+- writes signed raw transaction hex to `SWEEPS` (or prints it when `SWEEPS`
+  is omitted).
 
 Output shape:
 
@@ -507,12 +508,12 @@ Output shape:
 }
 ```
 
-Broadcast each `sweepTx` as a normal Bitcoin transaction. With the CLI:
+Broadcast each `sweepTx` as a normal Bitcoin transaction:
 
 ```sh
-node src/cli.ts broadcast-sweep \
-  --sweeps sweep-transactions.json \
-  --network MAINNET
+make broadcast-sweep \
+  SWEEPS=sweep-transactions.json \
+  NETWORK=mainnet
 ```
 
 Or with Bitcoin Core:

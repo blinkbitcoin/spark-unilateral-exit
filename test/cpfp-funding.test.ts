@@ -284,7 +284,10 @@ describe("estimateCpfpFunding", () => {
         await reattachPendingRefunds(packages, bundle, cpfpUtxos, feeRate, "REGTEST", {
           isTxBroadcast: async () => false,
           buildRefundFeeBump: () => refundFeeBumpPsbtHex(1_000n),
-          refundForLeaf: () => ({ txHex: "refundhex", completedTxids: ["tid"] }),
+          refundForLeaf: () => ({
+            txHex: "refundhex",
+            completionVariants: [{ txid: "tid", txHex: "refundhex" }],
+          }),
         });
         return packages;
       },
