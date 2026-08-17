@@ -433,6 +433,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         "--seed-file", seedFile,
         "--network", "LOCAL",
         "--account-number", "1",
+        "--yes",
         "--out", signedPath,
       ]);
       const signed = JSON.parse(await fs.readFile(signedPath, "utf8"));
@@ -492,6 +493,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         "--seed-file", seedFile,
         "--network", "LOCAL",
         "--account-number", "1",
+        "--yes",
         "--out", signed2Path,
       ]);
       const signed2 = JSON.parse(await fs.readFile(signed2Path, "utf8"));
@@ -654,6 +656,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
           "--seed-file", seedFile,
           "--network", "LOCAL",
           "--account-number", "1",
+          "--yes",
           "--out", signedPath,
         ]);
         const signed = JSON.parse(await fs.readFile(signedPath, "utf8"));
@@ -725,6 +728,7 @@ describe.skipIf(!runE2e)("Spark local unilateral-exit E2E", () => {
         "--seed-file", seedFile,
         "--network", "LOCAL",
         "--account-number", "1",
+        "--yes",
         "--out", signed2Path,
       ]);
       const signed2 = JSON.parse(await fs.readFile(signed2Path, "utf8"));
