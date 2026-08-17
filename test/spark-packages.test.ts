@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { p2tr, Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
+import { parseRecoveryBundle } from "../src/bundle.ts";
 import { deriveCpfpFundingKey } from "../src/cpfp-funding.ts";
 import {
   constructSparkPackages,
@@ -279,6 +281,66 @@ describe("txidOfPossiblyUnsigned", () => {
   it("agrees with Transaction.id once the transaction is signed", () => {
     const tx = testTransaction(10_000n);
     expect(txidOfPossiblyUnsigned(tx)).toBe(tx.id);
+  });
+});
+
+// The local regtest stack signs directFromCpfpRefundTx and emits no direct route
+// at all, so no test that needs a running stack can reach the shape a live
+// operator set actually returns. This fixture is that shape, rebuilt with
+// synthetic keys and amounts -- see test/fixtures/make-mainnet-shaped-bundle.mjs
+// for the side-by-side measurement it was derived from.
+describe("mainnet-shaped bundle fixture", () => {
+  const bundle = parseRecoveryBundle(
+    fs.readFileSync(
+      new URL("./fixtures/mainnet-shaped-bundle.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const parse = (raw: Uint8Array) =>
+    Transaction.fromRaw(raw, {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+      disableScriptCheck: true,
+    });
+
+  // Guards the fixture itself. Regenerated all-signed it would still satisfy the
+  // test below while testing nothing, so assert the split it exists to carry.
+  it("keeps the signed-refund / unsigned-direct-route split of a real export", () => {
+    expect(bundle.leaves).toHaveLength(3);
+    for (const leaf of bundle.leaves) {
+      const node = TreeNode.decode(hexToBytes(leaf.treeNodeHex));
+      expect(parse(node.refundTx).isFinal).toBe(true);
+      expect(parse(node.directFromCpfpRefundTx).isFinal).toBe(false);
+      expect(parse(node.directTx).isFinal).toBe(false);
+      expect(parse(node.directRefundTx).isFinal).toBe(false);
+    }
+  });
+
+  it("re-attaches every leaf's refund through the real decoder", async () => {
+    const packages: LeafPackage[] = bundle.leaves.map((leaf) => ({
+      leafId: leaf.id,
+      txPackages: [],
+    }));
+    // One funding UTXO per pending refund, as reattachPendingRefunds requires.
+    const utxos: CpfpUtxo[] = bundle.leaves.map((_, index) => ({
+      txid: (index + 1).toString(16).padStart(2, "0").repeat(32),
+      vout: 0,
+      value: 50_000n,
+      script: `0014${"00".repeat(20)}`,
+      publicKey: `02${"00".repeat(32)}`,
+    }));
+
+    await reattachPendingRefunds(packages, bundle, utxos, 5, "MAINNET", {
+      isTxBroadcast: async () => false,
+      buildRefundFeeBump: (hex) => `psbt-${hex.slice(0, 8)}`,
+      // The real decoder rather than a stub: computing a txid for each unsigned
+      // variant is the seam that threw on the first leaf of every real bundle.
+      refundForLeaf: decodeRefundFromTreeNode,
+    });
+
+    for (const pkg of packages) {
+      expect(pkg.txPackages).toHaveLength(1);
+    }
   });
 });
 
