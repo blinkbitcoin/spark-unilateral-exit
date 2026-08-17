@@ -10,6 +10,7 @@ import {
   decodeDirectPathFromTreeNode,
   decodeRefundFromTreeNode,
   reattachPendingRefunds,
+  txidOfPossiblyUnsigned,
   type RefundReattachDeps,
 } from "../src/spark-packages.ts";
 import type { CpfpUtxo, LeafPackage, RecoveryBundle } from "../src/types.ts";
@@ -245,6 +246,40 @@ describe("decodeRefundFromTreeNode", () => {
       { txid: directRefundTx.id, txHex: directRefundTx.hex },
     ]);
   });
+
+  // A real operator export only signs refundTx; the alternate routes are the
+  // user's own to sign at exit time and arrive unsigned. Computing their txids
+  // through Transaction.id therefore threw "Transaction is not finalized" on
+  // every real bundle -- for a fresh bundle, on the very first leaf.
+  it("decodes variants the operator left unsigned", () => {
+    const refundTx = testTransaction(10_000n);
+    const directFromCpfp = unsignedTransaction(9_000n);
+    const direct = unsignedTransaction(8_000n);
+    const treeNodeHex = bytesToHex(
+      TreeNode.encode(
+        TreeNode.create({
+          refundTx: hexToBytes(refundTx.hex),
+          directFromCpfpRefundTx: hexToBytes(directFromCpfp.hex),
+          directRefundTx: hexToBytes(direct.hex),
+        }),
+      ).finish(),
+    );
+
+    // Signing a segwit spend cannot move its txid, so each variant must decode to
+    // the id its signed form will be found by on chain.
+    expect(decodeRefundFromTreeNode(treeNodeHex)?.completionVariants).toEqual([
+      { txid: refundTx.id, txHex: refundTx.hex },
+      { txid: directFromCpfp.signedTxid, txHex: directFromCpfp.hex },
+      { txid: direct.signedTxid, txHex: direct.hex },
+    ]);
+  });
+});
+
+describe("txidOfPossiblyUnsigned", () => {
+  it("agrees with Transaction.id once the transaction is signed", () => {
+    const tx = testTransaction(10_000n);
+    expect(txidOfPossiblyUnsigned(tx)).toBe(tx.id);
+  });
 });
 
 function testTransaction(amount: bigint): Transaction {
@@ -319,3 +354,22 @@ describe("decodeDirectPathFromTreeNode", () => {
     expect(decodeDirectPathFromTreeNode(missingRefund)).toBeNull();
   });
 });
+// The same transaction as it leaves the operator: serialized before anyone signs
+// it, carrying the txid it will still have afterwards.
+function unsignedTransaction(amount: bigint): { hex: string; signedTxid: string } {
+  const privateKey = new Uint8Array(32).fill(3);
+  const xonly = secp256k1.getPublicKey(privateKey, true).slice(1);
+  const output = p2tr(xonly);
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({
+    txid: "11".repeat(32),
+    index: 0,
+    witnessUtxo: { amount: amount + 1_000n, script: output.script },
+    tapInternalKey: xonly,
+  });
+  tx.addOutput({ script: output.script, amount });
+  const hex = tx.hex;
+  tx.sign(privateKey);
+  tx.finalize();
+  return { hex, signedTxid: tx.id };
+}
