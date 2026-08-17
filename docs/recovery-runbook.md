@@ -349,7 +349,13 @@ the key in shell history and `ps`. If you do keep a `cpfp-key.hex`, write it wit
 outputs with mode `0600`.)
 
 This signs every `feeBumpPsbt` in the package JSON and adds `signedChildTx` to
-each entry. The output is ready for broadcast. The SDK chains the CPFP UTXO
+each entry. Before reading the private key for a signature, the command verifies
+that every non-anchor input belongs to the CPFP key, the anchor spends the
+companion parent transaction, and the sole change output returns to the CPFP
+key. It prints the funding input, change, and fee totals for every package and
+requires the operator to type `yes`. For trusted automation only, `--yes` (or
+`make sign-packages YES=1`) supplies that approval after printing the same
+summary. The output is then ready for broadcast. The SDK chains the CPFP UTXO
 automatically — one initial UTXO feeds all packages via change outputs.
 
 ### Option B: Manual signing with Bitcoin Core or hardware wallet

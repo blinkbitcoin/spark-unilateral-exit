@@ -44,7 +44,7 @@ The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 | `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
 | `watch-cpfp` | Watch the funding address for an incoming UTXO and emit it as `--cpfp-utxo` |
 | `package` | Construct unilateral-exit packages via the upstream Spark SDK |
-| `sign-packages` | Sign the CPFP fee-bump PSBTs (key from seed, key-file, or hex) |
+| `sign-packages` | Validate, summarize, confirm, and sign the CPFP fee-bump PSBTs (key from seed, key-file, or hex) |
 | `broadcast` | Submit signed packages via Esplora |
 | `tx-status` | Check confirmation status of a transaction via Esplora |
 | `sweep` | Spend confirmed refund outputs to a destination address |
