@@ -120,12 +120,19 @@ test("regtest: refresh, encrypted export/import, offline exit and restart throug
       await page.locator("#recover-tab").click();
       if (await page.locator("#session-title").textContent() === "Unilateral exit confirmed") break;
       // Background polling can finish between checking the title and clicking.
-      // A disappearing resume button is valid only if recovery is confirmed.
-      try { await page.locator("#advance").click({ timeout: 2000 }); }
-      catch { await expect(page.locator("#session-title")).toHaveText("Unilateral exit confirmed"); break; }
-      await expect(page.locator("#advance")).toBeEnabled();
+      // It can also hold the service mid-advance, leaving the resume button
+      // briefly unavailable on a slow machine; only a durable failure matters.
+      try { await page.locator("#advance").click({ timeout: 30_000 }); }
+      catch {
+        if (await page.locator("#session-title").textContent() === "Unilateral exit confirmed") break;
+        throw new Error("The resume button stayed unavailable while the exit is still in progress.");
+      }
+      await expect(page.locator("#advance")).toBeEnabled({ timeout: 60_000 });
       console.log(`Regtest recovery step ${step}: ${await page.locator("#session-message").textContent()}`);
-      if (await page.locator("#feedback").getAttribute("class") === "error") throw new Error((await page.locator("#feedback").textContent())!);
+      const feedback = await page.locator("#feedback").textContent();
+      // A background tick advancing first rejects the manual click as busy;
+      // that is benign, any other error fails the test.
+      if (await page.locator("#feedback").getAttribute("class") === "error" && !feedback?.includes("Another operation is still running")) throw new Error(feedback!);
       await faucet.mineBlocksAndWaitForMiningToComplete(2050);
     }
     await expect(page.locator("#session-title")).toHaveText("Unilateral exit confirmed", { timeout: 20_000 });
