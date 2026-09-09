@@ -151,6 +151,15 @@ export interface EsploraUtxo {
   status?: EsploraTxStatus;
 }
 
+// GET /tx/:txid/outspend/:vout. `txid` is the spending transaction, present
+// only when `spent` is true.
+export interface EsploraOutspend {
+  spent: boolean;
+  txid?: string;
+  vin?: number;
+  status?: EsploraTxStatus;
+}
+
 // ---------------------------------------------------------------------------
 // Spark SDK wallet seam (used by leaf consolidation)
 // ---------------------------------------------------------------------------

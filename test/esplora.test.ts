@@ -5,6 +5,7 @@ import {
   submitPackage,
   broadcastTransaction,
   getTransaction,
+  getOutspend,
 } from "../src/esplora.ts";
 
 describe("esploraBaseUrl", () => {
@@ -283,6 +284,63 @@ describe("getTransaction", () => {
 
     await expect(
       getTransaction("abc123", "https://example.com"),
+    ).rejects.toThrow(EsploraError);
+  });
+});
+
+describe("getOutspend", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fetches /tx/:txid/outspend/:vout and returns the parsed outspend", async () => {
+    const outspend = {
+      spent: true,
+      txid: "def456",
+      vin: 0,
+      status: { confirmed: true, block_height: 800000 },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(outspend),
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await getOutspend("abc123", 2, "https://example.com");
+    expect(result).toEqual(outspend);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.com/tx/abc123/outspend/2",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("returns null for 404 so callers can try the other byte-order candidate", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: () => Promise.resolve("Transaction not found"),
+    });
+
+    const result = await getOutspend("abc123", 0, "https://example.com");
+    expect(result).toBeNull();
+  });
+
+  it("throws EsploraError on server error", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: () => Promise.resolve("Bad Gateway"),
+    });
+
+    await expect(
+      getOutspend("abc123", 0, "https://example.com"),
     ).rejects.toThrow(EsploraError);
   });
 });

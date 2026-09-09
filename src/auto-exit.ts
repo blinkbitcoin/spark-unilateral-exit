@@ -13,15 +13,21 @@ import {
   broadcastTransaction,
   esploraBaseUrl,
   getAddressUtxos,
+  getOutspend,
   getTipHeight,
   getTransaction,
   submitPackage,
 } from "./esplora.ts";
 import { signPsbt } from "./sign.ts";
-import { constructSparkPackages } from "./spark-packages.ts";
+import {
+  constructSparkPackages,
+  decodeDirectPathFromTreeNode,
+  type DirectPathTxs,
+} from "./spark-packages.ts";
 import type {
   AccountNumberInput,
   CpfpUtxo,
+  EsploraOutspend,
   EsploraTransaction,
   EsploraUtxo,
   LeafPackage,
@@ -59,6 +65,14 @@ interface HeightLock {
   prevTxidCandidates: string[];
 }
 
+// First-input outpoint of a transaction. txidCandidates carries both byte
+// orders of the prev txid, same display-order ambiguity relativeHeightLock
+// handles.
+export interface InputOutpoint {
+  txidCandidates: string[];
+  vout: number;
+}
+
 export interface AutoExitDeps {
   constructPackages: typeof constructSparkPackages;
   estimateFunding: typeof estimateCpfpFunding;
@@ -75,6 +89,13 @@ export interface AutoExitDeps {
   ) => string;
   txIdOf: (txHex: string) => string;
   heightLockOf: (txHex: string) => HeightLock | null;
+  fetchOutspend: (
+    txid: string,
+    vout: number,
+    baseUrl: string,
+  ) => Promise<EsploraOutspend | null>;
+  directPathOf: (treeNodeHex: string) => DirectPathTxs | null;
+  inputOutpointOf: (txHex: string) => InputOutpoint | null;
   sleep: (ms: number) => Promise<void>;
 }
 
@@ -90,6 +111,9 @@ const DEFAULT_DEPS: AutoExitDeps = {
   signChild: signPsbt,
   txIdOf: transactionIdFromHex,
   heightLockOf: relativeHeightLock,
+  fetchOutspend: getOutspend,
+  directPathOf: decodeDirectPathFromTreeNode,
+  inputOutpointOf: firstInputOutpoint,
   sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 };
 
@@ -401,6 +425,36 @@ export async function autoExit({
         );
       } catch (error) {
         const message = errMessage(error);
+        if (/missingorspent/i.test(message)) {
+          // A missing head input can mean two very different things: its
+          // parent is simply not confirmed yet, or the operator's chainwatcher
+          // already spent it via the leaf's direct-path transactions. Resolve
+          // which before deferring; deferring a lost race resubmits a dead
+          // package forever.
+          let resolved = false;
+          try {
+            resolved = await resolveDirectPathRace({
+              d,
+              state,
+              treeNodeHex: leaf.treeNodeHex,
+              headTxHex: head.tx,
+              baseUrl,
+              log,
+              refundHexes,
+            });
+          } catch (raceError) {
+            // Chain state is unknown, not "dependency unconfirmed": count the
+            // failure so a persistent lookup outage surfaces instead of the
+            // leaf silently retrying forever.
+            recordLeafError(
+              state,
+              new AutoExitError(`direct-path check failed: ${errMessage(raceError)}`),
+              log,
+            );
+            continue;
+          }
+          if (resolved) continue;
+        }
         if (/missingorspent|TRUC|already in mempool|txn-already|bip68|non-final/i.test(message)) {
           // Dependency not confirmed yet or already submitted; try again next round.
           waitingDependency = true;
@@ -542,6 +596,133 @@ async function lockMaturityHeight(
   return null;
 }
 
+// Resolves the two meanings of a bad-txns-inputs-missingorspent rejection for
+// a leaf's head transaction. When the head's input outpoint is simply unspent
+// (its parent is unknown or unconfirmed) this returns false and the caller
+// defers the leaf as before. When the outpoint was spent by the leaf's known
+// directTx, the operator's chainwatcher won the broadcast race: the CPFP chain
+// can never confirm, so pivot the leaf to the pre-signed, self-fee-paying
+// directRefundTx. It is tracked exactly like a CPFP refund (recorded in
+// refundHexes so the sweep-compatible packages file points at the transaction
+// that will actually pay out; deferred while its CSV lock matures; broadcast
+// plainly once mature, since its fee is baked in and no anchor child exists).
+// An outpoint spent by anything else fails the leaf loudly: the bundle no
+// longer describes reality and resubmitting cannot fix that.
+async function resolveDirectPathRace({
+  d,
+  state,
+  treeNodeHex,
+  headTxHex,
+  baseUrl,
+  log,
+  refundHexes,
+}: {
+  d: AutoExitDeps;
+  state: LeafExitState;
+  treeNodeHex: string;
+  headTxHex: string;
+  baseUrl: string;
+  log: (message: string) => void;
+  refundHexes: Map<string, string>;
+}): Promise<boolean> {
+  const direct = d.directPathOf(treeNodeHex);
+  if (!direct) return false;
+  const outpoint = d.inputOutpointOf(headTxHex);
+  if (!outpoint) return false;
+
+  let spender: string | undefined;
+  let definitive = false;
+  let lookupError: unknown;
+  for (const candidate of outpoint.txidCandidates) {
+    let outspend: EsploraOutspend | null = null;
+    try {
+      outspend = await d.fetchOutspend(candidate, outpoint.vout, baseUrl);
+    } catch (error) {
+      // A failed lookup is not evidence the outpoint is unspent; keep the
+      // error and let the other byte-order candidate try to answer.
+      lookupError = error;
+      continue;
+    }
+    if (!outspend) continue; // unknown txid: wrong byte order (or parent not seen)
+    definitive = true;
+    if (outspend.spent && outspend.txid) spender = outspend.txid;
+    break;
+  }
+  // Without a definitive response the chain state is unknown, not unspent.
+  // Propagate the lookup failure so the caller counts it instead of treating
+  // the missingorspent rejection as an ordinary dependency wait forever.
+  if (!definitive && lookupError !== undefined) throw lookupError;
+  if (!spender) return false; // outpoint unspent: ordinary dependency wait
+  if (spender === d.txIdOf(headTxHex)) return false; // our own head is on chain
+
+  if (spender !== direct.directTxid) {
+    state.status = "failed";
+    state.lastError = `node input spent by unexpected transaction ${spender}`;
+    log(
+      `Leaf ${state.leafId}: node input spent by ${spender}, which is neither the bundle's ` +
+        `node tx nor its direct-path variant (${direct.directTxid}); the bundle may be ` +
+        `stale. Investigate before retrying`,
+    );
+    return true;
+  }
+
+  refundHexes.set(state.leafId, direct.directRefundTxHex);
+  state.refundTxid = direct.directRefundTxid;
+
+  let existing: EsploraTransaction | null = null;
+  try {
+    existing = await d.fetchTx(direct.directRefundTxid, baseUrl);
+  } catch {
+    existing = null;
+  }
+  if (existing) {
+    state.status = "exit-broadcast";
+    log(
+      `Leaf ${state.leafId}: operator completed the exit via direct path ${direct.directTxid}; ` +
+        `direct refund ${direct.directRefundTxid} is ` +
+        `${existing.status?.confirmed ? "confirmed" : "in the mempool"}. Sweep once confirmed`,
+    );
+    return true;
+  }
+
+  const lock = d.heightLockOf(direct.directRefundTxHex);
+  if (lock) {
+    const maturity = await lockMaturityHeight(d, lock, baseUrl);
+    if (maturity === null) {
+      // directTx spent the input but is not confirmed yet; the leaf stays
+      // pending and the next round re-checks.
+      log(
+        `Leaf ${state.leafId}: direct path ${direct.directTxid} spent the node input but is ` +
+          `not confirmed yet; waiting`,
+      );
+      return true;
+    }
+    const tip = await d.fetchTip(baseUrl);
+    if (tip + 1 < maturity) {
+      state.status = "waiting-timelock";
+      state.maturityHeight = maturity;
+      log(
+        `Leaf ${state.leafId}: operator completed the exit via direct path ${direct.directTxid}; ` +
+          `direct refund timelocked until block ${maturity} (${maturity - tip} blocks away); ` +
+          `re-run after maturity`,
+      );
+      return true;
+    }
+  }
+
+  try {
+    await d.broadcastTx(direct.directRefundTxHex, baseUrl);
+    state.status = "exit-broadcast";
+    log(
+      `Leaf ${state.leafId}: broadcast mature direct refund ${direct.directRefundTxid} ` +
+        `(self-paying, no CPFP needed); sweep once confirmed`,
+    );
+  } catch (error) {
+    recordLeafError(state, error, log);
+  }
+  return true;
+}
+
 // How many consecutive not-found polls before a submitted transaction is
 // treated as evicted from the mempool. Generous because Esplora may briefly
 // 404 a transaction right after submission while it propagates.
@@ -583,6 +764,16 @@ export function transactionIdFromHex(txHex: string): string {
   return parseTransaction(txHex).id;
 }
 
+// Both display byte orders of a parsed input's prev txid. Parsers expose the
+// txid in serialization order, Esplora expects display order; callers probe
+// with both candidates and keep the one the endpoint recognizes.
+function txidByteOrderCandidates(rawTxid: Uint8Array | ArrayLike<number>): string[] {
+  const hex = bytesToHex(
+    rawTxid instanceof Uint8Array ? rawTxid : new Uint8Array(rawTxid),
+  );
+  return [hex, bytesToHex(new Uint8Array([...hexToBytes(hex)].reverse()))];
+}
+
 // Reads a BIP68 relative height lock from the transaction's first input.
 // Returns null when the sequence disables relative locks or encodes a
 // time-based lock (Spark refunds use height-based locks).
@@ -595,12 +786,23 @@ export function relativeHeightLock(txHex: string): HeightLock | null {
   const blocks = sequence & 0xffff;
   if (blocks === 0) return null;
   const rawTxid = input?.txid;
-  const candidates: string[] = [];
-  if (rawTxid) {
-    const hex = bytesToHex(rawTxid instanceof Uint8Array ? rawTxid : new Uint8Array(rawTxid));
-    candidates.push(hex, bytesToHex(new Uint8Array([...hexToBytes(hex)].reverse())));
-  }
-  return { blocks, prevTxidCandidates: candidates };
+  return {
+    blocks,
+    prevTxidCandidates: rawTxid ? txidByteOrderCandidates(rawTxid) : [],
+  };
+}
+
+// First-input outpoint with both txid byte orders as candidates, mirroring
+// relativeHeightLock's handling of the display-order ambiguity.
+export function firstInputOutpoint(txHex: string): InputOutpoint | null {
+  const tx = parseTransaction(txHex);
+  const input = tx.getInput(0);
+  const rawTxid = input?.txid;
+  if (!rawTxid) return null;
+  return {
+    txidCandidates: txidByteOrderCandidates(rawTxid),
+    vout: input?.index ?? 0,
+  };
 }
 
 function parseTransaction(txHex: string): Transaction {
