@@ -83,6 +83,46 @@ describe("sweep construction", () => {
     });
   });
 
+  // reattachPendingRefunds can preserve one of the operator's alternate refund
+  // routes, and those arrive unsigned. The sweep must still be constructible:
+  // Transaction.id throws on an unfinalized input, but the txid is already known.
+  it("sweeps a preserved terminal refund the operator left unsigned", () => {
+    const leafId = "leaf-unsigned-refund";
+    const refundKey = deriveRefundKeyCandidates({
+      seed: SEED,
+      network: "REGTEST",
+      leafId,
+      accountNumber: 1,
+    }).find((candidate) => candidate.label === "node signing key");
+    const refundTx = createUnsignedRefundTx(refundKey!.script, 10_000n);
+
+    const result = constructSweepTransactions({
+      seed: SEED,
+      network: "REGTEST",
+      packages: {
+        packages: [{ leafId, txPackages: [], sweepTx: refundTx.hex }],
+      },
+      destination: refundKey!.address!,
+      feeRate: 1,
+      accountNumber: 1,
+    });
+
+    expect(result.sweeps).toHaveLength(1);
+    expect(result.sweeps[0]).toMatchObject({
+      leafId,
+      // The txid the refund keeps once signed — what the sweep must spend.
+      refundTxid: refundTx.signedTxid,
+      refundVout: 0,
+      refundValueSats: "10000",
+    });
+
+    const sweepTx = Transaction.fromRaw(
+      Uint8Array.from(Buffer.from(result.sweeps[0]!.sweepTx, "hex")),
+      { allowUnknownOutputs: true },
+    );
+    expect(sweepTx.id).toBe(result.sweeps[0]!.sweepTxid);
+  });
+
   it("fails closed when the seed does not match the refund output", () => {
     const refundKey = deriveRefundKeyCandidates({
       seed: SEED,
@@ -184,4 +224,27 @@ function createSignedRefundTx(refundScript: Uint8Array, amount: bigint) {
   tx.sign(fundingPrivateKey);
   tx.finalize();
   return tx;
+}
+
+// The same refund as it leaves the operator: serialized before signing, with the
+// txid it will still have afterwards.
+function createUnsignedRefundTx(
+  refundScript: Uint8Array,
+  amount: bigint,
+): { hex: string; signedTxid: string } {
+  const fundingPrivateKey = new Uint8Array(32).fill(2);
+  const fundingXonly = secp256k1.getPublicKey(fundingPrivateKey, true).slice(1);
+  const fundingOutput = p2tr(fundingXonly, undefined, REGTEST);
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({
+    txid: "00".repeat(32),
+    index: 0,
+    witnessUtxo: { amount: amount + 1_000n, script: fundingOutput.script },
+    tapInternalKey: fundingXonly,
+  });
+  tx.addOutput({ script: refundScript, amount });
+  const hex = tx.hex;
+  tx.sign(fundingPrivateKey);
+  tx.finalize();
+  return { hex, signedTxid: tx.id };
 }

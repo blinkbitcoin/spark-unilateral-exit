@@ -24,6 +24,7 @@ import {
   decodeDirectPathFromTreeNode,
   type DirectPathTxs,
 } from "./spark-packages.ts";
+import { txidOfPossiblyUnsigned } from "./txid.ts";
 import type {
   AccountNumberInput,
   CpfpUtxo,
@@ -760,8 +761,11 @@ async function waitForConfirmation(
   }
 }
 
+// The txid seam every chain lookup goes through. Must tolerate an unsigned
+// transaction: reattachPendingRefunds can hand back a completed alternate refund
+// straight out of the bundle, and the operator ships those routes unsigned.
 export function transactionIdFromHex(txHex: string): string {
-  return parseTransaction(txHex).id;
+  return txidOfPossiblyUnsigned(parseTransaction(txHex));
 }
 
 // Both display byte orders of a parsed input's prev txid. Parsers expose the

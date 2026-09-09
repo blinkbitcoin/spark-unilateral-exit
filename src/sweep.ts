@@ -6,6 +6,8 @@ import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { NETWORK, TEST_NETWORK, Transaction, p2tr } from "@scure/btc-signer";
 
+import { txidOfPossiblyUnsigned } from "./txid.ts";
+
 import type {
   AccountNumberInput,
   LeafPackage,
@@ -180,6 +182,10 @@ function constructLeafSweep({
   const refundTx = Transaction.fromRaw(hexToBytes(refundTxHex), {
     allowUnknownOutputs: true,
   });
+  // A refund preserved by reattachPendingRefunds can be one of the operator's
+  // unsigned alternate routes, and Transaction.id throws on those. The txid is
+  // the same either way (segwit: the witness is not committed to).
+  const refundTxid = txidOfPossiblyUnsigned(refundTx);
   const refundOutput = refundTx.getOutput(0);
   if (!refundOutput?.script || refundOutput.amount === undefined) {
     throw new SweepError(`Refund tx for leaf ${leafId} has no output 0`);
@@ -203,7 +209,7 @@ function constructLeafSweep({
   }
 
   const firstPass = buildSignedSweepTx({
-    refundTxid: refundTx.id,
+    refundTxid,
     refundOutput: output,
     destination,
     feeSats: 1n,
@@ -218,7 +224,7 @@ function constructLeafSweep({
     );
   }
   const finalSweep = buildSignedSweepTx({
-    refundTxid: refundTx.id,
+    refundTxid,
     refundOutput: output,
     destination,
     feeSats,
@@ -229,7 +235,7 @@ function constructLeafSweep({
 
   return {
     leafId,
-    refundTxid: refundTx.id,
+    refundTxid,
     refundVout: 0,
     refundValueSats: output.amount.toString(),
     refundAddress: matchingKey.address,
