@@ -1,6 +1,7 @@
 import { getNodeHexStrings } from "./bundle.ts";
 import { errMessage } from "./errors.ts";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
+import { transactionIdFromHex } from "./transaction-id.ts";
 import { Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
@@ -261,7 +262,7 @@ export function decodeRefundFromTreeNode(
 }
 
 function refundVariant(txHex: string): { txid: string; txHex: string } {
-  return { txid: refundTxidFromHex(txHex), txHex };
+  return { txid: transactionIdFromHex(txHex), txHex };
 }
 
 // The operator's alternative to the CPFP exit route for a leaf: directTx spends
@@ -288,20 +289,10 @@ export function decodeDirectPathFromTreeNode(
   if (!node.directRefundTx || node.directRefundTx.length === 0) return null;
   const directRefundTxHex = bytesToHex(node.directRefundTx);
   return {
-    directTxid: refundTxidFromHex(bytesToHex(node.directTx)),
+    directTxid: transactionIdFromHex(bytesToHex(node.directTx)),
     directRefundTxHex,
-    directRefundTxid: refundTxidFromHex(directRefundTxHex),
+    directRefundTxid: transactionIdFromHex(directRefundTxHex),
   };
-}
-
-// Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser
-// must allow unknown outputs/inputs (mirrors auto-exit.ts parseTransaction).
-function refundTxidFromHex(txHex: string): string {
-  return Transaction.fromRaw(hexToBytes(txHex), {
-    allowUnknownOutputs: true,
-    allowUnknownInputs: true,
-    disableScriptCheck: true,
-  }).id;
 }
 
 function createBundleSparkClient(

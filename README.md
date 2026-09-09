@@ -2,6 +2,8 @@
 
 Spark unilateral-exit recovery research, tooling, and tests.
 
+The [Electron app](docs/electron-app.md) stores multiple seeds under one encrypted vault password, refreshes their recovery bundles in the background, and supports resumable Bitcoin exits on mainnet or local regtest. Mainnet defaults to mempool.space, with an optional shared Bitcoin node connection. Start it with `npm run desktop:start`; `npm run desktop:test` enforces complete coverage of the new desktop code.
+
 This repo uses a bundle-first recovery model:
 
 - A Spark wallet or app keeps an encrypted Spark recovery bundle fresh while Spark operators are online.
@@ -12,7 +14,7 @@ See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and 
 
 ## Prerequisites
 
-Everything runs on Node 22+; there is no other toolchain. The repo ships a
+Use Node 22.22.2+ (22.x) or 24.15+ (24.x) for the CLI and desktop tests. The repo ships a
 Nix flake that pins Node (and jq for the runbook snippets), loaded
 automatically by direnv:
 
@@ -30,7 +32,7 @@ automatically by direnv:
 4. Run `npm install` to fetch the JS dependencies.
 
 Without direnv, prefix commands with `nix develop --command`, or simply bring
-your own Node 22+.
+your own supported Node version.
 
 ## Current CLI
 
