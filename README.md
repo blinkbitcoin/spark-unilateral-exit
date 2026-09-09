@@ -10,6 +10,11 @@ This repo uses a bundle-first recovery model:
 
 See [docs/withdraw-guide.md](docs/withdraw-guide.md) for the recovery guide and [docs/recovery-runbook.md](docs/recovery-runbook.md) for the operator runbook. [docs/mainnet-exit-case-study.md](docs/mainnet-exit-case-study.md) documents a real mainnet unilateral exit performed with this tooling — costs, failures, and lessons. For wallet-app integration, see [docs/mobile-integration-plan.md](docs/mobile-integration-plan.md) (integration boundary) and [docs/mobile-ux-flow.md](docs/mobile-ux-flow.md) (screen flow for Blink mobile).
 
+For the division of responsibility between this toolkit and Breez SDK Spark's
+built-in unilateral-exit API, including current security and Blink Mobile
+adoption notes, see
+[docs/breez-sdk-comparison.md](docs/breez-sdk-comparison.md).
+
 ## Prerequisites
 
 Everything runs on Node 22+; there is no other toolchain. The repo ships a
