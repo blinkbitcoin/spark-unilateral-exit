@@ -19,3 +19,6 @@ sweeps*.json
 # Checked-in fixtures are exempt.
 !examples/*.json
 !test/fixtures/*.json
+
+# Webapp regtest captures reveal wallet graph metadata; keep them local.
+test/fixtures/webapp/

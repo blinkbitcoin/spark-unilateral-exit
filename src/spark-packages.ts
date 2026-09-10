@@ -1,6 +1,7 @@
 import { getNodeHexStrings } from "./bundle.ts";
 import { errMessage } from "./errors.ts";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
+import { sha256 } from "@noble/hashes/sha256";
 import { Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
@@ -264,6 +265,25 @@ function refundVariant(txHex: string): { txid: string; txHex: string } {
   return { txid: refundTxidFromHex(txHex), txHex };
 }
 
+// The Bitcoin txid is defined over the legacy serialization (no witness
+// data), so it can be computed for transactions whose inputs are not
+// finalized. Current Spark operators include an unsigned
+// directFromCpfpRefundTx in TreeNodes; Transaction.id would throw
+// "Transaction is not finalized" for it, so derive the txid from the
+// no-witness serialization instead. For finalized transactions the two
+// computations agree exactly.
+function refundTxidFromHex(txHex: string): string {
+  const tx = Transaction.fromRaw(hexToBytes(txHex), {
+    allowUnknownOutputs: true,
+    allowUnknownInputs: true,
+    disableScriptCheck: true,
+  });
+  const legacy = tx.toBytes(true, false);
+  const first = sha256(legacy);
+  const second = sha256(first);
+  return bytesToHex(new Uint8Array([...second].reverse()));
+}
+
 // The operator's alternative to the CPFP exit route for a leaf: directTx spends
 // the same parent output as the leaf's nodeTx, and directRefundTx claims
 // directTx's output after a CSV delay, with the mining fee baked into the
@@ -296,13 +316,9 @@ export function decodeDirectPathFromTreeNode(
 
 // Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser
 // must allow unknown outputs/inputs (mirrors auto-exit.ts parseTransaction).
-function refundTxidFromHex(txHex: string): string {
-  return Transaction.fromRaw(hexToBytes(txHex), {
-    allowUnknownOutputs: true,
-    allowUnknownInputs: true,
-    disableScriptCheck: true,
-  }).id;
-}
+// The txid is computed over the legacy no-witness serialization so unsigned
+// variants (directFromCpfpRefundTx) hash too; identical to Transaction.id
+// for finalized transactions.
 
 function createBundleSparkClient(
   bundle: RecoveryBundle,

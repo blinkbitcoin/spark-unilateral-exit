@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "plan": "node src/cli.ts plan",
     "refresh-bundle": "node src/cli.ts refresh-bundle",
-    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle"
+    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle",
+    "monitor": "node src/webapp/server.ts",
+    "capture-regtest-exit": "node scripts/capture-regtest-exit.ts"
   },
   "dependencies": {
     "@buildonspark/spark-sdk": "^0.8.6",

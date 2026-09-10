@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spark unilateral-exit monitor</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #12161f; --panel2: #171c27; --border: #232a38;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #f7931a; --green: #2ecc71;
+    --red: #e74c3c; --amber: #f1c40f; --blue: #3498db;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #10141d, #0b0e14);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  h1 .spark { color: var(--accent); }
+  #tip { color: var(--muted); font-size: 12px; }
+  #conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  #conn.ok { color: var(--green); border-color: var(--green); }
+  #conn.bad { color: var(--red); border-color: var(--red); }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  section h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 3px; }
+  input, select, button {
+    font: inherit; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #14181f; font-weight: 700; border: none; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .stage {
+    display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px;
+    border: 1px solid var(--border); white-space: nowrap;
+  }
+  .stage.refund-tx, .stage.direct-refund-tx { color: var(--amber); border-color: var(--amber); }
+  .stage.node-tx, .stage.direct-tx, .stage.static-deposit { color: var(--blue); border-color: var(--blue); }
+  .stage.sweep-tx { color: var(--green); border-color: var(--green); }
+  .stage.unknown { color: var(--muted); }
+  .conf-high { color: var(--green); } .conf-medium { color: var(--amber); } .conf-low { color: var(--muted); }
+  .finding {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .finding .txid { color: var(--accent); word-break: break-all; font-size: 12px; }
+  .finding .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .finding details { margin-top: 6px; }
+  .finding summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .rules li { margin: 2px 0; font-size: 12px; list-style: none; }
+  .rules li.ok::before { content: "✔ "; color: var(--green); }
+  .rules li.no::before { content: "✘ "; color: var(--red); }
+  pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; font-size: 11px; }
+  #status { font-size: 12px; color: var(--muted); margin-top: 10px; min-height: 18px; }
+  #findings { margin-top: 12px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px; text-align: center; }
+  .watchlist li { font-size: 12px; word-break: break-all; margin: 2px 0; }
+  ul { padding-left: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  .badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); padding: 0 6px; border-radius: 8px; margin-left: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="spark">⚡</span> Spark unilateral-exit monitor</h1>
+  <span id="tip">tip: -</span>
+  <span id="conn" class="ok">connecting…</span>
+</header>
+<main>
+  <section>
+    <h2>Chain source</h2>
+    <div id="sourceline" class="hint">-</div>
+    <h2 style="margin-top:16px">Inspect</h2>
+    <label for="txid">Transaction ID</label>
+    <input id="txid" placeholder="txid hex (64 chars)" spellcheck="false">
+    <div class="row" style="margin-top:8px">
+      <button id="btn-classify" class="primary">Classify</button>
+      <button id="btn-follow">Follow family</button>
+    </div>
+    <h2 style="margin-top:16px">Scan recent blocks</h2>
+    <label for="height">Block height</label>
+    <input id="height" type="number" placeholder="leave empty for tip">
+    <label for="span">How many blocks back</label>
+    <input id="span" type="number" value="10" min="1" max="50">
+    <div class="row" style="margin-top:8px">
+      <button id="btn-scan" class="primary">Scan</button>
+      <button id="btn-clear">Clear</button>
+    </div>
+    <h2 style="margin-top:16px">Watch list</h2>
+    <div class="hint">Paste txids or output scripts (hex). Scans then only report family-related txs.</div>
+    <textarea id="watch-input" rows="3" style="width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit" placeholder="one txid or script hex per line"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-watch">Add</button>
+      <button id="btn-unwatch">Clear</button>
+    </div>
+    <ul id="watchlist" class="watchlist"></ul>
+    <div id="status"></div>
+  </section>
+  <section>
+    <h2>Findings</h2>
+    <div id="findings"><div class="empty">No scan yet. Classify a txid, follow an exit family, or scan recent blocks.</div></div>
+  </section>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const status = (msg) => { $("status").textContent = msg ?? ""; };
+
+async function api(path, init) {
+  const res = await fetch(path, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+  return body;
+}
+
+function renderFinding(f) {
+  const c = f.classification ?? f;
+  const stage = c.stage ?? "unknown";
+  const conf = c.confidence ?? "low";
+  const el = document.createElement("div");
+  el.className = "finding";
+  const height = f.blockHeight ?? c.blockHeight ?? null;
+  const mem = f.inMempool ?? false;
+  const maturity = c.maturityHeight ? ` · matures @ ${c.maturityHeight}` : "";
+  const csv = c.csvBlocks !== null && c.csvBlocks !== undefined ? ` · CSV ${c.csvBlocks} blocks` : "";
+  el.innerHTML = `
+    <div class="txid">${c.txid}</div>
+    <div class="meta">
+      <span class="stage ${stage}">${stage}</span>
+      <span class="conf-${conf}">${conf} confidence</span>
+      ${height !== null ? ` · block ${height}` : mem ? " · in mempool" : ""}
+      ${csv}${maturity}
+    </div>
+    <div class="meta">${c.reason ?? ""}</div>
+    <details>
+      <summary>evidence</summary>
+      <ul class="rules">
+        ${(c.matchedRules ?? []).map((r) => `<li class="${r.fired ? "ok" : "no"}">${r.name}: ${r.description}</li>`).join("")}
+      </ul>
+      <pre>${JSON.stringify({ outputs: c.outputs, inputs: c.inputs, spentOutpoints: c.spentOutpoints }, null, 1)}</pre>
+    </details>`;
+  return el;
+}
+
+function renderFindings(list, heading) {
+  const root = $("findings");
+  root.replaceChildren();
+  if (heading) {
+    const h = document.createElement("div");
+    h.className = "hint"; h.textContent = heading;
+    root.appendChild(h);
+  }
+  if (!list || list.length === 0) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "No unilateral-exit transactions found.";
+    root.appendChild(e);
+    return;
+  }
+  for (const f of list) root.appendChild(renderFinding(f));
+}
+
+async function refreshHealth() {
+  try {
+    const health = await api("/api/health");
+    const cfg = await api("/api/config");
+    $("tip").textContent = `tip: ${health.tip ?? "?"}`;
+    $("conn").textContent = cfg.source.label;
+    $("conn").className = health.ok ? "ok" : "bad";
+    $("sourceline").textContent = `${cfg.source.kind} · ${cfg.source.id}`;
+  } catch (e) {
+    $("conn").textContent = "offline";
+    $("conn").className = "bad";
+  }
+}
+
+$("btn-classify").addEventListener("click", async () => {
+  const txid = $("txid").value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(txid)) return status("enter a 64-hex txid");
+  status("classifying…");
+  try {
+    const r = await api(`/api/tx/${txid}`);
+    renderFindings([r], `classified ${txid}`);
+    status("");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-follow").addEventListener("click", async () => {
+  const txid = $("txid").value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(txid)) return status("enter a 64-hex txid");
+  status("walking family…");
+  try {
+    const r = await api(`/api/follow/${txid}`);
+    renderFindings(r.family, `family of ${txid} (${r.family.length} txs)`);
+    status("");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-scan").addEventListener("click", async () => {
+  status("scanning…");
+  try {
+    const params = new URLSearchParams();
+    const h = $("height").value ? Number($("height").value) : null;
+    const span = Number($("span").value || 10);
+    if (h !== null) params.set("from", String(Math.max(h - span + 1, 0)));
+    params.set("span", String(span));
+    const r = await api(`/api/scan?${params}`);
+    const all = [];
+    for (const b of r.results) {
+      for (const f of b.findings) {
+        f.blockHeight = f.blockHeight ?? b.height;
+        all.push(f);
+      }
+    }
+    renderFindings(all, `scanned blocks ${r.from}-${r.to}: ${r.results.reduce((n, b) => n + (b.txCount ?? 0), 0)} txs, ${all.length} exit-shaped`);
+    status("");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-clear").addEventListener("click", () => {
+  renderFindings(null);
+  status("");
+});
+
+$("btn-watch").addEventListener("click", async () => {
+  const lines = $("watch-input").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  const txids = lines.filter((l) => /^[0-9a-f]{64}$/i.test(l));
+  const scripts = lines.filter((l) => !/^[0-9a-f]{64}$/i.test(l) && /^[0-9a-f]+$/i.test(l));
+  try {
+    const w = await api("/api/watch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ txids, scripts }),
+    });
+    renderWatch(w);
+    status(`watching ${w.txids.length} txids, ${w.scripts.length} scripts`);
+  } catch (e) { status(e.message); }
+});
+
+$("btn-unwatch").addEventListener("click", async () => {
+  try {
+    const w = await api("/api/watch", { method: "DELETE" });
+    renderWatch(w);
+    status("watch list cleared");
+  } catch (e) { status(e.message); }
+});
+
+function renderWatch(w) {
+  const ul = $("watchlist");
+  ul.replaceChildren();
+  for (const t of w.txids ?? []) {
+    const li = document.createElement("li");
+    li.textContent = `tx ${t}`;
+    ul.appendChild(li);
+  }
+  for (const s of w.scripts ?? []) {
+    const li = document.createElement("li");
+    li.textContent = `script ${s.slice(0, 32)}…`;
+    ul.appendChild(li);
+  }
+}
+
+refreshHealth();
+setInterval(refreshHealth, 30_000);
+</script>
+</body>
+</html>
