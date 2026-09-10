@@ -170,4 +170,19 @@ describe("desktop user interface", () => {
     state.message = "Background operation failed. Saved state is retained.";
     await vi.advanceTimersByTimeAsync(2000); expect(el("feedback").textContent).toContain("Background operation failed");
   });
+  it("discards a status snapshot that was fetched before a user action", async () => {
+    unlocked(); state.bitcoinRpc = { url: "http://127.0.0.1:8332", username: "saved user" };
+    state.profiles!.push({ id: "two", label: "Two", network: "LOCAL" });
+    await import("../../desktop/renderer.ts"); await flush();
+    expect(el("rpc-username").value).toBe("saved user");
+    let stale!: (value: unknown) => void;
+    api.status!.mockImplementationOnce(() => new Promise((resolve) => { stale = resolve; }));
+    await vi.advanceTimersByTimeAsync(2000);
+    api.selectProfile!.mockImplementation(async () => { state.activeProfileId = "two"; state.bitcoinRpc = { url: "http://127.0.0.1:8332", username: "fresh user" }; return { ok: true }; });
+    el("profile-select").value = "two"; await event("profile-select", "change");
+    expect(el("profile-select").value).toBe("two"); expect(el("rpc-username").value).toBe("fresh user");
+    stale({ ok: true, value: { ...state, activeProfileId: "one", bitcoinRpc: { url: "http://127.0.0.1:8332", username: "saved user" } } });
+    await flush();
+    expect(el("profile-select").value).toBe("two"); expect(el("rpc-username").value).toBe("fresh user");
+  });
 });

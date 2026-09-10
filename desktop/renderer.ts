@@ -4,6 +4,9 @@ const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElem
 const input = (id: string) => el<HTMLInputElement>(id);
 let current: PublicState;
 let working = false;
+// Bumped by every user action so a status snapshot fetched before the action
+// is never applied over the action's result.
+let updateSeq = 0;
 let settingsLoaded = false;
 let tab: "backup" | "recover" | "profiles" = "backup";
 let activeProfileId: string | undefined;
@@ -37,7 +40,10 @@ async function call(name: string, ...args: unknown[]) {
   return result.value;
 }
 async function update() {
-  current = await call("status") as PublicState;
+  const seq = updateSeq;
+  const next = await call("status") as PublicState;
+  if (seq !== updateSeq) return;
+  current = next;
   if (current.message !== lastServiceMessage) { lastServiceMessage = current.message; feedback(current.message); }
   el("locked").hidden = current.unlocked; el("workspace").hidden = !current.unlocked;
   el("navigation").hidden = !current.unlocked;
@@ -128,6 +134,7 @@ function updateExit() {
 async function action(work: () => Promise<unknown>) {
   if (working) return;
   working = true;
+  updateSeq++;
   document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => button.disabled = true);
   feedback("Working…");
   try {
