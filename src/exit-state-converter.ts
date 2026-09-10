@@ -28,7 +28,13 @@
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 
 import { decodeTreeNode, type DecodedTreeNode } from "./operator/messages.ts";
-import { decodeFields, ProtoWriter, type WireField } from "./operator/wire.ts";
+import {
+  decodeFields,
+  firstField,
+  ProtoWriter,
+  utf8Decode,
+  type WireField,
+} from "./operator/wire.ts";
 import type { RecoveryBundle } from "./types.ts";
 
 /** spark_wallet::Network serde names, as the SDK envelope spells them. */
@@ -85,9 +91,7 @@ const STATUS_TO_PROTO: Record<string, number> = {
 
 /** Operator legacy string statuses (SCREAMING_SNAKE) to SDK variant names. */
 const STATUS_FROM_STRING: Record<string, string> = Object.fromEntries(
-  Object.keys(STATUS_TO_PROTO)
-    .filter((name) => name !== "Unknown")
-    .map((name) => [name.toUpperCase(), name]),
+  Object.keys(STATUS_TO_PROTO).map((name) => [name.toUpperCase(), name]),
 );
 
 export class ExitStateConversionError extends Error {
@@ -97,10 +101,10 @@ export class ExitStateConversionError extends Error {
   }
 }
 
-export const EXIT_STATE_VERSION = 1;
+const EXIT_STATE_VERSION = 1;
 
 /** Mirror of the SDK's `ExitStateEnvelope` JSON (version 1). */
-export interface ExitStateEnvelope {
+interface ExitStateEnvelope {
   version: number;
   network: string;
   identity_public_key: string;
@@ -195,6 +199,17 @@ function groupBundleNodes(bundle: RecoveryBundle): BundlePedigrees {
 
   const pedigrees: ExitStateEnvelope["pedigrees"] = [];
   let ownerKeyHex: string | null = null;
+  // Shared trunk nodes are ancestors of many leaves; conversion is a pure
+  // function of the node, so each unique node converts once.
+  const sdkByNodeId = new Map<string, SdkTreeNode>();
+  const toSdk = (node: DecodedTreeNode): SdkTreeNode => {
+    let sdk = sdkByNodeId.get(node.id);
+    if (!sdk) {
+      sdk = sdkNodeFromProto(node);
+      sdkByNodeId.set(node.id, sdk);
+    }
+    return sdk;
+  };
   for (const leafEntry of bundle.leaves) {
     const leaf = decodeTreeNode(hexToBytes(leafEntry.treeNodeHex));
     if (ownerKeyHex === null && leaf.ownerIdentityPublicKey.length > 0) {
@@ -211,8 +226,8 @@ function groupBundleNodes(bundle: RecoveryBundle): BundlePedigrees {
       cursor = parent;
     }
     pedigrees.push({
-      leaf: sdkNodeFromProto(leaf),
-      ancestors: ancestors.map(sdkNodeFromProto),
+      leaf: toSdk(leaf),
+      ancestors: ancestors.map(toSdk),
     });
   }
   return { pedigrees, ownerKeyHex };
@@ -349,15 +364,15 @@ function bundleStatus(node: SdkTreeNode): string {
 function sdkNodeFromProto(node: DecodedTreeNode): SdkTreeNode {
   const fields = decodeFields(node.raw);
   const txField = (n: number): SdkTransaction | null => {
-    const bytes = firstBytes(fields, n);
+    const bytes = firstField(fields, n)?.bytes;
     return bytes ? txFromConsensus(bytes) : null;
   };
-  const keyshareBytes = firstBytes(fields, 10);
+  const keyshareBytes = firstField(fields, 10)?.bytes;
   const keyshareFields = keyshareBytes ? decodeFields(keyshareBytes) : [];
 
   return {
     id: node.id,
-    tree_id: utf8(firstBytes(fields, 2)) ?? "",
+    tree_id: utf8Decode(firstField(fields, 2)?.bytes ?? new Uint8Array()),
     value: requireSafeValue(node.valueSats, node.id),
     parent_node_id: node.parentNodeId ?? null,
     node_tx: txField(5) ?? emptyTx(),
@@ -365,17 +380,19 @@ function sdkNodeFromProto(node: DecodedTreeNode): SdkTreeNode {
     direct_tx: txField(16),
     direct_refund_tx: txField(17),
     direct_from_cpfp_refund_tx: txField(18),
-    vout: Number(firstVarint(fields, 7) ?? 0n),
-    verifying_public_key: bytesToHex(firstBytes(fields, 8) ?? new Uint8Array()),
+    vout: Number(firstField(fields, 7)?.varint ?? 0n),
+    verifying_public_key: bytesToHex(
+      firstField(fields, 8)?.bytes ?? new Uint8Array(),
+    ),
     owner_identity_public_key:
       node.ownerIdentityPublicKey.length > 0
         ? bytesToHex(node.ownerIdentityPublicKey)
         : null,
     signing_keyshare: {
       owner_identifiers: keyshareIdentifiers(keyshareFields),
-      threshold: Number(firstVarint(keyshareFields, 2) ?? 0n),
+      threshold: Number(firstField(keyshareFields, 2)?.varint ?? 0n),
       public_key: bytesToHex(
-        firstBytes(keyshareFields, 3) ?? new Uint8Array(),
+        firstField(keyshareFields, 3)?.bytes ?? new Uint8Array(),
       ),
     },
     status: statusFromProto(node),
@@ -403,10 +420,24 @@ function keyshareIdentifiers(keyshareFields: WireField[]): string[] {
   const identifiers: string[] = [];
   for (const field of keyshareFields) {
     if (field.fieldNumber === 1 && field.bytes) {
-      identifiers.push(new TextDecoder().decode(field.bytes));
+      identifiers.push(utf8Decode(field.bytes));
     }
   }
   return identifiers;
+}
+
+/**
+ * Decodes a hex field of the exit-state JSON, throwing the module's error
+ * type with field context instead of a raw noble error on malformed input.
+ */
+function hexField(value: string, what: string, nodeId: string): Uint8Array {
+  const hex = value.trim().toLowerCase();
+  if (!/^[0-9a-f]*$/.test(hex) || hex.length % 2 !== 0) {
+    throw new ExitStateConversionError(
+      `Node ${nodeId} has malformed hex in ${what}`,
+    );
+  }
+  return hexToBytes(hex);
 }
 
 function treeNodeHexFromSdk(node: SdkTreeNode): string {
@@ -418,16 +449,22 @@ function treeNodeHexFromSdk(node: SdkTreeNode): string {
   writer.bytes(5, consensusEncodeTx(node.node_tx));
   if (node.refund_tx) writer.bytes(6, consensusEncodeTx(node.refund_tx));
   writer.varint(7, node.vout);
-  writer.bytes(8, hexToBytes(node.verifying_public_key));
+  writer.bytes(8, hexField(node.verifying_public_key, "verifying_public_key", node.id));
   if (node.owner_identity_public_key !== null) {
-    writer.bytes(9, hexToBytes(node.owner_identity_public_key));
+    writer.bytes(
+      9,
+      hexField(node.owner_identity_public_key, "owner_identity_public_key", node.id),
+    );
   }
   const keyshare = new ProtoWriter();
   for (const identifier of node.signing_keyshare.owner_identifiers) {
     keyshare.string(1, identifier);
   }
   keyshare.varint(2, node.signing_keyshare.threshold);
-  keyshare.bytes(3, hexToBytes(node.signing_keyshare.public_key));
+  keyshare.bytes(
+    3,
+    hexField(node.signing_keyshare.public_key, "signing_keyshare.public_key", node.id),
+  );
   writer.bytes(10, keyshare.finish());
   const protoStatus = STATUS_TO_PROTO[node.status];
   if (protoStatus !== undefined && protoStatus >= 0) {
@@ -637,29 +674,8 @@ function requireSafeValue(valueSats: bigint, id: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// protobuf field helpers (first occurrence wins, like operator/wire's
-// firstField; the operators emit each field at most once per TreeNode)
+// small shared bits
 // ---------------------------------------------------------------------------
-
-function firstBytes(fields: WireField[], n: number): Uint8Array | undefined {
-  for (const field of fields) {
-    if (field.fieldNumber === n && field.bytes) return field.bytes;
-  }
-  return undefined;
-}
-
-function firstVarint(fields: WireField[], n: number): bigint | undefined {
-  for (const field of fields) {
-    if (field.fieldNumber === n && field.varint !== undefined) {
-      return field.varint;
-    }
-  }
-  return undefined;
-}
-
-function utf8(bytes: Uint8Array | undefined): string | undefined {
-  return bytes ? new TextDecoder().decode(bytes) : undefined;
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;

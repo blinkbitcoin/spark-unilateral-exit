@@ -463,12 +463,16 @@ async function main(): Promise<void> {
   }
 
   if (command === "to-exit-state") {
-    const bundlePath = required(args.bundle, "--bundle");
-    const bundle = parseRecoveryBundle(fs.readFileSync(bundlePath, "utf8"));
+    const bundle = loadOptionalBundle(args.bundle);
+    if (!bundle) throw new Error("--bundle is required for exit-state conversion");
+    if (args.out === true) throw new Error("--out requires a path");
     const output = `${bundleToExitState(bundle)}\n`;
     const outPath = optionalValue(args.out);
     if (outPath) {
-      fs.writeFileSync(outPath, output);
+      const written = writeFileWithBackup(outPath, output);
+      if (written.backupPath) {
+        console.error(`Saved previous exit state to ${written.backupPath}`);
+      }
     } else {
       process.stdout.write(output);
     }
@@ -480,6 +484,7 @@ async function main(): Promise<void> {
       required(args["exit-state"], "--exit-state"),
       "utf8",
     );
+    if (args.out === true) throw new Error("--out requires a path");
     const bundle = exitStateToBundle(exitState, {
       operatorSet: optionalValue(args["operator-set"]),
       appVersion: optionalValue(args["app-version"]),
