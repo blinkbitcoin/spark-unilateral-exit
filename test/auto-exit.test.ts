@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hexToBytes } from "@noble/curves/utils";
-import { Transaction } from "@scure/btc-signer";
+import { p2tr, Transaction } from "@scure/btc-signer";
+import { secp256k1 } from "@noble/curves/secp256k1";
 
 import {
   autoExit,
@@ -333,6 +334,52 @@ describe("autoExit", () => {
     });
     expect(events).toContain(
       "Leaf L1: refund variant already broadcast (tx-direct-refund-L1); ready to sweep",
+    );
+  });
+
+  // The operator ships directTx / directRefundTx / directFromCpfpRefundTx
+  // unsigned, so a completed alternate refund reaches autoExit as an unsigned
+  // transaction. The fakes above stub txIdOf as the identity function, which is
+  // why the rest of this suite never exercised the real one; this test drives
+  // the production txIdOf so the "Transaction is not finalized" throw stays fixed.
+  it("recognizes a completed refund the operator left unsigned", async () => {
+    const { deps, submitted } = makeFakes();
+    const refund = unsignedRefundTx(10_000n);
+    const events: string[] = [];
+
+    // Only L1: the other leaves' fake chains use placeholder txids that are not
+    // real transaction hex, and this test deliberately runs the production txIdOf.
+    const result = await autoExit({
+      bundle: {
+        ...BUNDLE,
+        leaves: BUNDLE.leaves.filter((leaf) => leaf.id === "L1"),
+      } as unknown as RecoveryBundle,
+      seed: SEED,
+      network: "REGTEST",
+      feeRate: 1,
+      esploraUrl: "http://localhost/api",
+      deps: {
+        ...deps,
+        txIdOf: transactionIdFromHex,
+        constructPackages: (async () => [
+          { leafId: "L1", txPackages: [], sweepTx: refund.hex },
+        ]) as AutoExitDeps["constructPackages"],
+      },
+      onEvent: (message) => events.push(message),
+    });
+
+    expect(submitted).toEqual([]);
+    expect(result.leaves.find((leaf) => leaf.leafId === "L1")).toMatchObject({
+      status: "exit-broadcast",
+      // The txid the refund will still have once it is signed.
+      refundTxid: refund.signedTxid,
+    });
+    expect(result.packages).toContainEqual({
+      leafId: "L1",
+      txPackages: [{ tx: refund.hex }],
+    });
+    expect(events).toContain(
+      `Leaf L1: refund variant already broadcast (${refund.signedTxid}); ready to sweep`,
     );
   });
 
@@ -763,3 +810,24 @@ describe("autoExit direct-path race", () => {
     expect(events.some((e) => e.includes("direct-path check failed"))).toBe(false);
   });
 });
+
+// A refund exactly as the operator exports it: serialized before anyone signs it,
+// paired with the txid it will still carry after signing (segwit txids do not
+// commit to the witness).
+function unsignedRefundTx(amount: bigint): { hex: string; signedTxid: string } {
+  const privateKey = new Uint8Array(32).fill(4);
+  const xonly = secp256k1.getPublicKey(privateKey, true).slice(1);
+  const output = p2tr(xonly);
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({
+    txid: "22".repeat(32),
+    index: 0,
+    witnessUtxo: { amount: amount + 1_000n, script: output.script },
+    tapInternalKey: xonly,
+  });
+  tx.addOutput({ script: output.script, amount });
+  const hex = tx.hex;
+  tx.sign(privateKey);
+  tx.finalize();
+  return { hex, signedTxid: tx.id };
+}

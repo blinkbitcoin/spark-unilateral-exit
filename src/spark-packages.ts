@@ -4,6 +4,8 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
+import { txidOfPossiblyUnsigned } from "./txid.ts";
+
 import type { CpfpUtxo, LeafPackage, RecoveryBundle } from "./types.ts";
 
 const NETWORKS = new Set(["MAINNET", "REGTEST", "TESTNET", "SIGNET", "LOCAL"]);
@@ -297,12 +299,15 @@ export function decodeDirectPathFromTreeNode(
 // Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser
 // must allow unknown outputs/inputs (mirrors auto-exit.ts parseTransaction).
 function refundTxidFromHex(txHex: string): string {
-  return Transaction.fromRaw(hexToBytes(txHex), {
-    allowUnknownOutputs: true,
-    allowUnknownInputs: true,
-    disableScriptCheck: true,
-  }).id;
+  return txidOfPossiblyUnsigned(
+    Transaction.fromRaw(hexToBytes(txHex), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+      disableScriptCheck: true,
+    }),
+  );
 }
+
 
 function createBundleSparkClient(
   bundle: RecoveryBundle,
@@ -370,3 +375,5 @@ function normalizeNetwork(
   }
   return sparkNetwork[normalized];
 }
+
+export { txidOfPossiblyUnsigned };

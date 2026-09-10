@@ -1,15 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { p2tr, Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 
+import { parseRecoveryBundle } from "../src/bundle.ts";
 import { deriveCpfpFundingKey } from "../src/cpfp-funding.ts";
 import {
   constructSparkPackages,
   decodeDirectPathFromTreeNode,
   decodeRefundFromTreeNode,
   reattachPendingRefunds,
+  txidOfPossiblyUnsigned,
   type RefundReattachDeps,
 } from "../src/spark-packages.ts";
 import type { CpfpUtxo, LeafPackage, RecoveryBundle } from "../src/types.ts";
@@ -245,6 +248,100 @@ describe("decodeRefundFromTreeNode", () => {
       { txid: directRefundTx.id, txHex: directRefundTx.hex },
     ]);
   });
+
+  // A real operator export only signs refundTx; the alternate routes are the
+  // user's own to sign at exit time and arrive unsigned. Computing their txids
+  // through Transaction.id therefore threw "Transaction is not finalized" on
+  // every real bundle -- for a fresh bundle, on the very first leaf.
+  it("decodes variants the operator left unsigned", () => {
+    const refundTx = testTransaction(10_000n);
+    const directFromCpfp = unsignedTransaction(9_000n);
+    const direct = unsignedTransaction(8_000n);
+    const treeNodeHex = bytesToHex(
+      TreeNode.encode(
+        TreeNode.create({
+          refundTx: hexToBytes(refundTx.hex),
+          directFromCpfpRefundTx: hexToBytes(directFromCpfp.hex),
+          directRefundTx: hexToBytes(direct.hex),
+        }),
+      ).finish(),
+    );
+
+    // Signing a segwit spend cannot move its txid, so each variant must decode to
+    // the id its signed form will be found by on chain.
+    expect(decodeRefundFromTreeNode(treeNodeHex)?.completionVariants).toEqual([
+      { txid: refundTx.id, txHex: refundTx.hex },
+      { txid: directFromCpfp.signedTxid, txHex: directFromCpfp.hex },
+      { txid: direct.signedTxid, txHex: direct.hex },
+    ]);
+  });
+});
+
+describe("txidOfPossiblyUnsigned", () => {
+  it("agrees with Transaction.id once the transaction is signed", () => {
+    const tx = testTransaction(10_000n);
+    expect(txidOfPossiblyUnsigned(tx)).toBe(tx.id);
+  });
+});
+
+// The local regtest stack signs directFromCpfpRefundTx and emits no direct route
+// at all, so no test that needs a running stack can reach the shape a live
+// operator set actually returns. This fixture is that shape, rebuilt with
+// synthetic keys and amounts -- see test/fixtures/make-mainnet-shaped-bundle.mjs
+// for the side-by-side measurement it was derived from.
+describe("mainnet-shaped bundle fixture", () => {
+  const bundle = parseRecoveryBundle(
+    fs.readFileSync(
+      new URL("./fixtures/mainnet-shaped-bundle.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const parse = (raw: Uint8Array) =>
+    Transaction.fromRaw(raw, {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+      disableScriptCheck: true,
+    });
+
+  // Guards the fixture itself. Regenerated all-signed it would still satisfy the
+  // test below while testing nothing, so assert the split it exists to carry.
+  it("keeps the signed-refund / unsigned-direct-route split of a real export", () => {
+    expect(bundle.leaves).toHaveLength(3);
+    for (const leaf of bundle.leaves) {
+      const node = TreeNode.decode(hexToBytes(leaf.treeNodeHex));
+      expect(parse(node.refundTx).isFinal).toBe(true);
+      expect(parse(node.directFromCpfpRefundTx).isFinal).toBe(false);
+      expect(parse(node.directTx).isFinal).toBe(false);
+      expect(parse(node.directRefundTx).isFinal).toBe(false);
+    }
+  });
+
+  it("re-attaches every leaf's refund through the real decoder", async () => {
+    const packages: LeafPackage[] = bundle.leaves.map((leaf) => ({
+      leafId: leaf.id,
+      txPackages: [],
+    }));
+    // One funding UTXO per pending refund, as reattachPendingRefunds requires.
+    const utxos: CpfpUtxo[] = bundle.leaves.map((_, index) => ({
+      txid: (index + 1).toString(16).padStart(2, "0").repeat(32),
+      vout: 0,
+      value: 50_000n,
+      script: `0014${"00".repeat(20)}`,
+      publicKey: `02${"00".repeat(32)}`,
+    }));
+
+    await reattachPendingRefunds(packages, bundle, utxos, 5, "MAINNET", {
+      isTxBroadcast: async () => false,
+      buildRefundFeeBump: (hex) => `psbt-${hex.slice(0, 8)}`,
+      // The real decoder rather than a stub: computing a txid for each unsigned
+      // variant is the seam that threw on the first leaf of every real bundle.
+      refundForLeaf: decodeRefundFromTreeNode,
+    });
+
+    for (const pkg of packages) {
+      expect(pkg.txPackages).toHaveLength(1);
+    }
+  });
 });
 
 function testTransaction(amount: bigint): Transaction {
@@ -319,3 +416,22 @@ describe("decodeDirectPathFromTreeNode", () => {
     expect(decodeDirectPathFromTreeNode(missingRefund)).toBeNull();
   });
 });
+// The same transaction as it leaves the operator: serialized before anyone signs
+// it, carrying the txid it will still have afterwards.
+function unsignedTransaction(amount: bigint): { hex: string; signedTxid: string } {
+  const privateKey = new Uint8Array(32).fill(3);
+  const xonly = secp256k1.getPublicKey(privateKey, true).slice(1);
+  const output = p2tr(xonly);
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({
+    txid: "11".repeat(32),
+    index: 0,
+    witnessUtxo: { amount: amount + 1_000n, script: output.script },
+    tapInternalKey: xonly,
+  });
+  tx.addOutput({ script: output.script, amount });
+  const hex = tx.hex;
+  tx.sign(privateKey);
+  tx.finalize();
+  return { hex, signedTxid: tx.id };
+}
