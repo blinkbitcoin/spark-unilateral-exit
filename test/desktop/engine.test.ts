@@ -7,8 +7,9 @@ import { REGTEST } from "../../desktop/validation.ts";
 import { deriveIdentityKeyPair } from "../../src/operator/identity.ts";
 import { wallet, recovery, bundle, SEED } from "./helpers.ts";
 import { ExplorerChain } from "../../desktop/explorer.ts";
-const mocks = vi.hoisted(() => ({ refresh: vi.fn(), construct: vi.fn(), sweep: vi.fn(), summaries: vi.fn(), sign: vi.fn(), estimate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ refresh: vi.fn(), construct: vi.fn(), sweep: vi.fn(), summaries: vi.fn(), sign: vi.fn(), estimate: vi.fn(), consolidate: vi.fn() }));
 vi.mock("../../src/recovery-bundle.ts", () => ({ exportRecoveryBundleFromSeed: mocks.refresh }));
+vi.mock("../../src/consolidate.ts", () => ({ consolidateLeavesFromSeed: mocks.consolidate }));
 vi.mock("../../src/spark-packages.ts", () => ({ constructSparkPackages: mocks.construct }));
 vi.mock("../../src/sign.ts", () => ({ summarizePackages: mocks.summaries, signPackages: mocks.sign }));
 vi.mock("../../src/sweep.ts", async (importOriginal) => ({ ...await importOriginal<typeof import("../../src/sweep.ts")>(), constructSweepTransactions: mocks.sweep }));
@@ -33,6 +34,7 @@ beforeEach(() => {
   mocks.sweep.mockReturnValue({ sweeps: [recovery().sweep] }); mocks.summaries.mockReturnValue([{ feeSats: "1000" }]);
   mocks.estimate.mockResolvedValue({ requiredSats: "1000", totalFeeSats: "500", perLeaf: [{ netSats: "99000", economical: true }] });
   mocks.sign.mockReturnValue([{ leafId: "leaf", txPackages: [] }]);
+  mocks.consolidate.mockResolvedValue({ executed: false });
 });
 describe("desktop recovery engine", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -73,6 +75,17 @@ describe("desktop recovery engine", () => {
     state.session = session; f.engine.approve(state); expect(state.session.approved).toBe(true);
     expect(mocks.sign.mock.calls[0]?.[0].approved).toBe(true);
     expect(f.submit).not.toHaveBeenCalled();
+  });
+  it("consolidates leaves before exporting in exit mode and flags a stale bundle", async () => {
+    const f = fixture(); const state = wallet();
+    expect(await f.engine.refresh(state, "exit")).toMatchObject({ network: "LOCAL" });
+    expect(mocks.consolidate).toHaveBeenCalledWith(expect.objectContaining({ seed: SEED, network: "LOCAL", accountNumber: 1, multiplicity: 0 }));
+    expect(mocks.consolidate.mock.invocationCallOrder[0]).toBeLessThan(mocks.refresh.mock.invocationCallOrder[0]!);
+    mocks.consolidate.mockResolvedValueOnce({ executed: true });
+    mocks.refresh.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.engine.refresh(state, "exit")).rejects.toThrow("stale");
+    mocks.refresh.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.engine.refresh(state, "exit")).rejects.toThrow("offline");
   });
   it("rejects missing, completed and mismatched leaves, absent funds and excessive fees", async () => {
     const f = fixture(); const state = wallet(); const dest = p2wpkh(deriveIdentityKeyPair(SEED, "LOCAL", 1).publicKey, REGTEST).address!;

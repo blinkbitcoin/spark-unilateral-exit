@@ -1,6 +1,8 @@
 import type { RecoveryBundle, LeafPackage, LeafSweep } from "../src/types.ts";
 
 export type Network = "LOCAL" | "MAINNET";
+/** Download mode for a fresh recovery bundle: unchanged leaves, or consolidated first. */
+export type BundleMode = "standard" | "exit";
 export interface BitcoinRpc { url: string; username: string; password: string }
 export interface ProfileOptions { label: string; network: Network }
 export interface Settings {
@@ -45,6 +47,8 @@ export interface PublicState {
   exists: boolean;
   unlocked: boolean;
   busy: boolean;
+  /** True after the active profile's last bundle download reached the operators. */
+  coordinatorOnline?: boolean;
   autoRefresh: boolean;
   keepUnlocked: boolean;
   message: string;

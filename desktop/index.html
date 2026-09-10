@@ -4,11 +4,10 @@
 <body>
   <aside class="sidebar">
     <img class="brand-logo" src="assets/blink-logo.svg" alt="Blink" width="90">
-    <div class="sidebar-title"><h1>Spark recovery bundle backup<br>and unilateral exit</h1></div>
     <nav id="navigation" class="tabs" role="tablist" aria-label="Backup and exit" hidden>
       <button id="backup-tab" role="tab" aria-controls="backup-panel" aria-selected="true">Bundle backup</button>
-      <button id="recover-tab" role="tab" aria-controls="recover-panel" aria-selected="false">Unilateral exit</button>
       <button id="profiles-tab" role="tab" aria-controls="profiles-panel" aria-selected="false">Seed profiles</button>
+      <button id="recover-tab" role="tab" aria-controls="recover-panel" aria-selected="false">Unilateral exit</button>
     </nav>
     <footer><span id="network-badge" class="badge">Regtest</span><p>Stored on this computer.<br>No cloud connection.</p></footer>
   </aside>
@@ -22,6 +21,7 @@
           <p class="intro">Back up your Spark recovery bundle or start a unilateral exit using a bundle saved by Blink or the CLI. Your seed stays on this computer.</p>
           <div id="create-fields"><div class="profile-fields"><label>Seed profile name<input id="profile-name" value="Seed 1" maxlength="60"></label><label>Network<select id="network"><option value="LOCAL">Regtest</option><option value="MAINNET">Mainnet</option></select></label></div><label>Seed<textarea id="seed" rows="2" autocomplete="off" spellcheck="false" placeholder="Recovery words or a 64-byte hex seed"></textarea></label></div>
           <label>Vault password<input id="password" type="password" minlength="12" maxlength="1024" required autocomplete="off"></label>
+          <label id="confirm-field">Confirm vault password<input id="password-confirm" type="password" minlength="12" maxlength="1024" autocomplete="off"></label>
           <div class="password-actions"><button id="generate-password" type="button" class="tertiary">Generate password</button><button id="show-password" type="button" class="tertiary" aria-pressed="false">Show password</button></div>
           <p id="password-help" class="muted">Save this password before continuing. You need it after restarting. Importing a bundle requires your matching seed and this new vault password.</p>
           <details id="import-options"><summary>Does your file need a password?</summary><label>Recovery bundle password<input id="import-password" type="password" autocomplete="off" placeholder="Only for password-encrypted desktop exports"></label><p class="muted">Seed-encrypted Blink recovery bundles use your seed. Plaintext Blink and CLI recovery bundles need no file password.</p></details>
@@ -34,10 +34,12 @@
       <section id="backup-panel" class="card" role="tabpanel" aria-labelledby="backup-tab">
         <div class="card-content">
           <p class="eyebrow">Bundle backup</p><h2>Spark recovery bundle backup</h2>
-          <div class="snapshot"><div id="backup-summary" class="metric">No recovery bundle yet</div><button id="refresh" class="tertiary">Refresh now</button></div>
-          <p id="backup-date">Import a saved recovery bundle or refresh while Spark is online.</p>
-          <label>Recovery bundle password<input id="backup-password" type="password" autocomplete="off" placeholder="12+ characters to export; optional for import"></label>
-          <p class="muted">Import recovery bundles from Blink or the CLI, including seed-encrypted Blink bundles and this app's password-encrypted bundles.</p>
+          <div class="snapshot"><div id="backup-summary" class="metric">No recovery bundle yet</div></div>
+          <p id="backup-date">Import a saved recovery bundle or download one while Spark is online.</p>
+          <label>File password (optional)<input id="backup-password" type="password" autocomplete="off" placeholder="Encrypts exports and unlocks protected imports"></label>
+          <p class="muted">Exports are plaintext without a file password. Imports accept plaintext Blink and CLI recovery bundles, seed-encrypted Blink bundles and this app's password-encrypted exports.</p>
+          <label>Downloaded bundle<select id="bundle-mode"><option value="standard">Standard - optimized for payments</option><option value="exit">Most economical - optimized for unilateral exit</option></select></label>
+          <p class="muted">The economical download first swaps your leaves with Spark into the fewest, largest outputs, so a later unilateral exit costs less. It needs Spark online and changes the wallet's leaf set. Automatic refreshes always keep the standard bundle.</p>
           <details id="refresh-options"><summary>Automatic refresh</summary>
             <label class="check"><input id="auto-refresh" type="checkbox"><span id="refresh-frequency">Refresh all profiles every minute while unlocked</span></label>
             <label class="check"><input id="keep-unlocked" type="checkbox" aria-describedby="unlock-help">Keep unlocked until I lock or quit</label>
@@ -62,12 +64,13 @@
             </form>
           </details>
         </div>
-        <div class="actions"><button id="import">Import recovery bundle</button><button id="export" class="secondary">Export encrypted recovery bundle</button></div>
+        <div class="actions"><button id="refresh">Download recovery bundle</button><button id="import" class="secondary">Import recovery bundle</button><button id="export" class="secondary">Export recovery bundle</button></div>
       </section>
       <section id="recover-panel" class="card" role="tabpanel" aria-labelledby="recover-tab" hidden>
         <form id="recover-form" class="card-form">
           <div class="card-content">
             <p class="eyebrow">Use your recovery bundle</p><h2>Unilateral exit</h2><p>Exit one Bitcoin output with Spark offline. A recovery bundle and its matching seed are required.</p>
+            <aside id="exit-warning" class="notice" hidden>Spark operators are reachable. A unilateral exit is unnecessary and expensive - a simple withdrawal is the recommended way.</aside>
             <div class="recovery-fields"><label>Output to exit<select id="leaf" required></select></label><label>Fee rate (sat/vB)<input id="fee-rate" type="number" min="1" max="100" step="0.1" value="2" required></label><label class="destination-field">Destination address<input id="destination" placeholder="bcrt1…" required autocomplete="off" spellcheck="false"></label></div>
             <button id="estimate" type="button" class="tertiary">Estimate fee funding</button><p id="estimate-result"></p>
             <label><span id="funding-label">Send bitcoin for fees to</span><code id="funding-address"></code></label>

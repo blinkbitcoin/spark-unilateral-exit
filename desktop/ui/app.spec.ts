@@ -10,7 +10,7 @@ test("multiple seeds share one encrypted vault and a global mainnet connection",
   let app: ElectronApplication | undefined;
   try {
     app = await launch(directory); let page = await app.firstWindow();
-    await page.locator("#seed").fill(SEED); await page.locator("#password").fill(PASSWORD); await page.locator("#vault-submit").click();
+    await page.locator("#seed").fill(SEED); await page.locator("#password").fill(PASSWORD); await page.locator("#password-confirm").fill(PASSWORD); await page.locator("#vault-submit").click();
     await expect(page.locator("#workspace")).toBeVisible();
     const first = await page.locator("#profile-select").inputValue();
     const seed = "01".repeat(64), file = path.join(directory, "second.json");
@@ -116,6 +116,7 @@ for (const format of ["Blink JSON", "Blink encrypted", "desktop encrypted"]) {
       await page.screenshot({ path: testInfo.outputPath("create-vault.png") });
       await page.locator("#seed").fill(SEED); await expect(page.locator("#vault-import")).toBeDisabled();
       await page.locator("#password").fill(PASSWORD); await expect(page.locator("#vault-import")).toBeEnabled();
+      await page.locator("#password-confirm").fill(PASSWORD);
       await page.locator("#seed").fill(""); await expect(page.locator("#vault-import")).toBeDisabled();
       await page.locator("#seed").fill(SEED);
       if (format === "desktop encrypted") {

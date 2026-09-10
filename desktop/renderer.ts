@@ -23,6 +23,7 @@ function showTab() {
 }
 function showPassword(visible: boolean) {
   input("password").type = visible ? "text" : "password";
+  input("password-confirm").type = visible ? "text" : "password";
   el("show-password").textContent = visible ? "Hide password" : "Show password";
   el("show-password").setAttribute("aria-pressed", String(visible));
 }
@@ -48,6 +49,7 @@ async function update() {
   el("locked").hidden = current.unlocked; el("workspace").hidden = !current.unlocked;
   el("navigation").hidden = !current.unlocked;
   el("create-fields").hidden = current.exists;
+  el("confirm-field").hidden = current.exists;
   el("generate-password").hidden = current.exists;
   el("password-help").hidden = current.exists;
   el("vault-import").hidden = current.exists;
@@ -65,6 +67,7 @@ async function update() {
   el("backup-date").textContent = current.bundle ? `Bundle created: ${current.bundle.createdAt}. Latest state is unknown until refreshed.` : current.message;
   input("auto-refresh").checked = current.autoRefresh;
   input("keep-unlocked").checked = current.keepUnlocked;
+  el("exit-warning").hidden = !current.coordinatorOnline;
   el("refresh-frequency").textContent = current.keepUnlocked ? "Refresh all profiles hourly while unlocked" : "Refresh all profiles every minute while unlocked";
   updateLeaves();
   updateExit();
@@ -161,16 +164,17 @@ input("bitcoin-connection").addEventListener("change", showConnection);
 function profileOptions(label: string, network: string): ProfileOptions { return { label: input(label).value, network: input(network).value as ProfileOptions["network"] }; }
 const click = (id: string, handler: () => Promise<unknown>) => el(id).addEventListener("click", () => void action(handler));
 for (const id of ["seed", "password", "additional-seed"]) input(id).addEventListener("input", updateImportAvailability);
-click("generate-password", async () => { input("password").value = await call("generatePassword"); showPassword(false); });
+click("generate-password", async () => { input("password").value = await call("generatePassword"); input("password-confirm").value = input("password").value; showPassword(false); });
 el("show-password").addEventListener("click", () => showPassword(input("password").type === "password"));
 for (const name of ["backup", "recover", "profiles"] as const) el(`${name}-tab`).addEventListener("click", () => { tab = name; showTab(); });
 el("vault-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const fromBundle = (event as SubmitEvent).submitter?.id === "vault-import";
   const options = profileOptions("profile-name", "network");
-  const seed = input("seed").value, password = input("password").value, backupPassword = input("import-password").value;
-  input("seed").value = ""; input("password").value = ""; input("import-password").value = "";
+  const seed = input("seed").value, password = input("password").value, confirm = input("password-confirm").value, backupPassword = input("import-password").value;
+  input("seed").value = ""; input("password").value = ""; input("password-confirm").value = ""; input("import-password").value = "";
   showPassword(false);
+  if (!current.exists && password !== confirm) { feedback("The vault passwords do not match.", true); return; }
   void action(async () => {
     if (current.exists) return call("unlock", password);
     if (fromBundle) {
@@ -214,7 +218,7 @@ el("settings-form").addEventListener("submit", (event) => {
   void action(() => call("configure", value));
 });
 el("recover-form").addEventListener("submit", (event) => { event.preventDefault(); void action(() => call("prepare", input("leaf").value, input("destination").value, Number(input("fee-rate").value))); });
-click("lock", () => call("lock")); click("refresh", () => call("refresh"));
+click("lock", () => call("lock")); click("refresh", () => call("refresh", input("bundle-mode").value));
 click("estimate", async () => { const result = await call("estimate", input("leaf").value, Number(input("fee-rate").value));
   el("estimate-result").textContent = `Fund at least ${result.requiredSats} sats. Estimated net after all fees: ${result.netSats ?? "unknown"} sats.`; });
 click("approve", () => call("approve", current.session?.id)); click("advance", () => call("advance")); click("finish", () => call("finish"));

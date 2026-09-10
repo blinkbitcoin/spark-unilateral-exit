@@ -82,6 +82,7 @@ describe("Electron security boundary", () => {
     for (const name of ["status", "create", "addProfile", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish"]) {
       expect((await invoke(name, "a", "b", "c", "d")).ok).toBe(true);
     }
+    expect(h.service.refresh).toHaveBeenCalledWith(undefined, "a");
     expect(h.service.create).toHaveBeenCalledWith("a", "b", undefined, "", "c");
     expect(h.generatePassword).toHaveBeenCalled();
     expect((await invoke("approve", "id")).ok).toBe(false);

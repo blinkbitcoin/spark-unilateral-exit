@@ -4,7 +4,7 @@ import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 import { validateRecoveryBundle } from "../src/bundle.ts";
 import { deriveIdentityKeyPair } from "../src/operator/identity.ts";
 import type { RecoveryBundle } from "../src/types.ts";
-import type { Settings, Network, ProfileOptions, BitcoinRpc } from "./contracts.ts";
+import type { Settings, Network, ProfileOptions, BitcoinRpc, BundleMode } from "./contracts.ts";
 
 export const REGTEST = { ...TEST_NETWORK, bech32: "bcrt" };
 export function localUrl(value: unknown): string {
@@ -58,6 +58,10 @@ export function destinationCheck(value: unknown, network: Network = "LOCAL"): st
 }
 export function feeCheck(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1 || value > 100) throw new Error("Fee rate must be between 1 and 100 sat/vB.");
+  return value;
+}
+export function bundleModeCheck(value: unknown): BundleMode {
+  if (value !== "standard" && value !== "exit") throw new Error("Choose a bundle download mode.");
   return value;
 }
 export function bundleCheck(raw: unknown, seed: string, account: number, network: Network = "LOCAL"): RecoveryBundle {

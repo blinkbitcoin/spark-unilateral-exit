@@ -33,7 +33,7 @@ test("regtest: background refresh saves two independent seeds in one encrypted v
     }
     const { stdout: certificate } = await exec("docker", ["exec", "spark-desktop-pilot-spark-operator-0-1", "cat", "/opt/spark/tls/server_0.crt"]);
     app = await launch(directory, true); let page = await app.firstWindow();
-    await page.locator("#seed").fill(seeds[0]!); await page.locator("#password").fill(PASSWORD); await page.locator("#vault-submit").click();
+    await page.locator("#seed").fill(seeds[0]!); await page.locator("#password").fill(PASSWORD); await page.locator("#password-confirm").fill(PASSWORD); await page.locator("#vault-submit").click();
     await expect(page.locator("#workspace")).toBeVisible();
     await page.locator("#settings-details > summary").click(); await page.locator("#ca").fill(certificate); await page.locator("#settings-form button").click();
     await expect(page.locator("#feedback")).toContainText("settings saved");
@@ -82,7 +82,7 @@ test("regtest: refresh, encrypted export/import, offline exit and restart throug
     console.log("Regtest deposit claimed");
     const { stdout: certificate } = await exec("docker", ["exec", "spark-desktop-pilot-spark-operator-0-1", "cat", "/opt/spark/tls/server_0.crt"]);
     app = await start(); let page = await app.firstWindow();
-    await page.locator("#seed").fill(fixture.mnemonic!); await page.locator("#password").fill(PASSWORD); await page.locator("#vault-submit").click();
+    await page.locator("#seed").fill(fixture.mnemonic!); await page.locator("#password").fill(PASSWORD); await page.locator("#password-confirm").fill(PASSWORD); await page.locator("#vault-submit").click();
     await expect(page.locator("#workspace")).toBeVisible();
     await page.locator("#settings-details > summary").click(); await page.locator("#ca").fill(certificate); await page.locator("#settings-form button").click();
     await expect(page.locator("#feedback")).toContainText("settings saved");

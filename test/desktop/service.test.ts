@@ -229,6 +229,8 @@ describe("desktop recovery lifecycle", () => {
     expect(f.service.view().bundle?.sats).toBe("100000");
     const encrypted = await f.service.exportBundle(PASSWORD);
     expect(await decryptBackup(encrypted, PASSWORD)).toMatchObject({ schema: "spark.unilateral-exit-bundle.v1" });
+    const plaintext = await f.service.exportBundle("");
+    expect(JSON.parse(plaintext)).toMatchObject({ schema: "spark.unilateral-exit-bundle.v1" });
     f.service.lock(); expect(f.service.view().identity).toBeUndefined();
     await f.service.unlock(PASSWORD);
     await f.service.importBundle(encrypted, PASSWORD);
@@ -238,6 +240,18 @@ describe("desktop recovery lifecycle", () => {
     await expect(f.service.configure({ ...DEFAULT_SETTINGS, accountNumber: 0 })).rejects.toThrow("fixed");
     await f.service.estimate("leaf", 2);
     expect(f.engine.estimate).toHaveBeenCalled();
+  });
+  it("downloads standard or consolidated bundles and tracks operator reachability", async () => {
+    const f = await fixture(); await f.create();
+    expect(f.service.view().coordinatorOnline).toBe(false);
+    await expect(f.service.refresh(undefined, "sideways")).rejects.toThrow("download mode");
+    expect(f.service.view().coordinatorOnline).toBe(false);
+    await f.service.refresh(undefined, "exit");
+    expect(f.engine.refresh).toHaveBeenCalledWith(expect.anything(), "exit");
+    expect(f.service.view().coordinatorOnline).toBe(true);
+    f.engine.refresh.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.service.refresh()).rejects.toThrow("offline");
+    expect(f.service.view().coordinatorOnline).toBe(false);
   });
   it("persists approval before advancing and resumes after process restart", async () => {
     const f = await fixture(); await f.create(); await f.service.refresh();

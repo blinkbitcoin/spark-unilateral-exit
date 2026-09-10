@@ -3,7 +3,7 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 import { p2wpkh } from "@scure/btc-signer";
 import { deriveIdentityKeyPair } from "../../src/operator/identity.ts";
-import { bundleCheck, localUrl, settingsCheck, destinationCheck, feeCheck, REGTEST } from "../../desktop/validation.ts";
+import { bundleCheck, localUrl, settingsCheck, destinationCheck, feeCheck, bundleModeCheck, REGTEST } from "../../desktop/validation.ts";
 import { DEFAULT_SETTINGS } from "../../desktop/contracts.ts";
 import { bundle, SEED } from "./helpers.ts";
 describe("desktop input boundaries", () => {
@@ -17,6 +17,9 @@ describe("desktop input boundaries", () => {
     expect(() => settingsCheck({ ...DEFAULT_SETTINGS, coordinatorCa: "x".repeat(100001) })).toThrow();
     for (const fee of [0, 101, NaN, Infinity, "2"]) expect(() => feeCheck(fee)).toThrow();
     expect(feeCheck(2.5)).toBe(2.5);
+    expect(bundleModeCheck("standard")).toBe("standard");
+    expect(bundleModeCheck("exit")).toBe("exit");
+    for (const mode of [null, "", "economical", 0]) expect(() => bundleModeCheck(mode)).toThrow("download mode");
     const dest = p2wpkh(deriveIdentityKeyPair(SEED, "LOCAL", 1).publicKey, REGTEST).address!;
     expect(destinationCheck(dest)).toBe(dest);
     for (const dest of [null, "bc1whatever", "bcrt1invalid"]) expect(() => destinationCheck(dest)).toThrow();

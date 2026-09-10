@@ -13,9 +13,11 @@ npm run desktop:start
 
 The app runs from source, without signed installers or automatic updates. The UI and main process build into `dist-desktop/`. Electron supports macOS, Windows and Linux; platform CI runs the same desktop suite and actual-window smoke test.
 
-Create a vault using the wallet's recovery words (BIP-39 mnemonic) or its 64-byte hex seed. New profiles without an imported bundle use account 1, without an account selector or extra seed-passphrase field. Creating from a bundle matches its identity against account 1 and Blink account 0 on the selected network before saving. Existing vaults retain their stored account. Choose a separate vault password of at least 12 characters, or click **Generate password** for a cryptographically random 32-character password. **Show password** lets you save it in your password manager before creating the vault. This password encrypts the local vault and does not change the wallet derived from the seed.
+Create a vault using the wallet's recovery words (BIP-39 mnemonic) or its 64-byte hex seed. New profiles without an imported bundle use account 1, without an account selector or extra seed-passphrase field. Creating from a bundle matches its identity against account 1 and Blink account 0 on the selected network before saving. Existing vaults retain their stored account. Choose a separate vault password of at least 12 characters, entered twice to catch typos, or click **Generate password** for a cryptographically random 32-character password. **Show password** lets you save it in your password manager before creating the vault. This password encrypts the local vault and does not change the wallet derived from the seed.
 
-The **Bundle backup** and **Unilateral exit** tabs keep each step within the desktop window. A saved unilateral exit opens directly in the progress view; setup controls remain available in the Bundle backup tab. For regtest, under **Connection settings**, paste the PEM certificate from the local operator and save the Spark connection. Mainnet uses the default public Spark coordinator with normal HTTPS certificate verification. **Refresh now** captures leaves and their ancestors. A timestamp is only the age of the recovery bundle: changes between polls, while disconnected, or while locked can be missing.
+The **Bundle backup**, **Seed profiles** and **Unilateral exit** tabs keep each step within the desktop window, with the exit deliberately last and muted in the sidebar. A saved unilateral exit opens directly in the progress view; setup controls remain available in the Bundle backup tab. For regtest, under **Connection settings**, paste the PEM certificate from the local operator and save the Spark connection. Mainnet uses the default public Spark coordinator with normal HTTPS certificate verification. **Download recovery bundle** captures leaves and their ancestors. A timestamp is only the age of the recovery bundle: changes between polls, while disconnected, or while locked can be missing. When the last download reached the operators, the Unilateral exit tab warns that an exit is unnecessary and expensive while Spark is online; a simple withdrawal is the recommended way.
+
+The **Downloaded bundle** selector chooses what a download produces. **Standard - optimized for payments** is the default and leaves the wallet's leaf set untouched. **Most economical - optimized for unilateral exit** first swaps the leaves with the SSP into the fewest, largest outputs (the CLI's `make consolidate` behavior), then downloads the fresh bundle, so a later exit needs fewer transactions. The swap requires reachable operators with valid TLS (the public mainnet coordinator; the local regtest stack's self-signed certificates do not qualify) and changes the wallet's leaf set. If the swap succeeds but the download fails, the saved bundle is stale and the app says so instead of refreshing it silently. Automatic background refreshes always keep the standard bundle.
 
 ### Multiple seeds and mainnet connection
 
@@ -33,14 +35,14 @@ Explorer integration follows the [mempool REST API](https://mempool.space/docs/a
 
 Automatic refresh runs every minute while unlocked by default. For hourly refresh across screen locks:
 
-1. Unlock the vault, configure each profile's Spark coordinator and click **Refresh now** to verify connectivity and save a current recovery bundle.
+1. Unlock the vault, configure each profile's Spark coordinator and click **Download recovery bundle** to verify connectivity and save a current recovery bundle.
 2. Expand **Automatic refresh**. Select **Keep unlocked until I lock or quit**, then **Refresh all profiles hourly while unlocked**. The toolbar shows **Kept unlocked**. This keeps all seeds and the vault encryption key available to the main process, including when the screen locks.
-3. Minimize the window and leave the app running. Successful refreshes atomically update the encrypted local vault, not previously exported files. The coordinator must be reachable. Failed refreshes retain the previous recovery bundle and retry on the next hourly interval; **Refresh now** retries immediately.
+3. Minimize the window and leave the app running. Successful refreshes atomically update the encrypted local vault, not previously exported files. The coordinator must be reachable. Failed refreshes retain the previous recovery bundle and retry on the next hourly interval; **Download recovery bundle** retries immediately.
 4. Standby pauses work. On resume, the app checks immediately and refreshes if due, without a password while this mode remains active. Missed hours result in one refresh, not a burst of requests. If the OS closes the app, reboots, or logs you out, unlock again and re-enable both options.
 
 Hourly polling can miss up to an hour of wallet changes, and longer during sleep or connectivity failures. To avoid sleep gaps, configure the computer to stay awake; the app does not prevent standby. **Lock vault** always stops background work, after any in-flight operation finishes. Turning off keep-unlocked mode restores screen locking and starts a fresh 15-minute unlock window. Both preferences reset on locking or restart. Refresh pauses only for profiles with a unilateral exit session. Other profiles continue to refresh. Each profile has its own hourly timer; a failure does not stop the remaining profiles. Approved exits also progress in the background for every profile, regardless of which is selected.
 
-Use **Export encrypted recovery bundle** to save a portable recovery bundle with a separate recovery bundle password. The seed is never included in a bundle export: keep the seed separately.
+Use **Export recovery bundle** to save a portable recovery bundle. With a file password the export is encrypted; without one it is plaintext, matching the Blink and CLI bundle format. The seed is never included in a bundle export: keep the seed separately.
 
 ### Import an existing Blink or CLI bundle
 
@@ -52,7 +54,7 @@ Supported formats:
 
 | File | Required secret |
 | --- | --- |
-| Blink **Export file / Copy JSON** or CLI `spark.unilateral-exit-bundle.v1` | Matching seed; no file password |
+| Blink **Export file / Copy JSON** or CLI `spark.unilateral-exit-bundle.v1`, including this app's plaintext export | Matching seed; no file password |
 | Blink device/cloud `blink.recovery-bundle-backup.v1` | Matching seed decrypts the AES-128-GCM envelope |
 | This app's encrypted export | Matching seed and the recovery bundle password |
 

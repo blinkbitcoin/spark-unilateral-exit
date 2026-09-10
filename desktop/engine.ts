@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { deriveCpfpFundingKey, estimateCpfpFunding } from "../src/cpfp-funding.ts";
 import { exportRecoveryBundleFromSeed } from "../src/recovery-bundle.ts";
+import { consolidateLeavesFromSeed } from "../src/consolidate.ts";
 import { constructSparkPackages } from "../src/spark-packages.ts";
 import { constructSweepTransactions } from "../src/sweep.ts";
 import { summarizePackages, signPackages } from "../src/sign.ts";
@@ -8,7 +9,7 @@ import { BitcoinChain, LocalChain, coordinatorFetch } from "./chain.ts";
 import { ExplorerChain } from "./explorer.ts";
 import { transactionIdFromHex } from "../src/transaction-id.ts";
 import { bundleCheck, destinationCheck, feeCheck } from "./validation.ts";
-import type { WalletState, RecoverySession, Settings } from "./contracts.ts";
+import type { WalletState, RecoverySession, Settings, BundleMode } from "./contracts.ts";
 import { DEFAULT_SETTINGS } from "./contracts.ts";
 import type { RecoveryBundle } from "../src/types.ts";
 
@@ -22,11 +23,26 @@ export class RecoveryEngine {
   fundingKey(state: WalletState) {
     return deriveCpfpFundingKey({ seed: state.seed, network: state.settings.network ?? "LOCAL", accountNumber: state.settings.accountNumber });
   }
-  async refresh(state: WalletState): Promise<RecoveryBundle> {
-    const bundle = await exportRecoveryBundleFromSeed({ seed: state.seed, network: state.settings.network ?? "LOCAL",
-      accountNumber: state.settings.accountNumber, coordinatorUrl: state.settings.coordinatorUrl,
-      fetchImpl: coordinatorFetch(state.settings.coordinatorCa), appVersion: "electron-app" });
-    return bundleCheck(bundle, state.seed, state.settings.accountNumber, state.settings.network);
+  async refresh(state: WalletState, mode: BundleMode = "standard"): Promise<RecoveryBundle> {
+    // The exit-economical mode first swaps leaves with the SSP into the
+    // fewest, largest outputs. Those swaps spend the current leaves, so a
+    // failed export afterwards leaves the saved bundle stale.
+    let consolidated = false;
+    if (mode === "exit") {
+      consolidated = (await consolidateLeavesFromSeed({
+        seed: state.seed, network: state.settings.network ?? "LOCAL",
+        accountNumber: state.settings.accountNumber, multiplicity: 0,
+      })).executed;
+    }
+    try {
+      const bundle = await exportRecoveryBundleFromSeed({ seed: state.seed, network: state.settings.network ?? "LOCAL",
+        accountNumber: state.settings.accountNumber, coordinatorUrl: state.settings.coordinatorUrl,
+        fetchImpl: coordinatorFetch(state.settings.coordinatorCa), appVersion: "electron-app" });
+      return bundleCheck(bundle, state.seed, state.settings.accountNumber, state.settings.network);
+    } catch (error) {
+      if (consolidated) throw new Error("Leaves were consolidated but the fresh bundle download failed; the saved bundle is stale. Download again while Spark is online.");
+      throw error;
+    }
   }
   async estimate(state: WalletState, leafId: string, feeRate: number) {
     const chain = this.chainFor(state.settings);

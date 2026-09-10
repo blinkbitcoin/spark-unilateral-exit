@@ -38,6 +38,7 @@ describe("desktop user interface", () => {
     }
     api.generatePassword!.mockResolvedValueOnce({ ok: true, value: "a generated vault password" });
     await event("generate-password"); expect(el("vault-import").disabled).toBe(false);
+    expect(el("password-confirm").value).toBe("a generated vault password");
     el("seed").value = "  "; await event("seed", "input"); expect(el("vault-import").disabled).toBe(true); expect(el("import-options").hidden).toBe(true);
     el("additional-seed").value = "second seed"; await event("additional-seed", "input"); expect(el("profile-import").disabled).toBe(false);
     let release!: (value: unknown) => void;
@@ -87,9 +88,9 @@ describe("desktop user interface", () => {
     api.generatePassword!.mockResolvedValue({ ok: true, value: "test-random-password" });
     await event("generate-password"); expect(el("password").value).toBe("test-random-password");
     expect(el("password").type).toBe("password");
-    await event("show-password"); expect(el("password").type).toBe("text"); expect(el("show-password").textContent).toBe("Hide password");
-    await event("show-password"); expect(el("password").type).toBe("password");
-    el("seed").value = "test seed"; el("password").value = "vault password";
+    await event("show-password"); expect(el("password").type).toBe("text"); expect(el("password-confirm").type).toBe("text"); expect(el("show-password").textContent).toBe("Hide password");
+    await event("show-password"); expect(el("password").type).toBe("password"); expect(el("password-confirm").type).toBe("password");
+    el("seed").value = "test seed"; el("password").value = "vault password"; el("password-confirm").value = "vault password";
     api.create!.mockImplementation(async () => { unlocked(); return { ok: true }; });
     await event("vault-form", "submit");
     expect(api.create).toHaveBeenCalledWith("test seed", "vault password", { label: "Seed 1", network: "LOCAL" });
@@ -109,7 +110,7 @@ describe("desktop user interface", () => {
   });
   it("creates a vault from a picked bundle and clears every credential", async () => {
     await import("../../desktop/renderer.ts"); await flush();
-    el("seed").value = "test seed"; el("password").value = "vault password"; el("import-password").value = "backup password";
+    el("seed").value = "test seed"; el("password").value = "vault password"; el("password-confirm").value = "vault password"; el("import-password").value = "backup password";
     api.createFromBundle!.mockImplementation(async () => { unlocked(); return { ok: true, value: true }; });
     el("vault-form").dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: el("vault-import") }));
     await flush();
@@ -124,20 +125,37 @@ describe("desktop user interface", () => {
     el("vault-form").dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: el("vault-import") }));
     await flush(); expect(el("workspace").hidden).toBe(true);
     api.create!.mockImplementation(async () => { unlocked(); return { ok: true }; });
+    el("password-confirm").value = "vault password";
     await event("vault-form", "submit"); expect(el("backup-panel").hidden).toBe(false);
+  });
+  it("rejects a mismatched vault password confirmation before creating", async () => {
+    await import("../../desktop/renderer.ts"); await flush();
+    el("seed").value = "test seed"; el("password").value = "vault password"; el("password-confirm").value = "vault passwore";
+    await event("vault-form", "submit");
+    expect(api.create).not.toHaveBeenCalled(); expect(api.unlock).not.toHaveBeenCalled();
+    expect(el("feedback").textContent).toContain("do not match");
+    expect(el("password").value).toBe(""); expect(el("password-confirm").value).toBe("");
+    state.exists = true; await vi.advanceTimersByTimeAsync(2000);
+    expect(el("confirm-field").hidden).toBe(true);
+    el("password").value = "unlock password"; api.unlock!.mockImplementation(async () => { unlocked(); return { ok: true }; });
+    await event("vault-form", "submit"); expect(api.unlock).toHaveBeenCalledWith("unlock password");
   });
   it("routes backup and recovery controls, including review, running and completion", async () => {
     unlocked(); state.bundle = { createdAt: "today", sats: "1000", leaves: [{ id: "leaf", sats: 1000 }] };
     await import("../../desktop/renderer.ts"); await flush();
     await event("recover-tab"); expect(el("recover-panel").hidden).toBe(false); expect(el("backup-panel").hidden).toBe(true);
     await event("backup-tab"); expect(el("backup-panel").hidden).toBe(false);
-    await event("refresh"); expect(api.refresh).toHaveBeenCalled();
+    expect(el("exit-warning").hidden).toBe(true);
+    await event("refresh"); expect(api.refresh).toHaveBeenCalledWith("standard");
+    el("bundle-mode").value = "exit"; await event("refresh"); expect(api.refresh).toHaveBeenCalledWith("exit");
     el("auto-refresh").checked = true; await event("auto-refresh", "change"); expect(api.autoRefresh).toHaveBeenCalledWith(true);
     api.keepUnlocked!.mockImplementation(async (enabled) => { state.keepUnlocked = enabled; return { ok: true }; });
     el("keep-unlocked").checked = true; await event("keep-unlocked", "change");
     expect(api.keepUnlocked).toHaveBeenCalledWith(true);
     expect(el("wallet-identity").textContent).toContain("Kept unlocked");
     expect(el("refresh-frequency").textContent).toContain("hourly");
+    state.coordinatorOnline = true; await vi.advanceTimersByTimeAsync(2000);
+    expect(el("exit-warning").hidden).toBe(false);
     for (const name of ["import", "export"]) { el("backup-password").value = "file password"; await event(name); expect(api[name]).toHaveBeenCalledWith("file password"); expect(el("backup-password").value).toBe(""); }
     api.estimate!.mockResolvedValue({ ok: true, value: { requiredSats: "300", netSats: "700" } }); await event("estimate");
     expect(el("estimate-result").textContent).toContain("700 sats");

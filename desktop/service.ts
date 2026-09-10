@@ -3,7 +3,7 @@ import { deriveIdentityKeyPair } from "../src/operator/identity.ts";
 import { Vault, encryptBackup } from "./vault.ts";
 import { decodeImportedBundle } from "./import-bundle.ts";
 import { RecoveryEngine } from "./engine.ts";
-import { bundleCheck, settingsCheck, rpcCheck } from "./validation.ts";
+import { bundleCheck, settingsCheck, rpcCheck, bundleModeCheck } from "./validation.ts";
 import type { WalletState, Settings, PublicState, VaultState, ProfileOptions, BitcoinRpc } from "./contracts.ts";
 import { FIRST_PROFILE, MAX_PROFILES, createProfile, readProfiles } from "./profiles.ts";
 
@@ -19,6 +19,7 @@ export class DesktopService {
   private message = "Create or unlock your encrypted seed vault.";
   private unlockedAt = 0;
   private refreshAt = new Map<string, number>();
+  private coordinatorOnline = new Map<string, boolean>();
   constructor(readonly vault: Vault, private readonly engine: Engine = new RecoveryEngine(), private readonly now = Date.now) {}
   async initialize(): Promise<void> { this.exists = await this.vault.exists(); }
   view(): PublicState {
@@ -32,6 +33,7 @@ export class DesktopService {
 
     const { settings, bundle, session } = state;
     view.activeProfileId = this.data!.activeProfileId;
+    view.coordinatorOnline = this.coordinatorOnline.get(this.data!.activeProfileId) ?? false;
     view.profiles = this.data!.profiles.map((profile) => ({
       id: profile.id, label: profile.label, network: profile.wallet.settings.network!,
       bundleCreatedAt: profile.wallet.bundle?.createdAt, exitStatus: profile.wallet.session?.status,
@@ -146,13 +148,20 @@ export class DesktopService {
   private connectionSettings(settings: Settings): Settings {
     return { ...settings, bitcoinRpc: settings.network === "MAINNET" ? this.data!.bitcoinRpc : undefined };
   }
-  async refresh(profileId = this.data?.activeProfileId) {
+  async refresh(profileId = this.data?.activeProfileId, rawMode: unknown = "standard") {
     return this.run(async () => {
       const state = this.requireProfile(profileId).wallet;
       if (state.session) throw new Error("Recovery bundle refresh is paused during a unilateral exit.");
-      const bundle = await this.engine.refresh(state);
-      await this.saveState({ ...state, bundle }, profileId);
-      this.refreshAt.set(profileId!, this.now()); this.message = "Recovery bundle refreshed. Later changes are not covered.";
+      const mode = bundleModeCheck(rawMode);
+      try {
+        const bundle = await this.engine.refresh(state, mode);
+        await this.saveState({ ...state, bundle }, profileId);
+        this.coordinatorOnline.set(profileId!, true);
+        this.refreshAt.set(profileId!, this.now()); this.message = "Recovery bundle refreshed. Later changes are not covered.";
+      } catch (error) {
+        this.coordinatorOnline.set(profileId!, false);
+        throw error;
+      }
     });
   }
   setAutoRefresh(enabled: boolean): void {
@@ -174,6 +183,7 @@ export class DesktopService {
     return this.run(async () => {
       const state = this.requireState();
       if (!state.bundle) throw new Error("There is no recovery bundle to export.");
+      if (password === "") return JSON.stringify(state.bundle);
       return encryptBackup(state.bundle, password);
     });
   }
