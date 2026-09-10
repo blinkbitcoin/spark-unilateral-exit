@@ -9,7 +9,7 @@ export async function launch(directory: string, hidden = false) {
   await app.firstWindow();
   await app.evaluate(({ BrowserWindow }, hidden) => {
     const window = BrowserWindow.getAllWindows()[0]!;
-    window.setTitle("TEST · Spark recovery bundle backup and unilateral exit");
+    window.setTitle("TEST · Blink Spark backup");
     if (hidden) window.hide();
   }, hidden);
   return app;

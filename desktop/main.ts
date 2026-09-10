@@ -13,7 +13,7 @@ process.env.BITCOIN_RPC_PASSWORD = RPC_PASSWORD;
 delete process.env.SPARK_LOCAL_INGRESS_HOST;
 delete process.env.SPARK_DANGEROUSLY_DISABLE_TLS_VERIFICATION;
 
-app.setName("Spark recovery bundle backup and unilateral exit");
+app.setName("Blink Spark backup");
 app.setPath("userData", process.env.SPARK_DESKTOP_TEST_DATA || path.join(app.getPath("appData"), "blink-spark-backup"));
 protocol.registerSchemesAsPrivileged([{ scheme: "app", privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 app.enableSandbox();
@@ -45,13 +45,13 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler(() => false);
   window = new BrowserWindow({ width: 1100, height: 850, minWidth: 760, minHeight: 650,
     autoHideMenuBar: true,
-    title: "Spark recovery bundle backup and unilateral exit", backgroundColor: "#1d1d1d",
+    title: "Blink Spark backup", backgroundColor: "#1d1d1d",
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), sandbox: true,
       nodeIntegration: false, contextIsolation: true, webSecurity: true, devTools: false, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Spark bundle backup and unilateral exit", submenu: [
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Blink Spark backup", submenu: [
     { label: "Lock vault", click: () => { try { service.lock(); } catch { /* UI shows current operation. */ } } },
     { role: "quit" },
   ] }, { role: "editMenu" }]));
@@ -136,7 +136,7 @@ app.whenReady().then(async () => {
   powerMonitor.on("resume", () => { void service.tick(); });
   await window.loadURL("app://recovery/");
 }).catch(() => {
-  dialog.showErrorBox("Spark bundle backup and unilateral exit could not start", "Check access to the local vault and restart. Existing files have been preserved.");
+  dialog.showErrorBox("Blink Spark backup could not start", "Check access to the local vault and restart. Existing files have been preserved.");
   app.quit();
 });
 app.on("second-instance", () => { window?.show(); window?.focus(); });
