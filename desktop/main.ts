@@ -14,7 +14,7 @@ delete process.env.SPARK_LOCAL_INGRESS_HOST;
 delete process.env.SPARK_DANGEROUSLY_DISABLE_TLS_VERIFICATION;
 
 app.setName("Spark recovery bundle backup and unilateral exit");
-app.setPath("userData", process.env.SPARK_DESKTOP_TEST_DATA || path.join(app.getPath("appData"), "spark-recovery-regtest-pilot"));
+app.setPath("userData", process.env.SPARK_DESKTOP_TEST_DATA || path.join(app.getPath("appData"), "blink-spark-backup"));
 protocol.registerSchemesAsPrivileged([{ scheme: "app", privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 app.enableSandbox();
 if (!app.requestSingleInstanceLock()) app.quit();
