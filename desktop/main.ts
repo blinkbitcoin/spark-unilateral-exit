@@ -83,6 +83,13 @@ app.whenReady().then(async () => {
       return true;
     },
     generatePassword,
+    reset: (confirmation: unknown) => service.reset(confirmation, async () => {
+      const result = await dialog.showMessageBox(window, { type: "warning", title: "Reset app storage",
+        message: "Permanently delete all local vault data?",
+        detail: "This deletes ALL local seeds, profiles, recovery bundles and recovery progress, including previous vault copies. This cannot recover your password or undo transactions. To recover funds you need your seed and a suitable recovery bundle saved outside this app. Without them, access to funds may be lost. Exported files are not deleted. This is not secure disk erasure.",
+        buttons: ["Cancel", "Delete all local vault data"], defaultId: 0, cancelId: 0, noLink: true });
+      return result.response === 1;
+    }),
     unlock: (password: string) => service.unlock(password),
     lock: () => service.lock(),
     configureBitcoin: (rpc?: BitcoinRpc) => service.configureBitcoin(rpc),

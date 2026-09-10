@@ -28,6 +28,7 @@ function showPassword(visible: boolean) {
   el("show-password").setAttribute("aria-pressed", String(visible));
 }
 function updateImportAvailability() {
+  input("reset-storage").disabled = working || !!current?.busy;
   const password = input("password");
   const hasSeed = !!input("seed").value.trim();
   input("vault-import").disabled = working || !hasSeed || password.value.length < password.minLength || password.value.length > password.maxLength;
@@ -53,6 +54,10 @@ async function update() {
   el("generate-password").hidden = current.exists;
   el("password-help").hidden = current.exists;
   el("vault-import").hidden = current.exists;
+  el("forgot-password").hidden = !current.exists || current.unlocked;
+  if (el("forgot-password").hidden) {
+    el<HTMLDetailsElement>("forgot-password").open = false; input("reset-confirmation").value = "";
+  }
   updateImportAvailability();
   el("vault-title").textContent = current.exists ? "Unlock your vault" : "Create your vault";
   el("vault-submit").textContent = current.exists ? "Unlock vault" : "Create encrypted vault";
@@ -164,6 +169,19 @@ input("bitcoin-connection").addEventListener("change", showConnection);
 function profileOptions(label: string, network: string): ProfileOptions { return { label: input(label).value, network: input(network).value as ProfileOptions["network"] }; }
 const click = (id: string, handler: () => Promise<unknown>) => el(id).addEventListener("click", () => void action(handler));
 for (const id of ["seed", "password", "additional-seed"]) input(id).addEventListener("input", updateImportAvailability);
+click("reset-storage", async () => {
+  if (current.busy) return;
+  const confirmation = input("reset-confirmation").value;
+  input("reset-confirmation").value = "";
+  if (confirmation !== "RESET") throw new Error("Type RESET exactly to delete local app storage.");
+  if (await call("reset", confirmation)) {
+    document.querySelectorAll<HTMLFormElement>("form").forEach((form) => form.reset());
+    for (const id of ["seed", "password", "password-confirm", "import-password", "additional-seed", "additional-password", "rpc-password", "backup-password"]) input(id).value = "";
+    showPassword(false); activeProfileId = undefined; sessionId = undefined; settingsLoaded = false; tab = "backup";
+    for (const id of ["profile-select", "leaf"]) { el(id).replaceChildren(); delete el(id).dataset.signature; }
+    for (const id of ["wallet-identity", "funding-address", "session-summary", "session-message", "estimate-result", "backup-summary", "backup-date"]) el(id).textContent = "";
+  }
+});
 click("generate-password", async () => { input("password").value = await call("generatePassword"); input("password-confirm").value = input("password").value; showPassword(false); });
 el("show-password").addEventListener("click", () => showPassword(input("password").type === "password"));
 for (const name of ["backup", "recover", "profiles"] as const) el(`${name}-tab`).addEventListener("click", () => { tab = name; showTab(); });

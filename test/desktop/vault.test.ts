@@ -6,6 +6,21 @@ import { Vault, encryptBackup, decryptBackup, passwordCheck, readLimited, durabl
 import { PASSWORD, SEED } from "./helpers.ts";
 const dir = () => mkdtemp(path.join(os.tmpdir(), "spark-desktop-vault-test-"));
 describe("encrypted desktop vault", () => {
+  it("resets only vault ciphertext, rotation and exact crash temp files", async () => {
+    const root = await dir(), file = path.join(root, "vault.json");
+    const vault = new Vault(file); await vault.create({ seed: SEED }, PASSWORD); await vault.save({ seed: SEED });
+    const temp = file + ".0123456789abcdef.tmp";
+    await writeFile(temp, "ciphertext"); await writeFile(file + ".notes.tmp", "keep");
+    await writeFile(path.join(root, "export.json"), "external backup");
+    await vault.reset();
+    for (const name of [file, file + ".previous", temp]) await expect(stat(name)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(file + ".notes.tmp", "utf8")).toBe("keep");
+    expect(await readFile(path.join(root, "export.json"), "utf8")).toBe("external backup");
+    await expect(vault.save({})).rejects.toThrow("Unlock");
+    await vault.reset();
+    await mkdir(file + ".previous"); await writeFile(file, "retain on error");
+    await expect(vault.reset()).rejects.toThrow(); expect(await readFile(file, "utf8")).toBe("retain on error");
+  });
   it("generates a fresh password accepted by vault encryption", async () => {
     const password = generatePassword();
     expect(password).toMatch(/^[A-Za-z0-9_-]{32}$/); expect(generatePassword()).not.toBe(password);

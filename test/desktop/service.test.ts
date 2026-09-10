@@ -20,6 +20,30 @@ async function fixture() {
   return { service, engine, vault, setTime: (n: number) => { now = n; }, create: () => service.create(SEED, PASSWORD) };
 }
 describe("desktop recovery lifecycle", () => {
+  it("requires a locked vault, exact confirmation and exclusive native consent before reset", async () => {
+    const f = await fixture(), confirm = vi.fn(async () => true);
+    await expect(f.service.reset("RESET", confirm)).rejects.toThrow("locked existing");
+    await f.create(); await expect(f.service.reset("RESET", confirm)).rejects.toThrow("locked existing");
+    await f.service.refresh(); f.service.setKeepUnlocked(true); f.service.setAutoRefresh(true); f.service.lock();
+    for (const value of [null, "reset", " RESET", ""]) await expect(f.service.reset(value, confirm)).rejects.toThrow("Type RESET");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(await f.service.reset("RESET", async () => false)).toBe(false); expect(await f.vault.exists()).toBe(true);
+    await expect(f.service.reset("RESET", async () => { throw new Error("dialog failed"); })).rejects.toThrow("dialog failed");
+    let release!: (value: boolean) => void;
+    const pending = f.service.reset("RESET", () => new Promise((resolve) => { release = resolve; }));
+    expect(f.service.view().busy).toBe(true);
+    await expect(f.service.unlock(PASSWORD)).rejects.toThrow("still running");
+    await expect(f.service.reset("RESET", confirm)).rejects.toThrow("still running");
+    await f.service.tick(); f.service.lock(); release(false); await pending;
+    vi.spyOn(f.vault, "reset").mockRejectedValueOnce(new Error("disk denied"));
+    await expect(f.service.reset("RESET", confirm)).rejects.toThrow("disk denied");
+    expect(f.service.view()).toMatchObject({ exists: true, unlocked: false, busy: false });
+    expect(await f.service.reset("RESET", confirm)).toBe(true);
+    expect(f.service.view()).toMatchObject({ exists: false, unlocked: false, busy: false, keepUnlocked: false, autoRefresh: false });
+    await f.service.tick(); expect(f.engine.refresh).toHaveBeenCalledTimes(1);
+    const restarted = new DesktopService(new Vault(f.vault.filename)); await restarted.initialize(); expect(restarted.view().exists).toBe(false);
+    await f.create(); expect(f.service.view().profiles).toHaveLength(1); expect(f.service.view().bundle).toBeUndefined();
+  });
   it("isolates two seeds and mainnet settings under one durable encrypted vault password", async () => {
     const f = await fixture(); await f.create(); await f.service.refresh();
     const first = f.service.view().activeProfileId!;

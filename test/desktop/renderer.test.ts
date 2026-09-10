@@ -17,12 +17,34 @@ function unlocked() {
 beforeEach(() => {
   vi.resetModules(); vi.useFakeTimers(); document.documentElement.innerHTML = html;
   state = { exists: false, unlocked: false, busy: false, autoRefresh: false, keepUnlocked: false, message: "Ready" };
-  api = Object.fromEntries(["status", "create", "createFromBundle", "addProfile", "addProfileFromBundle", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish", "approve", "import", "export"].map((name) => [name, vi.fn(async () => ({ ok: true }))]));
+  api = Object.fromEntries(["reset", "status", "create", "createFromBundle", "addProfile", "addProfileFromBundle", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish", "approve", "import", "export"].map((name) => [name, vi.fn(async () => ({ ok: true }))]));
   api.status!.mockImplementation(async () => ({ ok: true, value: state }));
   window.recovery = api as Window["recovery"];
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 describe("desktop user interface", () => {
+  it("hides reset until locked and collapsed, validates text and clears secrets after success", async () => {
+    await import("../../desktop/renderer.ts"); await flush();
+    expect(el("forgot-password").hidden).toBe(true);
+    state.exists = true; await vi.advanceTimersByTimeAsync(2000);
+    expect(el("forgot-password").hidden).toBe(false);
+    expect(el("forgot-password").hasAttribute("open")).toBe(false);
+    el("reset-confirmation").value = "wrong"; await event("reset-storage");
+    expect(api.reset).not.toHaveBeenCalled(); expect(el("feedback").textContent).toContain("Type RESET");
+    el("reset-confirmation").value = "RESET"; state.busy = true; await vi.advanceTimersByTimeAsync(2000);
+    expect(el("reset-storage").disabled).toBe(true); await event("reset-storage"); expect(api.reset).not.toHaveBeenCalled();
+    state.busy = false; await vi.advanceTimersByTimeAsync(2000);
+    api.reset!.mockResolvedValueOnce({ ok: true, value: false }); await event("reset-storage");
+    expect(el("reset-confirmation").value).toBe(""); expect(state.exists).toBe(true);
+    el("reset-confirmation").value = "RESET"; el("password").value = "forgotten"; el("additional-seed").value = "secret";
+    el("forgot-password").setAttribute("open", "");
+    api.reset!.mockImplementationOnce(async () => { state.exists = false; return { ok: true, value: true }; });
+    await event("reset-storage");
+    expect(el("forgot-password").hidden).toBe(true); expect(el("forgot-password").hasAttribute("open")).toBe(false);
+    expect(el("password").value).toBe(""); expect(el("additional-seed").value).toBe("");
+    expect(el("vault-title").textContent).toBe("Create your vault");
+    unlocked(); await vi.advanceTimersByTimeAsync(2000); expect(el("forgot-password").hidden).toBe(true);
+  });
   it("enables import only after seed entry and a valid new vault password, including generated passwords", async () => {
     let ready!: (value: unknown) => void;
     api.status!.mockImplementationOnce(() => new Promise((resolve) => { ready = resolve; }));

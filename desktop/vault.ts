@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
-import { mkdir, open, readFile, rename, copyFile, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, copyFile, unlink, readdir } from "node:fs/promises";
 import path from "node:path";
 
 const FORMAT = "spark.desktop.vault.v1";
@@ -123,6 +123,17 @@ export class Vault {
   async save(value: unknown): Promise<void> {
     if (!this.key || !this.salt) throw new Error("Unlock the vault first.");
     await durableWrite(this.filename, encode(value, this.key, this.salt));
+  }
+  async reset(): Promise<void> {
+    this.lock();
+    const directory = path.dirname(this.filename), base = path.basename(this.filename);
+    const names = await readdir(directory);
+    // Only our rotation and exact durableWrite crash files, never exports or directories.
+    const copies = names.filter((name) => name === `${base}.previous` ||
+      (name.startsWith(`${base}.`) && /^[a-f0-9]{16}\.tmp$/.test(name.slice(base.length + 1))));
+    for (const name of copies) await unlink(path.join(directory, name));
+    // Keep the primary vault until all older ciphertext has been removed.
+    if (names.includes(base)) await unlink(this.filename);
   }
   lock(): void { this.key?.fill(0); this.key = undefined; this.salt = undefined; }
 }

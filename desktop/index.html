@@ -28,6 +28,12 @@
         </div>
         <div class="actions"><button id="vault-submit" type="submit">Create encrypted vault</button><button id="vault-import" type="submit" class="secondary" disabled>Create vault and import bundle</button></div>
       </form>
+      <details id="forgot-password" class="forgot-password" hidden>
+        <summary>Forgot password?</summary>
+        <p id="reset-warning">There is no password recovery. Reset permanently deletes ALL local seeds, profiles, recovery bundles and recovery progress, including previous vault copies. To recover funds you need your seed and a suitable recovery bundle saved outside this app. Without them, access to funds may be lost. Reset does not undo transactions or delete exported files. This is not secure disk erasure.</p>
+        <label>Type RESET to confirm deletion<input id="reset-confirmation" autocomplete="off" spellcheck="false" aria-describedby="reset-warning"></label>
+        <button id="reset-storage" type="button" class="tertiary danger">Reset app storage</button>
+      </details>
     </section>
     <div id="workspace" hidden>
       <div class="toolbar"><label class="profile-picker">Seed profile<select id="profile-select"></select></label><span id="wallet-identity"></span><button id="lock" class="tertiary">Lock vault</button></div>

@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({ handlers: {} as Record<string, (...args: any[]) =>
     requestSingleInstanceLock: vi.fn(() => true), quit: vi.fn(), on: vi.fn(), whenReady: vi.fn() },
   dialog: { showMessageBox: vi.fn(), showOpenDialog: vi.fn(), showSaveDialog: vi.fn(), showErrorBox: vi.fn() },
   session: { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn() },
-  service: Object.fromEntries(["initialize", "view", "addProfile", "selectProfile", "create", "unlock", "lock", "screenLocked", "setKeepUnlocked", "configure", "configureBitcoin", "refresh", "setAutoRefresh", "estimate", "prepare", "advance", "finish", "approve", "importBundle", "exportBundle", "tick"].map((n) => [n, vi.fn()])) as Record<string, any>,
+  service: Object.fromEntries(["reset", "initialize", "view", "addProfile", "selectProfile", "create", "unlock", "lock", "screenLocked", "setKeepUnlocked", "configure", "configureBitcoin", "refresh", "setAutoRefresh", "estimate", "prepare", "advance", "finish", "approve", "importBundle", "exportBundle", "tick"].map((n) => [n, vi.fn()])) as Record<string, any>,
   readLimited: vi.fn(), durableWrite: vi.fn(), generatePassword: vi.fn(() => "generated"), readFile: vi.fn(), expose: vi.fn(), invoke: vi.fn(),
 }));
 vi.mock("electron", () => ({
@@ -38,6 +38,19 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 async function boot() { await import("../../desktop/main.ts"); await h.boot?.catch(() => {}); await Promise.resolve(); }
 function invoke(name: string, ...args: unknown[]) { return h.handlers[`recovery:${name}`]!({ sender: h.window.webContents, senderFrame: h.window.webContents.mainFrame }, ...args); }
 describe("Electron security boundary", () => {
+  it("requires native destructive consent with Cancel as the safe default", async () => {
+    await boot();
+    h.service.reset.mockImplementation(async (_text: unknown, confirm: () => Promise<boolean>) => confirm());
+    for (const response of [0, 1]) {
+      h.dialog.showMessageBox.mockResolvedValueOnce({ response });
+      expect(await invoke("reset", "RESET")).toEqual({ ok: true, value: response === 1 });
+    }
+    expect(h.service.reset).toHaveBeenLastCalledWith("RESET", expect.any(Function));
+    expect(h.dialog.showMessageBox).toHaveBeenLastCalledWith(h.window, expect.objectContaining({
+      type: "warning", buttons: ["Cancel", "Delete all local vault data"], defaultId: 0, cancelId: 0,
+      detail: expect.stringContaining("ALL local seeds, profiles, recovery bundles and recovery progress"),
+    }));
+  });
   it("distinguishes an empty selected file from cancellation and propagates file-read failures", async () => {
     await boot();
     const options = { label: "Seed", network: "LOCAL" };

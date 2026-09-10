@@ -77,6 +77,21 @@ export class DesktopService {
       } catch (error) { this.vault.lock(); throw error; }
     });
   }
+  async reset(confirmation: unknown, confirm: () => Promise<boolean>): Promise<boolean> {
+    return this.run(async () => {
+      if (!this.exists || this.data) throw new Error("Reset requires a locked existing vault.");
+      if (confirmation !== "RESET") throw new Error("Type RESET exactly to delete local app storage.");
+      // Hold the operation lock across the native dialog so unlock/work cannot race deletion.
+      if (!await confirm()) return false;
+      this.data = undefined; this.vault.lock();
+      this.keepUnlocked = false; this.autoRefresh = false; this.lockPending = false;
+      this.unlockedAt = 0; this.refreshAt.clear(); this.coordinatorOnline.clear();
+      await this.vault.reset();
+      this.exists = false;
+      this.message = "Local vault storage deleted. Create a new vault using your external seed and recovery bundle.";
+      return true;
+    });
+  }
   async addProfile(seed: string, options: ProfileOptions, rawBundle?: string, backupPassword = "") {
     return this.run(async () => {
       this.requireState();
