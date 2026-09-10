@@ -168,7 +168,7 @@ export interface DecodedTreeNode {
   raw: Uint8Array;
 }
 
-function decodeTreeNode(data: Uint8Array): DecodedTreeNode {
+export function decodeTreeNode(data: Uint8Array): DecodedTreeNode {
   const fields = decodeFields(data);
   const parent = firstField(fields, 4)?.bytes;
   return {

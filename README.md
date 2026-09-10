@@ -39,6 +39,8 @@ The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 | Command | Purpose |
 |---------|---------|
 | `refresh-bundle` | Query live Spark leaves from a seed and write a bundle |
+| `to-exit-state` | Convert a bundle to the Breez Spark SDK's exit-state JSON (`make to-exit-state`) |
+| `from-exit-state` | Convert a Breez SDK exit-state JSON (glow-web backup's `exit-state.json`) to a bundle (`make from-exit-state`) |
 | `consolidate` | Swap small leaves with the SSP into the fewest denominations (`make consolidate`) |
 | `plan` | Validate a saved bundle and print a recovery plan |
 | `cpfp-address` | Derive a CPFP funding address from the seed and estimate the sats to send it |
@@ -138,6 +140,12 @@ make refresh-recovery-bundle \
   BUNDLE=../recovery-bundle.json \
   NETWORK=mainnet \
   ACCOUNT_NUMBER=1
+
+# Bundle -> Breez SDK exit state (importUnilateralExitState input, e.g. to
+# restore into glow-web), and back (e.g. a glow-web backup's exit-state.json
+# extracted from the zip, feeding this repo's exit tooling):
+make to-exit-state BUNDLE=../recovery-bundle.json EXIT_STATE=../exit-state.json
+make from-exit-state EXIT_STATE_IN=../exit-state.json BUNDLE=../recovery-bundle.json
 
 make plan \
   BUNDLE=../recovery-bundle.json \

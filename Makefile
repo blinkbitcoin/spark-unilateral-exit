@@ -48,12 +48,17 @@ MAX_ROUNDS ?=
 OFFLINE ?=
 NO_CONSOLIDATE ?=
 
-.PHONY: help refresh-recovery-bundle consolidate plan package sign-packages sweep \
+.PHONY: help refresh-recovery-bundle to-exit-state from-exit-state consolidate plan package sign-packages sweep \
 	broadcast-sweep test-e2e cpfp-address watch-cpfp broadcast recover
 
 help:
 	@echo "Targets:"
 	@echo "  make refresh-recovery-bundle SEED_FILE=../spark-seed.txt BUNDLE=../recovery-bundle.json NETWORK=mainnet"
+	@echo "  make to-exit-state BUNDLE=../recovery-bundle.json [EXIT_STATE=exit-state.json]"
+	@echo "                    # bundle -> Breez SDK exit-state JSON (importUnilateralExitState)"
+	@echo "  make from-exit-state EXIT_STATE_IN=exit-state.json BUNDLE=../recovery-bundle.json"
+	@echo "                    # Breez SDK exit-state JSON (or glow-web backup's exit-state.json,"
+	@echo "                    # extracted) -> recovery bundle"
 	@echo "  make consolidate SEED_FILE=../spark-seed.txt NETWORK=mainnet [DRY_RUN=1] [MULTIPLICITY=0]"
 	@echo "                    # swap small leaves with the SSP into the fewest denominations so fewer"
 	@echo "                    # leaves are uneconomical to exit; refresh the recovery bundle afterwards"
@@ -84,6 +89,20 @@ test-e2e:
 # The CLI backs up any existing bundle itself (writeFileWithBackup).
 refresh-recovery-bundle:
 	@$(NODE) src/cli.ts refresh-bundle $(REFRESH_ARGS)
+
+# Convert a recovery bundle to the Breez Spark SDK's exit-state JSON
+# (importUnilateralExitState input, e.g. for a glow-web restore).
+to-exit-state:
+	@$(NODE) src/cli.ts to-exit-state --bundle $(BUNDLE) $(if $(EXIT_STATE),--out $(EXIT_STATE),)
+
+# Convert a Breez Spark SDK exit-state JSON (the exit-state.json inside a
+# glow-web backup zip, extracted) into a recovery bundle this tooling uses.
+from-exit-state: require-exit-state-in
+	@$(NODE) src/cli.ts from-exit-state \
+		--exit-state $(EXIT_STATE_IN) \
+		--out $(BUNDLE) \
+		$(if $(OPERATOR_SET),--operator-set $(OPERATOR_SET),) \
+		$(if $(APP_VERSION),--app-version $(APP_VERSION),)
 
 # Cooperative leaf consolidation (not an exit): swaps small leaves with the
 # SSP into the unilateral-exit-optimal denomination set so fewer leaves are
@@ -184,7 +203,10 @@ broadcast-sweep: require-sweeps
 		--network $(NETWORK) \
 		$(ESPLORA_ARGS)
 
-.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file require-sweeps
+.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file require-sweeps require-exit-state-in
+
+require-exit-state-in:
+	@: $(if $(EXIT_STATE_IN),,$(error EXIT_STATE_IN is required (path to the SDK exit-state JSON)))
 
 require-destination:
 	@: $(if $(DESTINATION),,$(error DESTINATION is required))

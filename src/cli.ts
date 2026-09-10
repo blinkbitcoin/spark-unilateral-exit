@@ -27,6 +27,7 @@ import {
   watchCpfpFunding,
 } from "./cpfp-funding.ts";
 import { constructSweepTransactions } from "./sweep.ts";
+import { bundleToExitState, exitStateToBundle } from "./exit-state-converter.ts";
 import type { CliArgs, CliArgValue, RecoveryBundle } from "./types.ts";
 
 // The Spark SDK emits diagnostic logs through the global console.log, which
@@ -461,6 +462,46 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "to-exit-state") {
+    const bundle = loadOptionalBundle(args.bundle);
+    if (!bundle) throw new Error("--bundle is required for exit-state conversion");
+    if (args.out === true) throw new Error("--out requires a path");
+    const output = `${bundleToExitState(bundle)}\n`;
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      const written = writeFileWithBackup(outPath, output);
+      if (written.backupPath) {
+        console.error(`Saved previous exit state to ${written.backupPath}`);
+      }
+    } else {
+      process.stdout.write(output);
+    }
+    return;
+  }
+
+  if (command === "from-exit-state") {
+    const exitState = fs.readFileSync(
+      required(args["exit-state"], "--exit-state"),
+      "utf8",
+    );
+    if (args.out === true) throw new Error("--out requires a path");
+    const bundle = exitStateToBundle(exitState, {
+      operatorSet: optionalValue(args["operator-set"]),
+      appVersion: optionalValue(args["app-version"]),
+    });
+    const output = `${serializeForJson(bundle)}\n`;
+    const outPath = optionalValue(args.out);
+    if (outPath) {
+      const written = writeFileWithBackup(outPath, output);
+      if (written.backupPath) {
+        console.error(`Saved previous bundle to ${written.backupPath}`);
+      }
+    } else {
+      process.stdout.write(output);
+    }
+    return;
+  }
+
   if (command === "consolidate") {
     const seed = await loadSeed(args);
     const result = await consolidateLeavesFromSeed({
@@ -588,6 +629,10 @@ Commands:
   refresh-bundle   Query live Spark leaves and their full ancestor chains from
                    the operators (seed-derived identity, no SDK wallet) and
                    write a recovery bundle
+  to-exit-state    Convert a recovery bundle to the Breez Spark SDK's
+                   unilateral-exit state JSON (importUnilateralExitState)
+  from-exit-state  Convert a Breez Spark SDK exit-state JSON (or the
+                   exit-state.json inside a glow-web backup) to a recovery bundle
   consolidate      Swap small leaves with the SSP into the fewest denominations so
                    fewer leaves are uneconomical to exit (refresh the bundle after)
   plan             Validate a saved recovery bundle and print a recovery plan
@@ -610,6 +655,15 @@ Required for offline recovery:
   --destination <address>  On-chain Bitcoin destination
   --fee-rate <number>     Fee rate in sat/vbyte
   --cpfp-utxo <utxo>      txid:vout:value:script:publicKey, repeatable
+
+Inputs for to-exit-state / from-exit-state:
+  --bundle <path>          Recovery bundle JSON (to-exit-state)
+  --exit-state <path>      Exit-state JSON file (from-exit-state); for a glow-web
+                           backup zip, extract exit-state.json first
+  --out <path>             Output path; stdout when omitted. from-exit-state
+                           backs up an existing file at --out before writing
+  --operator-set <label>   Operator-set label stored in the bundle (from-exit-state)
+  --app-version <version>  App version label stored in the bundle (from-exit-state)
 
 Inputs for refresh-bundle:
   --seed-file <path>       File containing Spark seed or mnemonic; prompts when omitted
