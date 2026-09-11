@@ -22,6 +22,7 @@ import {
 } from "./exit-detector.ts";
 import { parseRelaxedTx } from "../tx-utils.ts";
 import { Transaction } from "@scure/btc-signer";
+import { rawTxLength } from "./tx-split.ts";
 import type { ChainSource } from "./chain-source.ts";
 
 export interface ScanFinding {
@@ -257,17 +258,14 @@ async function scanRawBlock(
     let structure: TxStructure | null = null;
     let txLength = 0;
     try {
-      // Parse directly from the buffer slice - no hex round-trip, which
-      // would copy the whole block tail per tx (quadratic on 4MB blocks).
-      const tx = Transaction.fromRaw(raw.subarray(offset), {
-        allowUnknownOutputs: true,
-        allowUnknownInputs: true,
-        disableScriptCheck: true,
-      });
-      const bytes = tx.toBytes(true, tx.hasWitnesses);
-      txLength = bytes.length;
+      // Byte-exact length first (walking segwit layout), then parse the
+      // exact slice - Transaction.fromRaw on an unbounded tail over-reads
+      // and cannot be measured by re-serialization.
+      txLength = rawTxLength(raw.subarray(offset));
+      structure = txStructure(
+        Buffer.from(raw.subarray(offset, offset + txLength)).toString("hex"),
+      );
       txSeen += 1;
-      structure = txStructure(Buffer.from(bytes).toString("hex"));
     } catch {
       if (!allowFallback) break;
       // Desynced walk or unparseable tx: redo the block via the per-tx RPC
