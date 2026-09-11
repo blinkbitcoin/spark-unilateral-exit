@@ -18,11 +18,14 @@ Then open http://localhost:4480. Use `--port` to change.
 - **esplora source** (default): single-tx classification, family walks
   (outspends), address watching, and confirmed-height lookups via
   mempool.space or any electrs/esplora instance (`--esplora-url`). It cannot
-  enumerate full block txid lists, so block scans are unavailable.
+  enumerate full block txid lists, so block scans are unavailable (the UI
+  disables them and `/api/config` reports `canListBlockTxids: false`).
 - **rpc source**: a bitcoind on the LAN with `txindex=1` (server=1, RPC
   reachable). Enables full block scans: every TRUC/P2A/CSV exit shape in a
-  block range is classified. No address index, so address watching stays on
-  esplora.
+  block range is classified. Family walks see mempool children only
+  (bitcoind's `gettxspendingprevout` does not report confirmed spenders);
+  use the esplora source for complete walks. No address index, so address
+  watching stays on esplora.
 
 Both sources implement the same interface (`src/webapp/chain-source.ts`); a
 hybrid (RPC for blocks, esplora for outspends) is a natural follow-up.

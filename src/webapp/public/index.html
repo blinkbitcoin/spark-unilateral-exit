@@ -98,6 +98,7 @@
       <button id="btn-scan" class="primary">Scan</button>
       <button id="btn-clear">Clear</button>
     </div>
+    <div id="scan-note" class="hint"></div>
     <h2 style="margin-top:16px">Watch list</h2>
     <div class="hint">Paste txids or output scripts (hex). Scans then only report family-related txs.</div>
     <textarea id="watch-input" rows="3" style="width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit" placeholder="one txid or script hex per line"></textarea>
@@ -179,6 +180,15 @@ async function refreshHealth() {
     $("conn").textContent = cfg.source.label;
     $("conn").className = health.ok ? "ok" : "bad";
     $("sourceline").textContent = `${cfg.source.kind} · ${cfg.source.id}`;
+    // Block scans need a source that can enumerate block txids; make the
+    // capability visible instead of letting scans fail with an error.
+    const canScan = cfg.source.canListBlockTxids !== false;
+    $("btn-scan").disabled = !canScan;
+    $("height").disabled = !canScan;
+    $("span").disabled = !canScan;
+    $("scan-note").textContent = canScan
+      ? ""
+      : "block scans need a bitcoind RPC source (--source rpc)";
   } catch (e) {
     $("conn").textContent = "offline";
     $("conn").className = "bad";
@@ -217,14 +227,23 @@ $("btn-scan").addEventListener("click", async () => {
     params.set("span", String(span));
     const r = await api(`/api/scan?${params}`);
     const all = [];
+    const errors = [];
     for (const b of r.results) {
+      if (b.error) {
+        errors.push(`block ${b.height}: ${b.error}`);
+        continue;
+      }
       for (const f of b.findings) {
         f.blockHeight = f.blockHeight ?? b.height;
         all.push(f);
       }
     }
-    renderFindings(all, `scanned blocks ${r.from}-${r.to}: ${r.results.reduce((n, b) => n + (b.txCount ?? 0), 0)} txs, ${all.length} exit-shaped`);
-    status("");
+    if (errors.length > 0) {
+      status(`scan incomplete - ${errors[0]}`);
+    } else {
+      status("");
+    }
+    renderFindings(all, `scanned blocks ${r.from}-${r.to}: ${r.results.reduce((n, b) => n + (b.txCount ?? 0), 0)} txs, ${all.length} exit-shaped${errors.length > 0 ? `, ${errors.length} block error(s)` : ""}`);
   } catch (e) { status(e.message); }
 });
 

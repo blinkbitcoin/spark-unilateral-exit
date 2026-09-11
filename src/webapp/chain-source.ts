@@ -1,24 +1,46 @@
 // Chain source for the exit-monitor webapp: an Esplora-compatible REST API
 // (mempool.space by default, any electrs/esplora instance via URL override)
-// plus a JSON-RPC adapter for a local bitcoind on the LAN (rest=1 is enough;
-// no esplora needed). Both surface the same minimal interface the scanner
-// needs: tip height, block txids, raw tx hex, and address utxos.
+// plus a JSON-RPC adapter for a local bitcoind on the LAN (server=1 is
+// enough; block scans additionally need txindex=1). Both surface the same
+// minimal interface the scanner needs: tip height, block txids, raw tx hex,
+// outspends (child discovery), and confirmation heights.
+//
+// The esplora implementation delegates to the repo's proven client in
+// ../esplora.ts (timeouts, error bodies) rather than re-implementing fetches;
+// only the hex endpoint is new here.
 
-import type { EsploraTransaction, EsploraUtxo } from "../types.ts";
+import {
+  getAddressUtxos,
+  getOutspends,
+  getTipHeight,
+  getTransaction,
+  getTxHex,
+} from "../esplora.ts";
+import type { EsploraUtxo } from "../types.ts";
+
+export interface Outspend {
+  spent: boolean;
+  txid?: string;
+  vin?: number;
+}
 
 export interface ChainSource {
   readonly id: string;
   readonly kind: "esplora" | "rpc";
   readonly label: string;
+  /** True when blockTxids can enumerate full blocks (rpc + txindex). */
+  readonly canListBlockTxids: boolean;
   tipHeight(): Promise<number>;
   /** Raw hex for a txid, or null when the source does not know it. */
   txHex(txid: string): Promise<string | null>;
-  /** Txids included in a block, in order. */
+  /** Txids included in a block, in order. Throws when unsupported. */
   blockTxids(height: number): Promise<string[]>;
-  /** UTXOs for an address (used to watch known exit addresses). */
+  /** UTXOs for an address (esplora only; rpc has no address index). */
   addressUtxos(address: string): Promise<EsploraUtxo[]>;
   /** Confirmation height of a txid, or null when unconfirmed/unknown. */
   confirmedHeight(txid: string): Promise<number | null>;
+  /** Which outputs of a txid have been spent, and by whom. */
+  outspends(txid: string, voutCount: number): Promise<Outspend[]>;
 }
 
 export class ChainSourceError extends Error {
@@ -31,30 +53,6 @@ export class ChainSourceError extends Error {
   }
 }
 
-async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new ChainSourceError(
-      `GET ${url} failed (HTTP ${response.status}): ${body.slice(0, 200)}`,
-      url,
-    );
-  }
-  return response.json();
-}
-
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new ChainSourceError(
-      `GET ${url} failed (HTTP ${response.status}): ${body.slice(0, 200)}`,
-      url,
-    );
-  }
-  return response.text();
-}
-
 export interface EsploraSourceOptions {
   baseUrl: string;
   id?: string;
@@ -65,8 +63,8 @@ export class EsploraChainSource implements ChainSource {
   readonly id: string;
   readonly kind = "esplora" as const;
   readonly label: string;
-  /** Base URL, exposed for the scanner's outspends endpoint use. */
-  readonly baseUrl: string;
+  readonly canListBlockTxids = false;
+  private readonly baseUrl: string;
 
   constructor({ baseUrl, id, label }: EsploraSourceOptions) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -75,55 +73,36 @@ export class EsploraChainSource implements ChainSource {
   }
 
   async tipHeight(): Promise<number> {
-    const text = await fetchText(`${this.baseUrl}/blocks/tip/height`);
-    const height = Number(text.trim());
-    if (!Number.isInteger(height)) {
-      throw new ChainSourceError(`non-integer tip height: ${text}`, this.id);
-    }
-    return height;
+    return getTipHeight(this.baseUrl);
   }
 
   async txHex(txid: string): Promise<string | null> {
-    const response = await fetch(`${this.baseUrl}/tx/${txid}/hex`);
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new ChainSourceError(
-        `tx hex fetch failed (HTTP ${response.status})`,
-        this.id,
-      );
-    }
-    return response.text();
+    return getTxHex(txid, this.baseUrl);
   }
 
-  async blockTxids(height: number): Promise<string[]> {
-    const hash = (await fetchText(`${this.baseUrl}/block-height/${height}`)).trim();
-    const block = (await fetchJson(`${this.baseUrl}/block/${hash}`)) as {
-      txid?: string;
-      tx_count?: number;
-    };
-    // The block endpoint returns only the coinbase txid in `txid`; fetch the
-    // full list only when the API exposes it (mempool.space does not have a
-    // block-tx pagination endpoint, electrs does not either; callers that
-    // need full coverage use the RPC source).
-    void block;
+  async blockTxids(): Promise<string[]> {
+    // The esplora REST API has no full block-tx listing; the /block endpoint
+    // returns only the coinbase. Block scans need the rpc source.
     throw new ChainSourceError(
-      "esplora block tx listing is not exposed; use the rpc source for block scans",
+      "esplora cannot list block txs; use the rpc source for block scans",
       this.id,
     );
   }
 
   async addressUtxos(address: string): Promise<EsploraUtxo[]> {
-    const utxos = (await fetchJson(
-      `${this.baseUrl}/address/${address}/utxo`,
-    )) as EsploraUtxo[];
-    return Array.isArray(utxos) ? utxos : [];
+    return getAddressUtxos(address, this.baseUrl);
   }
 
   async confirmedHeight(txid: string): Promise<number | null> {
-    const tx = (await fetchJson(`${this.baseUrl}/tx/${txid}`)) as EsploraTransaction;
+    const tx = await getTransaction(txid, this.baseUrl);
     const status = tx?.status;
     if (!status?.confirmed) return null;
     return typeof status.block_height === "number" ? status.block_height : null;
+  }
+
+  // voutCount is irrelevant for esplora: /outspends returns every output.
+  async outspends(txid: string, _voutCount: number): Promise<Outspend[]> {
+    return getOutspends(txid, this.baseUrl);
   }
 }
 
@@ -135,11 +114,12 @@ export interface RpcSourceOptions {
   label?: string;
 }
 
-/** Local bitcoind via JSON-RPC. Needs server=1; rest is not required. */
+/** Local bitcoind via JSON-RPC. Needs server=1; block scans need txindex=1. */
 export class BitcoindRpcSource implements ChainSource {
   readonly id: string;
   readonly kind = "rpc" as const;
   readonly label: string;
+  readonly canListBlockTxids = true;
   private readonly url: string;
   private readonly auth: string;
 
@@ -181,21 +161,35 @@ export class BitcoindRpcSource implements ChainSource {
     return json.result as T;
   }
 
+  private async callOptional<T>(
+    method: string,
+    params: unknown[],
+    notFoundMatch: RegExp,
+  ): Promise<T | null> {
+    try {
+      return await this.call<T>(method, params);
+    } catch (error) {
+      if (
+        error instanceof ChainSourceError &&
+        notFoundMatch.test(error.message)
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async tipHeight(): Promise<number> {
     const info = await this.call<{ blocks: number }>("getblockchaininfo", []);
     return info.blocks;
   }
 
   async txHex(txid: string): Promise<string | null> {
-    try {
-      return await this.call<string>("getrawtransaction", [txid]);
-    } catch (error) {
-      if (error instanceof ChainSourceError && /not found|TX_NOT_FOUND/i.test(error.message)) {
-        return null;
-      }
-      // Verbose form would carry confirmations; we only need hex here.
-      throw error;
-    }
+    return this.callOptional<string>(
+      "getrawtransaction",
+      [txid],
+      /not found|TX_NOT_FOUND|genesis block coinbase/i,
+    );
   }
 
   async blockTxids(height: number): Promise<string[]> {
@@ -204,11 +198,9 @@ export class BitcoindRpcSource implements ChainSource {
     return block.tx ?? [];
   }
 
-  async addressUtxos(address: string): Promise<EsploraUtxo[]> {
+  async addressUtxos(): Promise<EsploraUtxo[]> {
     // scantxoutset is expensive and unbounded; address UTXO listing needs an
-    // index. Esplora is the right tool for address watching; the RPC source
-    // covers block scanning and tx fetch.
-    void address;
+    // index. Esplora is the right tool for address watching.
     throw new ChainSourceError(
       "bitcoind RPC cannot list address UTXOs without an address index; use an esplora source",
       this.id,
@@ -216,17 +208,36 @@ export class BitcoindRpcSource implements ChainSource {
   }
 
   async confirmedHeight(txid: string): Promise<number | null> {
-    try {
-      const tx = await this.call<{ blockhash?: string }>("getrawtransaction", [txid, true]);
-      if (!tx?.blockhash) return null;
-      const header = await this.call<{ height: number }>("getblockheader", [tx.blockhash]);
-      return header.height;
-    } catch (error) {
-      if (error instanceof ChainSourceError && /not found|TX_NOT_FOUND/i.test(error.message)) {
-        return null;
-      }
-      throw error;
-    }
+    const tx = await this.callOptional<{ blockhash?: string }>(
+      "getrawtransaction",
+      [txid, true],
+      /not found|TX_NOT_FOUND/i,
+    );
+    if (!tx?.blockhash) return null;
+    const header = await this.call<{ height: number }>("getblockheader", [
+      tx.blockhash,
+    ]);
+    return header.height;
+  }
+
+  async outspends(txid: string, voutCount: number): Promise<Outspend[]> {
+    // bitcoind >= 25: one {txid, vout} pair per output, results in vout
+    // order. NOTE: gettxspendingprevout scans the MEMPOOL only - confirmed
+    // spenders are invisible, so family walks against an rpc source find
+    // children only while they are still unconfirmed. esplora tracks
+    // confirmed outspends; use it for complete walks.
+    const prevouts = Array.from({ length: voutCount }, (_, vout) => ({
+      txid,
+      vout,
+    }));
+    const spendings = await this.callOptional<
+      Array<{ spendingtxid?: string | null } | null>
+    >("gettxspendingprevout", [prevouts], /not found|TX_NOT_FOUND/i);
+    if (!spendings) return [];
+    return spendings.map((s) => ({
+      spent: Boolean(s?.spendingtxid),
+      txid: s?.spendingtxid ?? undefined,
+    }));
   }
 }
 

@@ -22,9 +22,12 @@
 // higher confidence) the stage of the parent tx in the same family. Anything
 // unconfirmable is reported as "unknown" with the reason recorded.
 
-import { Transaction } from "@scure/btc-signer";
-import { sha256 } from "@noble/hashes/sha256";
-import { hexToBytes, bytesToHex } from "@noble/curves/utils";
+import { bytesToHex } from "@noble/curves/utils";
+import {
+  csvRelativeBlocks,
+  legacyTxid,
+  parseRelaxedTx,
+} from "../tx-utils.ts";
 
 /** Anchor output script from BIP 431 (TRUC) and BIP 468 (P2A): OP_1 <4e73>. */
 const P2A_ANCHOR_SCRIPT_HEX = "51024e73";
@@ -88,32 +91,7 @@ export function outputType(script: Uint8Array): string {
   return "other";
 }
 
-export function parseTx(txHex: string): Transaction {
-  return Transaction.fromRaw(hexToBytes(txHex), {
-    allowUnknownOutputs: true,
-    allowUnknownInputs: true,
-    disableScriptCheck: true,
-  });
-}
-
-// The txid is defined over the legacy no-witness serialization, so compute it
-// that way: identical to Transaction.id for finalized transactions and still
-// well-defined for unsigned variants (e.g. tree-node directFromCpfpRefundTx).
-export function txidFromHex(txHex: string): string {
-  const tx = parseTx(txHex);
-  const legacy = tx.toBytes(true, false);
-  return bytesToHex(new Uint8Array([...sha256(sha256(legacy))].reverse()));
-}
-
-// BIP 68 relative lock in blocks, or null when the sequence disables relative
-// locks or encodes a time-based lock. Mirrors auto-exit.ts relativeHeightLock.
-export function csvRelativeBlocks(sequence: number | undefined): number | null {
-  if (sequence === undefined) return null;
-  if (sequence >= 0x80000000) return null;
-  if ((sequence & 0x00400000) !== 0) return null;
-  const blocks = sequence & 0xffff;
-  return blocks === 0 ? null : blocks;
-}
+export { csvRelativeBlocks };
 
 export interface TxStructure {
   txid: string;
@@ -128,14 +106,20 @@ export interface TxStructure {
 }
 
 export function txStructure(txHex: string): TxStructure {
-  const tx = parseTx(txHex);
+  return structureOf(parseRelaxedTx(txHex));
+}
+
+// Structure from an already-parsed transaction, so callers scanning many txs
+// pay one parse per tx regardless of how many structure reads follow.
+function structureOf(tx: ReturnType<typeof parseRelaxedTx>): TxStructure {
   const inputs: Array<{ txid: string; vout: number; sequence: number }> = [];
   let csv: number | null = null;
   for (let i = 0; i < tx.inputsLength; i += 1) {
     const input = tx.getInput(i);
-    // btc-signer exposes prev txids already in display (rpc/explora) order.
-    const displayTxid = input?.txid
-      ? bytesToHex(new Uint8Array(input.txid))
+    const rawTxid = input?.txid;
+    // btc-signer exposes prev txids already in display (rpc/esplora) order.
+    const displayTxid = rawTxid
+      ? bytesToHex(new Uint8Array(rawTxid))
       : "";
     const sequence = Number(input?.sequence ?? 0);
     inputs.push({
@@ -162,7 +146,7 @@ export function txStructure(txHex: string): TxStructure {
     });
   }
   return {
-    txid: txidFromHex(txHex),
+    txid: legacyTxid(tx),
     version: tx.version,
     locktime: tx.lockTime,
     inputs,
@@ -188,7 +172,15 @@ export interface ClassifyOptions {
  * with medium confidence; parent context upgrades or redirects it.
  */
 export function classifyTx(txHex: string, options: ClassifyOptions = {}): TxClassification {
-  const structure = txStructure(txHex);
+  return classifyStructure(txStructure(txHex), options);
+}
+
+// Classification from a precomputed structure: scan paths build the structure
+// once and filter + classify on it without a second parse.
+export function classifyStructure(
+  structure: TxStructure,
+  options: ClassifyOptions = {},
+): TxClassification {
   const rules: MatchRule[] = [];
   const rule = (name: string, description: string, fired: boolean) => {
     rules.push({ name, description, fired });
@@ -281,9 +273,8 @@ export function classifyTx(txHex: string, options: ClassifyOptions = {}): TxClas
     reasons.push("TRUC CSV-locked spend of a node-tx user output (operator direct refund)");
   } else if (isTruc && !anchor && csv && oneInOneOut && paysP2tr) {
     // Standalone operator direct refund shape: self-fee-paying CSV-locked
-    // TRUC spend to a single P2TR output, no anchor (fees baked in). Without
-    // parent context it could also be another protocol's TRUC+CSV spend,
-    // hence medium confidence.
+    // TRUC spend to a single P2TR output, no anchor. Without parent context
+    // it could also be another protocol's TRUC+CSV spend, hence medium.
     stage = "direct-refund-tx";
     confidence = "medium";
     reasons.push("TRUC CSV-locked 1-in/1-out P2TR spend without anchor (self-fee refund shape)");

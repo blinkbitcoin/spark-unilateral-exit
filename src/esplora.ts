@@ -119,6 +119,43 @@ export async function getOutspend(
   return response.json() as Promise<EsploraOutspend>;
 }
 
+// All outspends of a txid in vout order, for forward family walks.
+export async function getOutspends(
+  txid: string,
+  baseUrl: string,
+): Promise<EsploraOutspend[]> {
+  const url = `${baseUrl}/tx/${txid}/outspends`;
+  const response = await fetchWithTimeout(url, { method: "GET" });
+  if (response.status === 404) return [];
+  if (!response.ok) {
+    const body = await safeText(response);
+    throw new EsploraError(
+      `Failed to fetch outspends (HTTP ${response.status}): ${body}`,
+      { status: response.status, body, url },
+    );
+  }
+  return response.json() as Promise<EsploraOutspend[]>;
+}
+
+// Raw transaction hex, or null when the endpoint does not know the txid.
+export async function getTxHex(
+  txid: string,
+  baseUrl: string,
+): Promise<string | null> {
+  const url = `${baseUrl}/tx/${txid}/hex`;
+  const response = await fetchWithTimeout(url, { method: "GET" });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const body = await safeText(response);
+    throw new EsploraError(
+      `Failed to fetch tx hex (HTTP ${response.status}): ${body}`,
+      { status: response.status, body, url },
+    );
+  }
+  return response.text();
+}
+
+
 export async function getAddressUtxos(
   address: string,
   baseUrl: string,

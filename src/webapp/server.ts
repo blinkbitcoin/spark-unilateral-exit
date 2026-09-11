@@ -116,7 +116,12 @@ async function handleApi(
 
   if (req.method === "GET" && pathname === "/api/config") {
     return send(200, {
-      source: { id: source.id, kind: source.kind, label: source.label },
+      source: {
+        id: source.id,
+        kind: source.kind,
+        label: source.label,
+        canListBlockTxids: source.canListBlockTxids,
+      },
     });
   }
 
@@ -159,11 +164,17 @@ async function handleApi(
 
   if (req.method === "GET" && pathname === "/api/scan") {
     const tip = await source.tipHeight();
-    const to = Number(query.get("to") ?? tip);
     const span = Math.min(Number(query.get("span") ?? 10), 50);
-    const from = Number(query.get("from") ?? Math.max(to - span + 1, 0));
+    const to = Math.min(Number(query.get("to") ?? tip), tip);
+    // Clamp before the loop: an open endpoint must not be able to request a
+    // years-long scan range regardless of what the client passes.
+    const from = Math.max(
+      Math.min(Number(query.get("from") ?? to - span + 1), to),
+      0,
+    );
+    const clampedTo = Math.min(to, from + span - 1);
     const results = [];
-    for (let h = from; h <= to && h >= 0; h += 1) {
+    for (let h = from; h <= clampedTo; h += 1) {
       // eslint-disable-next-line no-await-in-loop
       const r = await scanBlock(source, h, {
         maxCandidates: 25,
@@ -173,7 +184,7 @@ async function handleApi(
       results.push(r);
       if (r.error) break;
     }
-    return send(200, { from, to: Math.min(to, from + span - 1), results });
+    return send(200, { from, to: clampedTo, results });
   }
 
   if (req.method === "POST" && pathname === "/api/watch") {

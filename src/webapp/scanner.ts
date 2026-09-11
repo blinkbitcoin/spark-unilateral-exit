@@ -1,9 +1,8 @@
 // Block scanner for the exit-monitor webapp. Two modes:
 //
 //   Shape scan: classify every tx in a block (or range) purely structurally.
-//     Spark exit-chain txs (TRUC + P2A anchor [+ CSV]) have distinctive
-//     shapes; node/direct/refund/sweep stages are identified with the
-//     confidence levels described in exit-detector.ts.
+//     classifyStructure IS the filter: a tx is a candidate exactly when its
+//     stage is not "unknown", so the rules live in one place.
 //
 //   Watch mode: given known Spark txids or output scripts (from a recovery
 //     bundle), only report family-related txs and classify them with family
@@ -15,13 +14,13 @@
 // watching.
 
 import {
-  classifyTx,
+  classifyStructure,
   txStructure,
   type ExitStage,
   type TxClassification,
+  type TxStructure,
 } from "./exit-detector.ts";
 import type { ChainSource } from "./chain-source.ts";
-import { EsploraChainSource } from "./chain-source.ts";
 
 export interface ScanFinding {
   classification: TxClassification;
@@ -47,18 +46,11 @@ export interface ScanOptions {
   watchScripts?: string[];
 }
 
-/** Cheap pre-filter: TRUC txs with a P2A anchor, or self-fee refund shape. */
-export function isExitCandidate(structure: ReturnType<typeof txStructure>): boolean {
-  if (structure.isTruc && structure.hasAnchorOutput) return true;
-  // Operator direct refund: anchorless CSV-locked TRUC spend to one P2TR.
-  return (
-    structure.isTruc &&
-    structure.csvBlocks !== null &&
-    structure.inputs.length === 1 &&
-    structure.outputs.length === 1 &&
-    structure.outputs[0]?.type === "p2tr"
-  );
-}
+// Fetch hexes with a small concurrency bound: a mainnet block carries
+// thousands of txs, and unbounded Promise.all would flood bitcoind (or the
+// esplora host) with simultaneous requests. 16 in-flight requests saturates
+// a LAN round-trip anyway.
+const HEX_CONCURRENCY = 16;
 
 export async function scanBlock(
   source: ChainSource,
@@ -86,36 +78,43 @@ export async function scanBlock(
   );
   const watchMode = watchTxids.size > 0 || watchScripts.size > 0;
 
+  // Every tx below came from blockTxids(height), so its confirmation height
+  // is the scanned height; no per-tx confirmedHeight round-trip is needed.
   const findings: ScanFinding[] = [];
   let candidates = 0;
-  for (const txid of txids) {
-    const hex = await source.txHex(txid);
-    if (!hex) continue;
-    const structure = txStructure(hex);
-    const touchesWatchedScript = watchScripts.size > 0 &&
-      structure.outputs.some((o) => watchScripts.has(o.script.toLowerCase()));
-    const spendsWatchedTx = watchTxids.size > 0 &&
-      structure.inputs.some((i) => watchTxids.has(i.txid));
-    const isWatchedTx = watchTxids.has(txid);
-    if (watchMode) {
-      if (!touchesWatchedScript && !spendsWatchedTx && !isWatchedTx) continue;
-    } else if (!isExitCandidate(structure)) {
-      continue;
+  for (let start = 0; start < txids.length; start += HEX_CONCURRENCY) {
+    const chunk = txids.slice(start, start + HEX_CONCURRENCY);
+    const hexes = await Promise.all(
+      chunk.map(async (txid) => ({ txid, hex: await source.txHex(txid) })),
+    );
+    for (const { hex } of hexes) {
+      if (!hex) continue;
+      const structure = txStructure(hex);
+      const touchesWatchedScript =
+        watchScripts.size > 0 &&
+        structure.outputs.some((o) => watchScripts.has(o.script.toLowerCase()));
+      const spendsWatchedTx =
+        watchTxids.size > 0 &&
+        structure.inputs.some((i) => watchTxids.has(i.txid));
+      const isWatchedTx = watchTxids.has(structure.txid);
+      if (watchMode) {
+        if (!touchesWatchedScript && !spendsWatchedTx && !isWatchedTx) continue;
+      } else if (classifyStructure(structure).stage === "unknown") {
+        continue;
+      }
+      candidates += 1;
+      const spendsAnchor = await checkSpendsAnchor(source, structure.inputs);
+      const classification = classifyStructure(structure, {
+        spendsAnchor,
+        parentConfirmedHeight: height,
+      });
+      findings.push({
+        classification,
+        blockHeight: height,
+        inMempool: false,
+      });
+      if (findings.length >= maxCandidates) break;
     }
-    candidates += 1;
-    // Family evidence: the tx spends an anchor output of a watched parent.
-    const spendsAnchor = await checkSpendsAnchor(source, structure.inputs);
-    const confirmed = await source.confirmedHeight(txid);
-    const classification = classifyTx(hex, {
-      parentStage: undefined,
-      spendsAnchor,
-      parentConfirmedHeight: confirmed,
-    });
-    findings.push({
-      classification,
-      blockHeight: confirmed ?? height,
-      inMempool: confirmed === null,
-    });
     if (findings.length >= maxCandidates) break;
   }
 
@@ -139,8 +138,7 @@ async function checkSpendsAnchor(
     inputs.slice(0, 8).map(async (input) => {
       const hex = await source.txHex(input.txid);
       if (!hex) return false;
-      const parent = txStructure(hex);
-      return parent.outputs[input.vout]?.isAnchor === true;
+      return txStructure(hex).outputs[input.vout]?.isAnchor === true;
     }),
   );
   return checks.some(Boolean);
@@ -154,7 +152,8 @@ async function checkSpendsAnchor(
 /**
  * Follow an exit family forward from a seed txid. The seed is classified
  * first (optionally as a known stage via `seedStage`), then children are
- * found via esplora outspends (RPC sources skip child discovery).
+ * found via the source's outspends. Structures fetched along the walk are
+ * reused as family evidence instead of re-fetched.
  */
 export async function followExitFamily(
   source: ChainSource,
@@ -166,29 +165,48 @@ export async function followExitFamily(
 ): Promise<TxClassification[]> {
   const maxDepth = options.maxDepth ?? 6;
   const out: TxClassification[] = [];
+  // txid -> structure cache for the walk; also carries each walked tx's
+  // outputs so a child's anchor prevout is a local lookup.
+  const structures = new Map<string, TxStructure>();
+  const structureOf = async (txid: string): Promise<TxStructure | null> => {
+    const cached = structures.get(txid);
+    if (cached) return cached;
+    const hex = await source.txHex(txid);
+    if (!hex) return null;
+    const structure = txStructure(hex);
+    structures.set(txid, structure);
+    return structure;
+  };
+
   let frontier: Array<{ txid: string; parentStage?: ExitStage }> = [
     { txid: seedTxid, parentStage: options.seedStage },
   ];
   const seen = new Set<string>();
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
-    const next: Array<{ txid: string; parentStage?: ExitStage }> = [];
+    const next: typeof frontier = [];
     for (const item of frontier) {
       if (seen.has(item.txid)) continue;
       seen.add(item.txid);
-      const hex = await source.txHex(item.txid);
-      if (!hex) continue;
-      const structure = txStructure(hex);
-      const spendsAnchor = await checkSpendsAnchor(source, structure.inputs);
-      const confirmed = await source.confirmedHeight(item.txid);
-      const classification = classifyTx(hex, {
+      const structure = await structureOf(item.txid);
+      if (!structure) continue;
+      const [confirmed, outspends, spendsAnchor] = await Promise.all([
+        source.confirmedHeight(item.txid),
+        source.outspends(item.txid, structure.outputs.length),
+        isAnchorSpend(source, structures, structure.inputs),
+      ]);
+      const classification = classifyStructure(structure, {
         parentStage: item.parentStage,
         spendsAnchor,
         parentConfirmedHeight: confirmed,
       });
       out.push(classification);
-      const children = await findChildren(source, item.txid);
-      for (const child of children) {
-        next.push({ txid: child.txid, parentStage: classification.stage });
+      for (const outspend of outspends) {
+        if (outspend.spent && outspend.txid) {
+          next.push({
+            txid: outspend.txid,
+            parentStage: classification.stage,
+          });
+        }
       }
     }
     frontier = next;
@@ -196,24 +214,21 @@ export async function followExitFamily(
   return out;
 }
 
-/**
- * Which outputs of a txid have been spent, and by whom (esplora only).
- */
-export async function findChildren(
+// Whether any input of `structure` spends a 0-value P2A anchor, resolving
+// prevout structures through the walk cache.
+async function isAnchorSpend(
   source: ChainSource,
-  txid: string,
-): Promise<Array<{ txid: string; vout: number }>> {
-  if (source.kind !== "esplora") return [];
-  const esplora = source as EsploraChainSource;
-  const response = await fetch(`${esplora.baseUrl}/tx/${txid}/outspends`);
-  if (!response.ok) return [];
-  const outspends = (await response.json()) as Array<{
-    spent: boolean;
-    txid?: string;
-    vin?: number;
-  }>;
-  return outspends
-    .map((o, vout) => ({ spent: o.spent, txid: o.txid, vout }))
-    .filter((o) => o.spent && o.txid)
-    .map((o) => ({ txid: o.txid as string, vout: o.vout }));
+  cache: Map<string, TxStructure>,
+  inputs: Array<{ txid: string; vout: number }>,
+): Promise<boolean> {
+  const checks = await Promise.all(
+    inputs.slice(0, 8).map(async (input) => {
+      const cached = cache.get(input.txid);
+      if (cached) return cached.outputs[input.vout]?.isAnchor === true;
+      const hex = await source.txHex(input.txid);
+      if (!hex) return false;
+      return txStructure(hex).outputs[input.vout]?.isAnchor === true;
+    }),
+  );
+  return checks.some(Boolean);
 }
