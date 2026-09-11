@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "plan": "node src/cli.ts plan",
     "refresh-bundle": "node src/cli.ts refresh-bundle",
-    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle"
+    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle",
+    "monitor": "node src/webapp/server.ts",
+    "capture-regtest-exit": "node scripts/capture-regtest-exit.ts"
   },
   "dependencies": {
     "@buildonspark/spark-sdk": "^0.8.6",
@@ -36,9 +38,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=22.18"

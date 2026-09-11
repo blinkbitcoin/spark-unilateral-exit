@@ -2,6 +2,7 @@ import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 import { Transaction } from "@scure/btc-signer";
 
 import { errMessage } from "./errors.ts";
+import { legacyTxidFromHex } from "./tx-utils.ts";
 import {
   buildFanOutTransaction,
   createFundingWatchLogger,
@@ -761,7 +762,10 @@ async function waitForConfirmation(
 }
 
 export function transactionIdFromHex(txHex: string): string {
-  return parseTransaction(txHex).id;
+  // Legacy no-witness txid: unsigned templates (e.g. a TreeNode's
+  // directFromCpfpRefundTx surfaced through pkg.sweepTx) would crash
+  // Transaction.id with "Transaction is not finalized".
+  return legacyTxidFromHex(txHex);
 }
 
 // Both display byte orders of a parsed input's prev txid. Parsers expose the

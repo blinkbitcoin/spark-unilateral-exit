@@ -1,8 +1,8 @@
 import { getNodeHexStrings } from "./bundle.ts";
 import { errMessage } from "./errors.ts";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
-import { Transaction } from "@scure/btc-signer";
 import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
+import { legacyTxidFromHex } from "./tx-utils.ts";
 
 import type { CpfpUtxo, LeafPackage, RecoveryBundle } from "./types.ts";
 
@@ -264,6 +264,13 @@ function refundVariant(txHex: string): { txid: string; txHex: string } {
   return { txid: refundTxidFromHex(txHex), txHex };
 }
 
+// The Bitcoin txid is defined over the legacy serialization (no witness
+// data), so it can be computed for transactions whose inputs are not
+// finalized (Transaction.id throws for those); see src/tx-utils.ts.
+function refundTxidFromHex(txHex: string): string {
+  return legacyTxidFromHex(txHex);
+}
+
 // The operator's alternative to the CPFP exit route for a leaf: directTx spends
 // the same parent output as the leaf's nodeTx, and directRefundTx claims
 // directTx's output after a CSV delay, with the mining fee baked into the
@@ -292,16 +299,6 @@ export function decodeDirectPathFromTreeNode(
     directRefundTxHex,
     directRefundTxid: refundTxidFromHex(directRefundTxHex),
   };
-}
-
-// Spark refund transactions are v3 (TRUC) with a P2A anchor output, so the parser
-// must allow unknown outputs/inputs (mirrors auto-exit.ts parseTransaction).
-function refundTxidFromHex(txHex: string): string {
-  return Transaction.fromRaw(hexToBytes(txHex), {
-    allowUnknownOutputs: true,
-    allowUnknownInputs: true,
-    disableScriptCheck: true,
-  }).id;
 }
 
 function createBundleSparkClient(

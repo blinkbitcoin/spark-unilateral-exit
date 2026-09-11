@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spark unilateral-exit monitor</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #12161f; --panel2: #171c27; --border: #232a38;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #f7931a; --green: #2ecc71;
+    --red: #e74c3c; --amber: #f1c40f; --blue: #3498db;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #10141d, #0b0e14);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header .spacer { flex: 1; }
+  #btn-settings, #btn-exit {
+    font-size: 12px; padding: 3px 12px; width: auto;
+  }
+  #btn-exit { color: var(--red); border-color: var(--red); }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  h1 .spark { color: var(--accent); }
+  #tip { color: var(--muted); font-size: 12px; }
+  #conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  #conn.ok { color: var(--green); border-color: var(--green); }
+  #conn.bad { color: var(--red); border-color: var(--red); }
+  #scan-state {
+    color: var(--accent); border-color: var(--accent); font-size: 12px;
+    padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
+  }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  section h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 3px; }
+  input, select, button {
+    font: inherit; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #14181f; font-weight: 700; border: none; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .stage {
+    display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px;
+    border: 1px solid var(--border); white-space: nowrap;
+  }
+  .stage.refund-tx, .stage.direct-refund-tx { color: var(--amber); border-color: var(--amber); }
+  .stage.node-tx, .stage.direct-tx, .stage.static-deposit { color: var(--blue); border-color: var(--blue); }
+  .stage.sweep-tx { color: var(--green); border-color: var(--green); }
+  .stage.unknown { color: var(--muted); }
+  .conf-high { color: var(--green); } .conf-medium { color: var(--amber); } .conf-low { color: var(--muted); }
+  .finding {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .finding .txid { color: var(--accent); word-break: break-all; font-size: 12px; }
+  .finding .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .finding details { margin-top: 6px; }
+  .finding summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .rules li { margin: 2px 0; font-size: 12px; list-style: none; }
+  .rules li.ok::before { content: "✔ "; color: var(--green); }
+  .rules li.no::before { content: "✘ "; color: var(--red); }
+  pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; font-size: 11px; }
+  #status { font-size: 12px; color: var(--muted); margin-top: 10px; min-height: 18px; }
+  #findings { margin-top: 12px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px; text-align: center; }
+  .watchlist li { font-size: 12px; word-break: break-all; margin: 2px 0; }
+  ul { padding-left: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  .badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); padding: 0 6px; border-radius: 8px; margin-left: 6px; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; width: min(420px, 92vw);
+  }
+  dialog::backdrop { background: rgba(4, 6, 10, 0.7); }
+  dialog h2 { margin: 0 0 4px; }
+  dialog .hint { margin-top: 2px; }
+  #settings-error { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 8px; }
+  #scan-log {
+    margin-top: 10px; max-height: 220px; overflow-y: auto;
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-size: 11px; line-height: 1.6; white-space: pre-wrap;
+  }
+  #scan-log .t { color: var(--muted); margin-right: 6px; }
+  #scan-log .ok { color: var(--green); }
+  #scan-log .err { color: var(--red); }
+  #scan-log .info { color: var(--text); }
+  #scan-progress { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 8px; }
+  #chain-viz {
+    margin-top: 4px; display: flex; gap: 1px; align-items: stretch;
+    height: 56px; overflow: hidden; border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px; background: #0d1117;
+  }
+  /* Explicit height: empty divs in a flex row collapse to 0 otherwise. */
+  #chain-viz .blk { flex: 1 1 0; min-width: 2px; height: 100%; border-radius: 1px; background: #232c3d; }
+  #chain-viz .blk.scanned { background: #2f6b3f; }
+  #chain-viz .blk.hit { background: var(--amber); }
+  #chain-viz .blk.ongoing { background: var(--accent); animation: pulse 1s infinite alternate; }
+  @keyframes pulse { from { opacity: .4; } to { opacity: 1; } }
+  #chain-legend { display: flex; gap: 12px; font-size: 10px; color: var(--muted); margin-top: 4px; }
+  #chain-legend .key { display: inline-flex; align-items: center; gap: 4px; }
+  #chain-legend .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  #chain-legend .key:has(.swatch[data-k="unread"]) .swatch { background: #232c3d; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="spark">⚡</span> Spark unilateral-exit monitor</h1>
+  <span id="tip">tip: -</span>
+  <span id="conn" class="ok">connecting…</span>
+  <span id="scan-state" hidden></span>
+  <span class="spacer"></span>
+  <button id="btn-settings">⚙ Settings</button>
+  <button id="btn-exit">✕ Exit app</button>
+</header>
+<dialog id="settings">
+  <h2>Chain source</h2>
+  <div class="hint">The candidate is connection-tested before the active source switches.</div>
+  <label for="settings-kind">Source</label>
+  <select id="settings-kind">
+    <option value="rpc">Bitcoin RPC (bitcoind on the LAN)</option>
+    <option value="esplora">Esplora (mempool.space)</option>
+  </select>
+  <div id="rpc-fields">
+    <label for="settings-url">RPC URL</label>
+    <input id="settings-url" placeholder="http://192.168.1.10:8332" spellcheck="false">
+    <label for="settings-user">RPC username</label>
+    <input id="settings-user" autocomplete="off" spellcheck="false">
+    <label for="settings-pass">RPC password</label>
+    <input id="settings-pass" type="password" autocomplete="off">
+    <div class="hint">Block scans need txindex=1 and server=1 on the node.</div>
+  </div>
+  <div id="esplora-fields" hidden>
+    <label for="settings-network">Network</label>
+    <select id="settings-network">
+      <option value="mainnet">mainnet</option>
+      <option value="testnet">testnet</option>
+      <option value="testnet4">testnet4</option>
+      <option value="signet">signet</option>
+    </select>
+  </div>
+  <div id="settings-error"></div>
+  <div class="row" style="margin-top:10px">
+    <button id="btn-source-save" class="primary">Test &amp; save</button>
+    <button id="btn-source-cancel">Cancel</button>
+  </div>
+</dialog>
+<main>
+  <section>
+    <h2>Chain source</h2>
+    <div id="sourceline" class="hint">-</div>
+    <h2 style="margin-top:16px">Inspect</h2>
+    <label for="txid">Transaction ID</label>
+    <input id="txid" placeholder="txid hex (64 chars)" spellcheck="false">
+    <div class="row" style="margin-top:8px">
+      <button id="btn-classify" class="primary">Classify</button>
+      <button id="btn-follow">Follow family</button>
+    </div>
+    <h2 style="margin-top:16px">Scan blocks</h2>
+    <label for="height">Block height</label>
+    <input id="height" type="number" placeholder="leave empty for tip">
+    <label for="span">How many blocks back</label>
+    <input id="span" type="number" value="10" min="1" max="50">
+    <div class="row" style="margin-top:8px">
+      <button id="btn-scan" class="primary">Start scan</button>
+      <button id="btn-stop" disabled>Stop</button>
+      <button id="btn-clear">Clear</button>
+    </div>
+    <div id="scan-note" class="hint"></div>
+    <div id="scan-progress"></div>
+    <div id="scan-log" hidden></div>
+    <h2 style="margin-top:16px">Watch list</h2>
+    <div class="hint">Paste txids or output scripts (hex). Scans then only report family-related txs.</div>
+    <textarea id="watch-input" rows="3" style="width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit" placeholder="one txid or script hex per line"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-watch">Add</button>
+      <button id="btn-unwatch">Clear</button>
+    </div>
+    <ul id="watchlist" class="watchlist"></ul>
+    <div id="status"></div>
+  </section>
+  <section>
+    <h2>Chain coverage</h2>
+    <div id="chain-meta" class="hint">no scan state yet</div>
+    <div id="chain-viz"></div>
+    <div id="chain-legend">
+      <span class="key"><span class="swatch" data-k="unread" style="background:#232c3d"></span>unread</span>
+      <span class="key"><span class="swatch" style="background:#2f6b3f"></span>scanned</span>
+      <span class="key"><span class="swatch" style="background:var(--accent)"></span>ongoing</span>
+      <span class="key"><span class="swatch" style="background:var(--amber)"></span>exit txs found</span>
+    </div>
+    <h2 style="margin-top:16px">Findings</h2>
+    <div id="findings"><div class="empty">No scan yet. Classify a txid, follow an exit family, or scan recent blocks.</div></div>
+  </section>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const status = (msg) => { $("status").textContent = msg ?? ""; };
+
+async function api(path, init) {
+  const res = await fetch(path, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+  return body;
+}
+
+function renderFinding(f) {
+  const c = f.classification ?? f;
+  const stage = c.stage ?? "unknown";
+  const conf = c.confidence ?? "low";
+  const el = document.createElement("div");
+  el.className = "finding";
+  const height = f.blockHeight ?? c.blockHeight ?? null;
+  const mem = f.inMempool ?? false;
+  const maturity = c.maturityHeight ? ` · matures @ ${c.maturityHeight}` : "";
+  const csv = c.csvBlocks !== null && c.csvBlocks !== undefined ? ` · CSV ${c.csvBlocks} blocks` : "";
+  el.innerHTML = `
+    <div class="txid">${c.txid}</div>
+    <div class="meta">
+      <span class="stage ${stage}">${stage}</span>
+      <span class="conf-${conf}">${conf} confidence</span>
+      ${height !== null ? ` · block ${height}` : mem ? " · in mempool" : ""}
+      ${csv}${maturity}
+    </div>
+    <div class="meta">${c.reason ?? ""}</div>
+    <details>
+      <summary>evidence</summary>
+      <ul class="rules">
+        ${(c.matchedRules ?? []).map((r) => `<li class="${r.fired ? "ok" : "no"}">${r.name}: ${r.description}</li>`).join("")}
+      </ul>
+      <pre>${JSON.stringify({ outputs: c.outputs, inputs: c.inputs, spentOutpoints: c.spentOutpoints }, null, 1)}</pre>
+    </details>`;
+  return el;
+}
+
+function renderFindings(list, heading) {
+  const root = $("findings");
+  root.replaceChildren();
+  if (heading) {
+    const h = document.createElement("div");
+    h.className = "hint"; h.textContent = heading;
+    root.appendChild(h);
+  }
+  if (!list || list.length === 0) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "No unilateral-exit transactions found.";
+    root.appendChild(e);
+    return;
+  }
+  for (const f of list) root.appendChild(renderFinding(f));
+}
+
+// Append findings without clearing what is already shown (live scanning).
+function appendFindings(list, heading) {
+  const root = $("findings");
+  const empty = root.querySelector(".empty");
+  if (empty) empty.remove();
+  if (heading && !root.querySelector(`[data-heading="${heading}"]`)) {
+    const h = document.createElement("div");
+    h.className = "hint"; h.textContent = heading; h.dataset.heading = heading;
+    root.appendChild(h);
+  }
+  const known = new Set([...root.querySelectorAll(".finding .txid")].map((el) => el.textContent));
+  for (const f of list) {
+    if (known.has(f.classification?.txid ?? f.txid)) continue;
+    root.appendChild(renderFinding(f));
+  }
+}
+
+async function refreshHealth() {
+  try {
+    const health = await api("/api/health");
+    const cfg = await api("/api/config");
+    $("tip").textContent = `tip: ${health.tip ?? "?"}`;
+    $("conn").textContent = cfg.source.label;
+    $("conn").className = health.ok ? "ok" : "bad";
+    $("sourceline").textContent = `${cfg.source.kind} · ${cfg.source.id}`;
+    // Block scans need a source that can enumerate block txids; make the
+    // capability visible instead of letting scans fail with an error.
+    canBlockScan = cfg.source.canListBlockTxids !== false;
+    const running = !$("btn-stop").disabled;
+    setScanControls(running);
+    $("scan-note").textContent = canBlockScan
+      ? ""
+      : "block scans need a bitcoind RPC source (⚙ Settings)";
+  } catch (e) {
+    $("conn").textContent = "offline";
+    $("conn").className = "bad";
+  }
+}
+
+$("btn-classify").addEventListener("click", async () => {
+  const txid = $("txid").value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(txid)) return status("enter a 64-hex txid");
+  status("classifying…");
+  try {
+    const r = await api(`/api/tx/${txid}`);
+    renderFindings([r], `classified ${txid}`);
+    status("");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-follow").addEventListener("click", async () => {
+  const txid = $("txid").value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(txid)) return status("enter a 64-hex txid");
+  status("walking family…");
+  try {
+    const r = await api(`/api/follow/${txid}`);
+    renderFindings(r.family, `family of ${txid} (${r.family.length} txs)`);
+    status("");
+  } catch (e) { status(e.message); }
+});
+
+// --- Scan runs: start/stop with live progress over SSE -----------------
+
+const scanLog = $("scan-log");
+const scanProgress = $("scan-progress");
+let scanRunStats = null;
+
+function logLine(kind, text) {
+  scanLog.hidden = false;
+  const line = document.createElement("div");
+  const t = document.createElement("span");
+  t.className = "t";
+  t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+  const body = document.createElement("span");
+  body.className = kind;
+  body.textContent = text;
+  line.append(t, body);
+  scanLog.append(line);
+  // Keep the tail visible; cap retained lines so long scans don't grow
+  // the DOM unboundedly.
+  while (scanLog.childElementCount > 500) scanLog.firstElementChild.remove();
+  scanLog.scrollTop = scanLog.scrollHeight;
+}
+
+let canBlockScan = true;
+
+function setScanControls(running) {
+  $("btn-scan").disabled = running || !canBlockScan;
+  $("btn-stop").disabled = !running;
+  $("height").disabled = running || !canBlockScan;
+  $("span").disabled = running || !canBlockScan;
+}
+
+function handleScanEvent(ev) {
+  const state = $("scan-state");
+  switch (ev.type) {
+    case "range":
+      scanRunStats = { blocks: 0, txs: 0, findings: 0, total: ev.totalBlocks, startedAt: performance.now() };
+      logLine("info", `scan range ${ev.from}-${ev.to} (${ev.totalBlocks} blocks)`);
+      scanProgress.textContent = `0/${ev.totalBlocks} blocks`;
+      state.hidden = false;
+      state.textContent = `scanning 0/${ev.totalBlocks}`;
+      break;
+    case "block-start":
+      scanProgress.textContent = `block ${ev.height} (${ev.index}/${ev.totalBlocks})`;
+      state.textContent = `scanning ${ev.index - 1}/${ev.totalBlocks} · block ${ev.height}`;
+      markOngoing(ev.height);
+      break;
+    case "block-txs":
+      if (ev.total > 16) {
+        scanProgress.textContent =
+          `block ${ev.height}: ${ev.done}/${ev.total} txs, ${ev.found} found`;
+        state.textContent = `scanning block ${ev.height}: ${ev.done}/${ev.total} txs`;
+      }
+      break;
+    case "block-done": {
+      if (scanRunStats) {
+        scanRunStats.blocks += 1;
+        scanRunStats.txs += ev.txCount;
+        scanRunStats.findings += ev.findings;
+      }
+      const elapsed = performance.now() - (scanRunStats?.startedAt ?? performance.now());
+      const rate = elapsed > 0 && scanRunStats ? (scanRunStats.blocks / (elapsed / 1000)).toFixed(2) : "?";
+      logLine(
+        ev.findings > 0 ? "ok" : "info",
+        `block ${ev.height}: ${ev.txCount} txs, ${ev.candidates} shaped, ${ev.findings} found (${rate} blocks/s)`,
+      );
+      scanProgress.textContent =
+        `${scanRunStats?.blocks ?? "?"} blocks done · ` +
+        `${scanRunStats?.findings ?? 0} findings · ${rate} blocks/s`;
+      state.textContent =
+        `${scanRunStats?.blocks ?? "?"}/${scanRunStats?.total ?? "?"} blocks · ${rate}/s`;
+      // Live findings: append each hit to the panel as its block completes,
+      // even while the scan continues.
+      if (ev.details && ev.details.length > 0) {
+        appendFindings(
+          ev.details.map((d) => ({
+            classification: {
+              txid: d.txid,
+              stage: d.stage,
+              confidence: d.confidence,
+              reason: `found in block ${ev.height} during this scan`,
+            },
+            blockHeight: ev.height,
+            inMempool: false,
+          })),
+          `live findings (scan in progress)`,
+        );
+      }
+      refreshChainViz();
+      break;
+    }
+    case "block-error":
+      logLine("err", `block ${ev.height}: ${ev.error}`);
+      state.textContent = `error at block ${ev.height}`;
+      break;
+    case "stop-requested":
+      logLine("info", "stop requested; finishing current block…");
+      state.textContent = "stopping…";
+      break;
+    case "range-done": {
+      const secs = ev.ms / 1000;
+      const bps = secs > 0 ? (ev.blocks / secs).toFixed(2) : "?";
+      logLine(
+        ev.findings > 0 ? "ok" : "info",
+        `scan ${ev.blocks} block(s) in ${secs.toFixed(1)}s (${bps} blocks/s), ${ev.findings} finding(s)`,
+      );
+      scanProgress.textContent = `done: ${ev.blocks} block(s), ${ev.findings} finding(s), ${secs.toFixed(1)}s`;
+      state.textContent = `idle · last scan: ${ev.blocks} blocks, ${ev.findings} findings`;
+      setScanControls(false);
+      vizOngoingHeight = null;
+      refreshChainViz();
+      break;
+    }
+  }
+}
+
+let scanEvents = null;
+function ensureScanEventStream() {
+  if (scanEvents) return;
+  scanEvents = new EventSource("/api/scan/events");
+  scanEvents.onmessage = (msg) => {
+    try {
+      handleScanEvent(JSON.parse(msg.data));
+    } catch { /* ignore malformed frames */ }
+  };
+}
+
+$("btn-scan").addEventListener("click", async () => {
+  const params = {};
+  const h = $("height").value ? Number($("height").value) : null;
+  const span = Number($("span").value || 10);
+  if (h !== null) params.from = Math.max(h - span + 1, 0);
+  params.span = span;
+  ensureScanEventStream();
+  try {
+    await api("/api/scan/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    setScanControls(true);
+    logLine("info", "scan started");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-stop").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/scan/stop", { method: "POST" });
+    if (!r.stopped) status("no running scan to stop");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-exit").addEventListener("click", async () => {
+  if (!confirm("Shut down the monitor server?")) return;
+  try {
+    await api("/api/exit", { method: "POST" });
+  } catch { /* connection closes as the server exits */ }
+  document.body.innerHTML =
+    '<div style="padding:40px;text-align:center;color:var(--muted)">monitor shut down; restart it with <code>npm run monitor</code></div>';
+});
+
+$("btn-clear").addEventListener("click", () => {
+  renderFindings(null);
+  scanLog.hidden = true;
+  scanLog.replaceChildren();
+  scanProgress.textContent = "";
+  status("");
+});
+
+$("btn-watch").addEventListener("click", async () => {
+  const lines = $("watch-input").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  const txids = lines.filter((l) => /^[0-9a-f]{64}$/i.test(l));
+  const scripts = lines.filter((l) => !/^[0-9a-f]{64}$/i.test(l) && /^[0-9a-f]+$/i.test(l));
+  try {
+    const w = await api("/api/watch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ txids, scripts }),
+    });
+    renderWatch(w);
+    status(`watching ${w.txids.length} txids, ${w.scripts.length} scripts`);
+  } catch (e) { status(e.message); }
+});
+
+$("btn-unwatch").addEventListener("click", async () => {
+  try {
+    const w = await api("/api/watch", { method: "DELETE" });
+    renderWatch(w);
+    status("watch list cleared");
+  } catch (e) { status(e.message); }
+});
+
+function renderWatch(w) {
+  const ul = $("watchlist");
+  ul.replaceChildren();
+  for (const t of w.txids ?? []) {
+    const li = document.createElement("li");
+    li.textContent = `tx ${t}`;
+    ul.appendChild(li);
+  }
+  for (const s of w.scripts ?? []) {
+    const li = document.createElement("li");
+    li.textContent = `script ${s.slice(0, 32)}…`;
+    ul.appendChild(li);
+  }
+}
+
+// --- Settings dialog: switch chain source at runtime -----------------
+
+const settingsDialog = $("settings");
+
+$("btn-settings").addEventListener("click", () => {
+  $("settings-error").textContent = "";
+  settingsDialog.showModal();
+});
+
+$("settings-kind").addEventListener("change", () => {
+  const rpc = $("settings-kind").value === "rpc";
+  $("rpc-fields").hidden = !rpc;
+  $("esplora-fields").hidden = rpc;
+});
+
+$("btn-source-cancel").addEventListener("click", () => settingsDialog.close());
+
+$("btn-source-save").addEventListener("click", async () => {
+  const err = $("settings-error");
+  err.textContent = "";
+  const kind = $("settings-kind").value;
+  const body = kind === "rpc"
+    ? {
+        kind,
+        url: $("settings-url").value.trim(),
+        username: $("settings-user").value,
+        password: $("settings-pass").value,
+      }
+    : { kind, network: $("settings-network").value };
+  $("btn-source-save").disabled = true;
+  try {
+    await api("/api/source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    settingsDialog.close();
+    await refreshHealth();
+    status(`source switched: ${kind}`);
+  } catch (e) {
+    err.textContent = e.message;
+  } finally {
+    $("btn-source-save").disabled = false;
+  }
+});
+
+// --- Chain coverage visualization -------------------------------------
+
+const VIZ_BLOCKS = 150;
+let vizState = null;
+let vizOngoingHeight = null;
+
+async function refreshChainViz() {
+  try {
+    vizState = await api("/api/state");
+    renderChainViz();
+    // Surface persisted findings on load and as the auto-scanner finds more;
+    // a running manual scan appends its own live cards on block-done.
+    const statusNow = scanRunStatusCache;
+    if (!statusNow?.running && vizState.findings.length > 0) {
+      renderFindings(
+        vizState.findings.map((f) => ({
+          classification: {
+            txid: f.txid,
+            stage: f.stage,
+            confidence: f.confidence,
+            reason: "persisted finding (from earlier scans)",
+          },
+          blockHeight: f.height,
+          inMempool: false,
+        })),
+        `persisted findings · ${vizState.findings.length} tx(s) across ${new Set(vizState.findings.map((f) => f.height)).size} block(s)`,
+      );
+    }
+  } catch { /* state endpoint unavailable on esplora-only mode */ }
+}
+
+function renderChainViz() {
+  if (!vizState) return;
+  const tip = vizState.tip;
+  const scanned = vizState.scannedHeights;
+  const newestScanned = scanned.length > 0 ? scanned[scanned.length - 1] : null;
+
+  // Anchor the window on real coverage: normally the last VIZ_BLOCKS up to
+  // the tip, but when scans sit far below the tip (a regtest range or a
+  // historical hunt), anchor on the newest scanned height so the cells show
+  // something. The meta line still reports the tip.
+  let vizFrom = Math.max(tip - VIZ_BLOCKS + 1, 0);
+  let vizTo = tip;
+  if (newestScanned !== null && newestScanned < vizFrom) {
+    vizFrom = Math.max(newestScanned - 20, 0);
+    vizTo = Math.max(newestScanned + 20, vizOngoingHeight ?? 0);
+  }
+  const span = vizTo - vizFrom + 1;
+  // Bucket heights into at most VIZ_BLOCKS cells; sparse coverage still
+  // lights up its bucket instead of vanishing between tip-anchored cells.
+  const bucketSize = Math.max(1, Math.ceil(span / VIZ_BLOCKS));
+  const cells = Math.ceil(span / bucketSize);
+
+  const scannedSet = new Set(scanned);
+  const hitHeights = new Set(vizState.findings.map((f) => f.height));
+
+  const frag = document.createDocumentFragment();
+  for (let c = 0; c < cells; c += 1) {
+    const hFrom = vizFrom + c * bucketSize;
+    const hTo = Math.min(vizFrom + (c + 1) * bucketSize - 1, vizTo);
+    const blk = document.createElement("div");
+    blk.className = "blk";
+    let isScanned = false;
+    let hits = 0;
+    let ongoing = false;
+    for (let h = hFrom; h <= hTo; h += 1) {
+      if (scannedSet.has(h)) isScanned = true;
+      if (hitHeights.has(h)) hits += 1;
+      if (h === vizOngoingHeight) ongoing = true;
+    }
+    if (hits > 0) {
+      blk.classList.add("hit");
+      blk.title = `blocks ${hFrom}-${hTo} · ${hits} block(s) with exit txs`;
+    } else if (ongoing) {
+      blk.classList.add("ongoing");
+      blk.title = `blocks ${hFrom}-${hTo} · scanning`;
+    } else if (isScanned) {
+      blk.classList.add("scanned");
+      blk.title = `blocks ${hFrom}-${hTo} · scanned`;
+    } else {
+      blk.title = `blocks ${hFrom}-${hTo} · unread`;
+    }
+    frag.appendChild(blk);
+  }
+  $("chain-viz").replaceChildren(frag);
+
+  const total = scanned.length;
+  const hits = vizState.findings.length;
+  const caught = vizState.autoCaughtUpTo;
+  const windowNote = vizTo < tip ? ` · showing blocks ${vizFrom}-${vizTo}` : "";
+  $("chain-meta").textContent =
+    `tip ${tip} · ${total} block(s) scanned · ${hits} finding(s)` +
+    (caught !== null && caught < tip ? ` · auto-scanner caught up to ${caught}` : " · auto-scanner at tip") +
+    windowNote;
+}
+
+let scanRunStatusCache = null;
+async function pollScanStatus() {
+  try {
+    scanRunStatusCache = await api("/api/scan/status");
+  } catch { /* server busy */ }
+}
+
+// Track the ongoing block from SSE events for the viz pulse.
+function markOngoing(height) {
+  vizOngoingHeight = height;
+  renderChainViz();
+}
+
+refreshHealth();
+refreshChainViz();
+setInterval(refreshHealth, 30_000);
+setInterval(refreshChainViz, 30_000);
+setInterval(pollScanStatus, 5_000);
+
+</script>
+</body>
+</html>
