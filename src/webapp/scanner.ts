@@ -45,7 +45,7 @@ export type ScanProgressEvent =
   | { type: "range"; from: number; to: number; totalBlocks: number }
   | { type: "block-start"; height: number; index: number; totalBlocks: number }
   | { type: "block-txs"; height: number; done: number; total: number; found: number }
-  | { type: "block-done"; height: number; txCount: number; candidates: number; findings: number; ms: number }
+  | { type: "block-done"; height: number; txCount: number; candidates: number; findings: number; ms: number; details?: Array<{ txid: string; stage: string; confidence: string }> }
   | { type: "block-error"; height: number; error: string }
   | { type: "range-done"; from: number; to: number; blocks: number; findings: number; ms: number };
 

@@ -407,6 +407,11 @@ function startScanRun(
           candidates: result.candidates,
           findings: result.findings.length,
           ms: Date.now() - rangeStartedAt,
+          details: result.findings.map((f) => ({
+            txid: f.classification.txid,
+            stage: f.classification.stage,
+            confidence: f.classification.confidence,
+          })),
         });
       }
       run.status = run.stopRequested ? "stopped" : "done";

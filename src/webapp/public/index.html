@@ -98,11 +98,12 @@
   #scan-log .info { color: var(--text); }
   #scan-progress { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 8px; }
   #chain-viz {
-    margin-top: 4px; display: flex; gap: 1px; align-items: flex-end;
+    margin-top: 4px; display: flex; gap: 1px; align-items: stretch;
     height: 56px; overflow: hidden; border: 1px solid var(--border);
     border-radius: 6px; padding: 4px; background: #0d1117;
   }
-  #chain-viz .blk { flex: 1 1 0; min-width: 2px; border-radius: 1px; background: #232c3d; }
+  /* Explicit height: empty divs in a flex row collapse to 0 otherwise. */
+  #chain-viz .blk { flex: 1 1 0; min-width: 2px; height: 100%; border-radius: 1px; background: #232c3d; }
   #chain-viz .blk.scanned { background: #2f6b3f; }
   #chain-viz .blk.hit { background: var(--amber); }
   #chain-viz .blk.ongoing { background: var(--accent); animation: pulse 1s infinite alternate; }
@@ -261,6 +262,23 @@ function renderFindings(list, heading) {
   for (const f of list) root.appendChild(renderFinding(f));
 }
 
+// Append findings without clearing what is already shown (live scanning).
+function appendFindings(list, heading) {
+  const root = $("findings");
+  const empty = root.querySelector(".empty");
+  if (empty) empty.remove();
+  if (heading && !root.querySelector(`[data-heading="${heading}"]`)) {
+    const h = document.createElement("div");
+    h.className = "hint"; h.textContent = heading; h.dataset.heading = heading;
+    root.appendChild(h);
+  }
+  const known = new Set([...root.querySelectorAll(".finding .txid")].map((el) => el.textContent));
+  for (const f of list) {
+    if (known.has(f.classification?.txid ?? f.txid)) continue;
+    root.appendChild(renderFinding(f));
+  }
+}
+
 async function refreshHealth() {
   try {
     const health = await api("/api/health");
@@ -376,6 +394,23 @@ function handleScanEvent(ev) {
         `${scanRunStats?.findings ?? 0} findings · ${rate} blocks/s`;
       state.textContent =
         `${scanRunStats?.blocks ?? "?"}/${scanRunStats?.total ?? "?"} blocks · ${rate}/s`;
+      // Live findings: append each hit to the panel as its block completes,
+      // even while the scan continues.
+      if (ev.details && ev.details.length > 0) {
+        appendFindings(
+          ev.details.map((d) => ({
+            classification: {
+              txid: d.txid,
+              stage: d.stage,
+              confidence: d.confidence,
+              reason: `found in block ${ev.height} during this scan`,
+            },
+            blockHeight: ev.height,
+            inMempool: false,
+          })),
+          `live findings (scan in progress)`,
+        );
+      }
       refreshChainViz();
       break;
     }
@@ -551,6 +586,24 @@ async function refreshChainViz() {
   try {
     vizState = await api("/api/state");
     renderChainViz();
+    // Surface persisted findings on load and as the auto-scanner finds more;
+    // a running manual scan appends its own live cards on block-done.
+    const statusNow = scanRunStatusCache;
+    if (!statusNow?.running && vizState.findings.length > 0) {
+      renderFindings(
+        vizState.findings.map((f) => ({
+          classification: {
+            txid: f.txid,
+            stage: f.stage,
+            confidence: f.confidence,
+            reason: "persisted finding (from earlier scans)",
+          },
+          blockHeight: f.height,
+          inMempool: false,
+        })),
+        `persisted findings · ${vizState.findings.length} tx(s) across ${new Set(vizState.findings.map((f) => f.height)).size} block(s)`,
+      );
+    }
   } catch { /* state endpoint unavailable on esplora-only mode */ }
 }
 
