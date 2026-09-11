@@ -22,3 +22,6 @@ sweeps*.json
 
 # Webapp regtest captures reveal wallet graph metadata; keep them local.
 test/fixtures/webapp/
+
+# Persisted monitor scan state (blocks scanned, findings) - local only.
+monitor-state.json

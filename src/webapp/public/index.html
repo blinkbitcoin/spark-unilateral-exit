@@ -97,6 +97,19 @@
   #scan-log .err { color: var(--red); }
   #scan-log .info { color: var(--text); }
   #scan-progress { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 8px; }
+  #chain-viz {
+    margin-top: 4px; display: flex; gap: 1px; align-items: flex-end;
+    height: 56px; overflow: hidden; border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px; background: #0d1117;
+  }
+  #chain-viz .blk { flex: 1 1 0; min-width: 1px; border-radius: 1px; background: #1e2530; }
+  #chain-viz .blk.scanned { background: #2f6b3f; }
+  #chain-viz .blk.hit { background: var(--amber); }
+  #chain-viz .blk.ongoing { background: var(--accent); animation: pulse 1s infinite alternate; }
+  @keyframes pulse { from { opacity: .4; } to { opacity: 1; } }
+  #chain-legend { display: flex; gap: 12px; font-size: 10px; color: var(--muted); margin-top: 4px; }
+  #chain-legend .key { display: inline-flex; align-items: center; gap: 4px; }
+  #chain-legend .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 </style>
 </head>
 <body>
@@ -176,7 +189,16 @@
     <div id="status"></div>
   </section>
   <section>
-    <h2>Findings</h2>
+    <h2>Chain coverage</h2>
+    <div id="chain-meta" class="hint">no scan state yet</div>
+    <div id="chain-viz"></div>
+    <div id="chain-legend">
+      <span class="key"><span class="swatch" style="background:#1e2530"></span>unread</span>
+      <span class="key"><span class="swatch" style="background:#2f6b3f"></span>scanned</span>
+      <span class="key"><span class="swatch" style="background:var(--accent)"></span>ongoing</span>
+      <span class="key"><span class="swatch" style="background:var(--amber)"></span>exit txs found</span>
+    </div>
+    <h2 style="margin-top:16px">Findings</h2>
     <div id="findings"><div class="empty">No scan yet. Classify a txid, follow an exit family, or scan recent blocks.</div></div>
   </section>
 </main>
@@ -327,6 +349,7 @@ function handleScanEvent(ev) {
     case "block-start":
       scanProgress.textContent = `block ${ev.height} (${ev.index}/${ev.totalBlocks})`;
       state.textContent = `scanning ${ev.index - 1}/${ev.totalBlocks} · block ${ev.height}`;
+      markOngoing(ev.height);
       break;
     case "block-txs":
       if (ev.total > 16) {
@@ -352,6 +375,7 @@ function handleScanEvent(ev) {
         `${scanRunStats?.findings ?? 0} findings · ${rate} blocks/s`;
       state.textContent =
         `${scanRunStats?.blocks ?? "?"}/${scanRunStats?.total ?? "?"} blocks · ${rate}/s`;
+      refreshChainViz();
       break;
     }
     case "block-error":
@@ -372,6 +396,8 @@ function handleScanEvent(ev) {
       scanProgress.textContent = `done: ${ev.blocks} block(s), ${ev.findings} finding(s), ${secs.toFixed(1)}s`;
       state.textContent = `idle · last scan: ${ev.blocks} blocks, ${ev.findings} findings`;
       setScanControls(false);
+      vizOngoingHeight = null;
+      refreshChainViz();
       break;
     }
   }
@@ -514,8 +540,75 @@ $("btn-source-save").addEventListener("click", async () => {
   }
 });
 
+// --- Chain coverage visualization -------------------------------------
+
+const VIZ_BLOCKS = 150;
+let vizState = null;
+let vizOngoingHeight = null;
+
+async function refreshChainViz() {
+  try {
+    vizState = await api("/api/state");
+    renderChainViz();
+  } catch { /* state endpoint unavailable on esplora-only mode */ }
+}
+
+function renderChainViz() {
+  if (!vizState) return;
+  const tip = vizState.tip;
+  const from = Math.max(tip - VIZ_BLOCKS + 1, 0);
+  const scannedSet = new Set(vizState.scannedHeights);
+  const hitHeights = new Set(vizState.findings.map((f) => f.height));
+  const runStatus = scanRunStatusCache;
+  const runningRange = runStatus?.running
+    ? { from: runStatus.from, to: runStatus.to, current: vizOngoingHeight }
+    : null;
+
+  const frag = document.createDocumentFragment();
+  for (let h = from; h <= tip; h += 1) {
+    const blk = document.createElement("div");
+    blk.className = "blk";
+    blk.title = `block ${h}`;
+    if (hitHeights.has(h)) {
+      blk.classList.add("hit");
+      blk.title += ` · ${vizState.findings.filter((f) => f.height === h).length} exit tx(s)`;
+    } else if (runningRange && h === vizOngoingHeight) {
+      blk.classList.add("ongoing");
+      blk.title += " · scanning";
+    } else if (scannedSet.has(h)) {
+      blk.classList.add("scanned");
+    }
+    frag.appendChild(blk);
+  }
+  $("chain-viz").replaceChildren(frag);
+
+  const total = vizState.scannedHeights.length;
+  const hits = vizState.findings.length;
+  const caught = vizState.autoCaughtUpTo;
+  $("chain-meta").textContent =
+    `tip ${tip} · ${total} block(s) scanned · ${hits} finding(s)` +
+    (caught !== null && caught < tip ? ` · auto-scanner caught up to ${caught}` : " · auto-scanner at tip");
+}
+
+let scanRunStatusCache = null;
+async function pollScanStatus() {
+  try {
+    scanRunStatusCache = await api("/api/scan/status");
+  } catch { /* server busy */ }
+}
+
+// Track the ongoing block from SSE events for the viz pulse.
+function markOngoing(height) {
+  vizOngoingHeight = height;
+  renderChainViz();
+}
+
 refreshHealth();
+refreshChainViz();
 setInterval(refreshHealth, 30_000);
+setInterval(refreshChainViz, 30_000);
+setInterval(pollScanStatus, 5_000);
+
 </script>
 </body>
 </html>

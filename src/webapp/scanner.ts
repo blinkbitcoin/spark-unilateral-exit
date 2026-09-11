@@ -37,6 +37,8 @@ export interface ScanResult {
   error: string | null;
   /** True when the scan stopped early because shouldStop() fired. */
   stopped?: boolean;
+  /** True when this block's result came from persisted state, not a scan. */
+  skipped?: boolean;
 }
 
 export type ScanProgressEvent =

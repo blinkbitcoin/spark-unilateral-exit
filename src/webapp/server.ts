@@ -34,8 +34,9 @@ import {
   NETWORK_PRESETS,
   type ChainSource,
 } from "./chain-source.ts";
-import { classifyTx, txStructure, type ExitStage } from "./exit-detector.ts";
-import { followExitFamily, scanBlock, type ScanResult } from "./scanner.ts";
+import { classifyTx, txStructure, type Confidence, type ExitStage } from "./exit-detector.ts";
+import { followExitFamily, scanBlock, type ScanFinding, type ScanResult } from "./scanner.ts";
+import { ScanStateStore } from "./scan-state.ts";
 
 const EXIT_STAGES: ExitStage[] = [
   "static-deposit",
@@ -198,7 +199,12 @@ interface ScanRunState {
   /** Final per-block results, available once the run ends. */
   results: ScanResult[];
   stopRequested: boolean;
+  /** Blocks skipped because persisted state already covered them. */
+  skipped: number;
 }
+
+// Persisted scan coverage + findings, keyed by source id (chain).
+const scanStore = new ScanStateStore();
 
 let currentRun: ScanRunState | null = null;
 let nextRunId = 1;
@@ -287,6 +293,7 @@ function startScanRun(
     lastError: null,
     results: [],
     stopRequested: false,
+    skipped: 0,
   };
   currentRun = run;
 
@@ -298,7 +305,11 @@ function startScanRun(
       const to = Math.min(params.to ?? tip, tip);
       const from = Math.max(Math.min(params.from ?? to - span + 1, to), 0);
       run.from = from;
-      run.to = Math.min(to, from + span - 1);
+      // An explicit from+to pair wins over span; span only bounds the
+      // default window (and stays clamped at 50 for the auto-scanner's
+      // bounded catch-up).
+      const requested = params.from !== undefined && params.to !== undefined;
+      run.to = requested ? to : Math.min(to, from + span - 1);
       run.blocksTotal = run.to - run.from + 1;
       emitScanEvent({
         type: "range",
@@ -310,6 +321,49 @@ function startScanRun(
       const rangeStartedAt = Date.now();
       for (let h = run.from; h <= run.to; h += 1) {
         if (run.stopRequested) break;
+        // Persisted state: blocks already scanned (with the same watch
+        // filters or without any) are skipped instead of re-fetched.
+        if (scanStore.has(source.id, h)) {
+          const record = scanStore.blockRecord(source.id, h)!;
+          const saved = scanStore.findingsForBlock(source.id, h);
+          run.skipped += 1;
+          run.blocksDone += 1;
+          run.findings += saved.length;
+          run.results.push({
+            height: h,
+            scannedAt: new Date(record.scannedAt).toISOString(),
+            txCount: record.txCount,
+            candidates: saved.length,
+            findings: saved.map(
+              (f): ScanFinding => ({
+                classification: {
+                  txid: f.txid,
+                  stage: f.stage as ExitStage,
+                  confidence: f.confidence as Confidence,
+                  matchedRules: [],
+                  reason: "restored from persisted scan state",
+                  csvBlocks: null,
+                  isTruc: true,
+                  hasAnchorOutput: false,
+                  outputs: [],
+                  inputs: 0,
+                  maturityHeight: null,
+                  spentOutpoints: [],
+                },
+                blockHeight: h,
+                inMempool: false,
+              }),
+            ),
+            error: null,
+            skipped: true,
+          });
+          emitScanEvent({
+            type: "block-skip",
+            height: h,
+            findings: saved.length,
+          });
+          continue;
+        }
         emitScanEvent({
           type: "block-start",
           height: h,
@@ -336,6 +390,14 @@ function startScanRun(
           emitScanEvent({ type: "block-error", height: h, error: result.error });
           break;
         }
+        scanStore.recordBlock(source.id, h, {
+          txCount: result.txCount,
+          findings: result.findings.map((f) => ({
+            txid: f.classification.txid,
+            stage: f.classification.stage,
+            confidence: f.classification.confidence,
+          })),
+        });
         emitScanEvent({
           type: "block-done",
           height: h,
@@ -361,8 +423,8 @@ function startScanRun(
         ms: elapsed,
       });
       process.stdout.write(
-        `scan run #${run.id} ${run.status}: ${run.blocksDone}/${run.blocksTotal} blocks, ` +
-          `${run.findings} findings in ${(elapsed / 1000).toFixed(1)}s` +
+        `scan run #${run.id} ${run.status}: ${run.blocksDone}/${run.blocksTotal} blocks ` +
+          `(${run.skipped} skipped from state), ${run.findings} findings in ${(elapsed / 1000).toFixed(1)}s` +
           (run.lastError ? ` (last error: ${run.lastError})` : "") + "\n",
       );
     }
@@ -370,6 +432,47 @@ function startScanRun(
 
   return run;
 }
+
+// ---------------------------------------------------------------------------
+// Auto-scanner: while connected to a block-listing source, scan each new
+// block as the chain advances so coverage stays at the tip without manual
+// runs. Shares currentRun so it respects stop and blocks manual starts.
+// ---------------------------------------------------------------------------
+
+const AUTO_SCAN_POLL_MS = 30_000;
+
+async function autoScanTick(): Promise<void> {
+  const source = getSource();
+  if (!source.canListBlockTxids) return;
+  if (currentRun?.status === "running") return;
+  try {
+    const tip = await source.tipHeight();
+    const last = scanStore.lastAutoScanned(source.id) ?? tip - 1;
+    if (tip <= last) return;
+    // Catch up at most 10 blocks per tick so one interval stays bounded.
+    const from = last + 1;
+    const to = Math.min(tip, last + 10);
+    process.stdout.write(
+      `[auto] scanning new blocks ${from}..${to} (tip ${tip})\n`,
+    );
+    const run = startScanRun(source, { from, to }, watch);
+    // Mark auto progress only after the run finishes successfully.
+    void (async () => {
+      while (currentRun === run && run.status === "running") {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (run.status === "done") {
+        scanStore.setLastAutoScanned(source.id, run.to);
+      }
+    })();
+  } catch (error) {
+    process.stdout.write(
+      `[auto] tick failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 
 async function handleApi(
   req: http.IncomingMessage,
@@ -524,6 +627,23 @@ async function handleApi(
     return send(200, scanRunStatus());
   }
 
+  if (req.method === "GET" && pathname === "/api/state") {
+    // Chain strip data: which heights are scanned, where findings sit, and
+    // where the auto-scanner has caught up to.
+    const records = scanStore.blockRecords(source.id);
+    const findings = scanStore.allFindings(source.id);
+    const heights = Object.keys(records).map(Number).sort((a, b) => a - b);
+    const tip = await source.tipHeight();
+    return send(200, {
+      chain: source.id,
+      tip,
+      autoCaughtUpTo: scanStore.lastAutoScanned(source.id),
+      scannedHeights: heights,
+      blocks: records,
+      findings,
+    });
+  }
+
   if (req.method === "GET" && pathname === "/api/scan/events") {
     // Server-sent events: the scan loop pushes progress, the stream stays
     // open until the run ends or the client disconnects.
@@ -624,4 +744,9 @@ server.listen(port, () => {
     `spark exit monitor listening on http://localhost:${port} ` +
       `(source: ${activeSource.label})\n`,
   );
+  // Auto-scan new blocks while a block-listing source is connected.
+  const autoTimer = setInterval(() => {
+    void autoScanTick();
+  }, AUTO_SCAN_POLL_MS);
+  autoTimer.unref();
 });
