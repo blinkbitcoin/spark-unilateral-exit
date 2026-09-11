@@ -83,7 +83,9 @@ function parseArgs(argv: string[]): Record<string, string> {
 }
 
 function buildSource(args: Record<string, string>): ChainSource {
-  const kind = args.source ?? "esplora";
+  // BITCOIN_RPC_URL in the environment (gitignored .env via make monitor)
+  // implies the rpc source; --source still overrides explicitly.
+  const kind = args.source ?? (process.env.BITCOIN_RPC_URL ? "rpc" : "esplora");
   if (kind === "rpc") {
     const url = args["rpc-url"] ?? process.env.BITCOIN_RPC_URL ?? "http://127.0.0.1:8332";
     return new BitcoindRpcSource({

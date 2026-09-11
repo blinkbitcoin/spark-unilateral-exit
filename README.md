@@ -49,6 +49,7 @@ The CLI (`node src/cli.ts <command>`, run `help` for full flags) exposes:
 | `tx-status` | Check confirmation status of a transaction via Esplora |
 | `sweep` | Spend confirmed refund outputs to a destination address |
 | `broadcast-sweep` | Broadcast signed sweep transactions via Esplora |
+| `monitor` | Webapp that watches the chain for Spark unilateral-exit transactions (`make monitor`) |
 
 `watch-cpfp`, `broadcast`, `broadcast-sweep`, and `tx-status` use Esplora and support only MAINNET/TESTNET/SIGNET by default; on REGTEST/LOCAL pass `--esplora-url` or use `bitcoin-cli`.
 

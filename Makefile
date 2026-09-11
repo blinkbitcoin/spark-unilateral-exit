@@ -74,6 +74,7 @@ help:
 	@echo "                    # waits for funding, packages, signs, submits, and waits for confirmations"
 	@echo "                    # round by round; skips uneconomical leaves (INCLUDE_UNECONOMICAL=1 to keep"
 	@echo "                    # them); FAN_OUT=1 broadcasts leaves in parallel; safe to re-run anytime"
+	@echo "  make monitor      # webapp exit monitor on :4480; bitcoind RPC connection from .env when present"
 	@echo ""
 	@echo "For multiple CPFP inputs, pass CPFP_ARGS='--cpfp-utxo <utxo1> --cpfp-utxo <utxo2>'."
 	@echo "For a self-hosted Esplora (required on regtest), pass ESPLORA_URL=<url>."
@@ -184,7 +185,23 @@ broadcast-sweep: require-sweeps
 		--network $(NETWORK) \
 		$(ESPLORA_ARGS)
 
-.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file require-sweeps
+# Webapp exit monitor. Credentials/connection come from the gitignored .env
+# (BITCOIN_RPC_URL, BITCOIN_RPC_USER, BITCOIN_RPC_PASSWORD) when present;
+# override per invocation with MONITOR_ARGS, e.g.
+#   make monitor
+#   make monitor MONITOR_ARGS='--network signet'
+#   make monitor MONITOR_ARGS='--port 5000'
+monitor:
+	@if [ -f .env ]; then \
+		. ./.env 2>/dev/null; \
+		if [ -n "$$BITCOIN_RPC_URL" ]; then \
+			export BITCOIN_RPC_URL BITCOIN_RPC_USER BITCOIN_RPC_PASSWORD; \
+			echo "monitor: using bitcoind RPC from .env ($$BITCOIN_RPC_URL)"; \
+		fi; \
+	fi; \
+	$(NODE) src/webapp/server.ts $(MONITOR_ARGS)
+
+.PHONY: require-destination require-cpfp-args require-signing-key require-seed-file require-sweeps monitor
 
 require-destination:
 	@: $(if $(DESTINATION),,$(error DESTINATION is required))
