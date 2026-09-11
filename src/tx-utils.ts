@@ -17,6 +17,9 @@ export function parseRelaxedTx(txHex: string): Transaction {
     allowUnknownOutputs: true,
     allowUnknownInputs: true,
     disableScriptCheck: true,
+    // Real mainnet txs exist with arbitrary version fields; the version is
+    // irrelevant to structural classification, so accept any number.
+    allowUnknownVersion: true,
   });
 }
 
