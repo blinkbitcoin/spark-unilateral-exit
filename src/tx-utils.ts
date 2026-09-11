@@ -12,15 +12,28 @@ import { Transaction } from "@scure/btc-signer";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils";
 
+// btc-signer validates the version field against exactly these values.
+const KNOWN_VERSIONS = [-1, 0, 1, 2, 3];
+
 export function parseRelaxedTx(txHex: string): Transaction {
-  return Transaction.fromRaw(hexToBytes(txHex), {
+  const raw = hexToBytes(txHex);
+  const opts = {
     allowUnknownOutputs: true,
     allowUnknownInputs: true,
     disableScriptCheck: true,
-    // Real mainnet txs exist with arbitrary version fields; the version is
-    // irrelevant to structural classification, so accept any number.
-    allowUnknownVersion: true,
-  });
+  } as const;
+  // Real mainnet txs exist with arbitrary version fields (e.g. 0x421E0B49)
+  // and btc-signer's allowUnknownVersion option is unusable (it rejects
+  // every numeric version), so re-write exotic versions before parsing.
+  // Only TRUC detection reads the version (=== 3), which this preserves.
+  const version =
+    (raw[0]! | (raw[1]! << 8) | (raw[2]! << 16) | (raw[3]! << 24)) | 0;
+  if (!KNOWN_VERSIONS.includes(version)) {
+    const masked = Uint8Array.from(raw);
+    masked.set([0x01, 0x00, 0x00, 0x00], 0);
+    return Transaction.fromRaw(masked, opts);
+  }
+  return Transaction.fromRaw(raw, opts);
 }
 
 export function legacyTxid(tx: Transaction): string {
