@@ -3,6 +3,11 @@
 // Endpoints (all JSON):
 //   GET /api/health                       -> { ok, tip, source }
 //   GET /api/config                       -> active chain source description
+//   POST /api/source                      -> switch source at runtime; body is
+//                                            { kind: "rpc", url, username, password }
+//                                            or { kind: "esplora", network }.
+//                                            The candidate is connection-tested
+//                                            before the active source swaps.
 //   GET /api/block/:height                -> scan one block for exit shapes
 //   GET /api/tx/:txid                     -> classify one transaction
 //   GET /api/follow/:txid                 -> walk an exit family from a seed
@@ -13,7 +18,8 @@
 //
 // Sources: --source esplora --esplora-url ... (default mempool.space mainnet)
 // or --source rpc --rpc-url ... --rpc-user ... --rpc-password ... for a
-// bitcoind on the LAN (block scans need txindex=1).
+// bitcoind on the LAN (block scans need txindex=1). Both are also switchable
+// at runtime via POST /api/source and the UI settings dialog.
 //
 // Run: node src/webapp/server.ts (Node >= 22.18 for .ts type stripping).
 
@@ -77,8 +83,13 @@ function buildSource(args: Record<string, string>): ChainSource {
 }
 
 const args = parseArgs(process.argv);
-const source = buildSource(args);
+// Mutable: POST /api/source swaps it after a successful connection test.
+let activeSource: ChainSource = buildSource(args);
 const port = Number(args.port ?? process.env.PORT ?? 4480);
+
+function getSource(): ChainSource {
+  return activeSource;
+}
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body, null, 2);
@@ -95,6 +106,62 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   return body;
 }
 
+interface RpcSourceBody {
+  kind: "rpc";
+  url: string;
+  username: string;
+  password: string;
+}
+
+interface EsploraSourceBody {
+  kind: "esplora";
+  network: keyof typeof NETWORK_PRESETS;
+}
+
+type SourceBody = RpcSourceBody | EsploraSourceBody;
+
+// Build a candidate source from a /api/source body. Validation errors throw
+// with a message the UI shows inline.
+function sourceFromBody(body: unknown): SourceBody {
+  if (!body || typeof body !== "object") {
+    throw new Error("body must be a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  if (record.kind === "rpc") {
+    const url = typeof record.url === "string" ? record.url.trim() : "";
+    if (!/^https?:\/\/.+/i.test(url)) {
+      throw new Error("RPC URL must be an http(s) URL, e.g. http://192.168.1.10:8332");
+    }
+    return {
+      kind: "rpc",
+      url,
+      username: typeof record.username === "string" ? record.username : "",
+      password: typeof record.password === "string" ? record.password : "",
+    };
+  }
+  if (record.kind === "esplora") {
+    const network = typeof record.network === "string" ? record.network : "";
+    if (!(network in NETWORK_PRESETS)) {
+      throw new Error(`unknown network "${network}"; expected one of ${Object.keys(NETWORK_PRESETS).join(", ")}`);
+    }
+    return { kind: "esplora", network: network as keyof typeof NETWORK_PRESETS };
+  }
+  throw new Error('body must have kind "rpc" or "esplora"');
+}
+
+function instantiateSource(body: SourceBody): ChainSource {
+  if (body.kind === "rpc") {
+    return new BitcoindRpcSource({
+      url: body.url,
+      username: body.username,
+      password: body.password,
+      label: `bitcoind @ ${body.url}`,
+    });
+  }
+  const preset = NETWORK_PRESETS[body.network];
+  return new EsploraChainSource({ baseUrl: preset.esplora, label: preset.label });
+}
+
 async function handleApi(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -102,6 +169,7 @@ async function handleApi(
   query: URLSearchParams,
 ): Promise<void> {
   const send = (status: number, body: unknown) => json(res, status, body);
+  const source = getSource();
 
   if (req.method === "GET" && pathname === "/api/health") {
     let tip: number | null = null;
@@ -123,6 +191,42 @@ async function handleApi(
         canListBlockTxids: source.canListBlockTxids,
       },
     });
+  }
+
+  if (req.method === "POST" && pathname === "/api/source") {
+    const body = await readBody(req);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return send(400, { error: "invalid JSON body" });
+    }
+    let candidateBody: SourceBody;
+    try {
+      candidateBody = sourceFromBody(parsed);
+    } catch (e) {
+      return send(400, { error: e instanceof Error ? e.message : String(e) });
+    }
+    // Connection-test before swapping so a typo never leaves the monitor
+    // pointed at a dead source; the active source stays untouched on failure.
+    const candidate = instantiateSource(candidateBody);
+    try {
+      const tip = await candidate.tipHeight();
+      activeSource = candidate;
+      return send(200, {
+        source: {
+          id: candidate.id,
+          kind: candidate.kind,
+          label: candidate.label,
+          canListBlockTxids: candidate.canListBlockTxids,
+        },
+        tip,
+      });
+    } catch (e) {
+      return send(502, {
+        error: `connection test failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
   }
 
   const blockMatch = pathname.match(/^\/api\/block\/(\d+)$/);
@@ -260,6 +364,6 @@ const server = http.createServer((req, res) => {
 server.listen(port, () => {
   process.stdout.write(
     `spark exit monitor listening on http://localhost:${port} ` +
-      `(source: ${source.label})\n`,
+      `(source: ${activeSource.label})\n`,
   );
 });

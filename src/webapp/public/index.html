@@ -21,6 +21,10 @@
     background: linear-gradient(180deg, #10141d, #0b0e14);
     position: sticky; top: 0; z-index: 5;
   }
+  header .spacer { flex: 1; }
+  #btn-settings {
+    font-size: 12px; padding: 3px 12px; width: auto;
+  }
   h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
   h1 .spark { color: var(--accent); }
   #tip { color: var(--muted); font-size: 12px; }
@@ -70,6 +74,14 @@
   ul { padding-left: 4px; }
   a { color: var(--accent); text-decoration: none; }
   .badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); padding: 0 6px; border-radius: 8px; margin-left: 6px; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; width: min(420px, 92vw);
+  }
+  dialog::backdrop { background: rgba(4, 6, 10, 0.7); }
+  dialog h2 { margin: 0 0 4px; }
+  dialog .hint { margin-top: 2px; }
+  #settings-error { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -77,7 +89,41 @@
   <h1><span class="spark">⚡</span> Spark unilateral-exit monitor</h1>
   <span id="tip">tip: -</span>
   <span id="conn" class="ok">connecting…</span>
+  <span class="spacer"></span>
+  <button id="btn-settings">⚙ Settings</button>
 </header>
+<dialog id="settings">
+  <h2>Chain source</h2>
+  <div class="hint">The candidate is connection-tested before the active source switches.</div>
+  <label for="settings-kind">Source</label>
+  <select id="settings-kind">
+    <option value="rpc">Bitcoin RPC (bitcoind on the LAN)</option>
+    <option value="esplora">Esplora (mempool.space)</option>
+  </select>
+  <div id="rpc-fields">
+    <label for="settings-url">RPC URL</label>
+    <input id="settings-url" placeholder="http://192.168.1.10:8332" spellcheck="false">
+    <label for="settings-user">RPC username</label>
+    <input id="settings-user" autocomplete="off" spellcheck="false">
+    <label for="settings-pass">RPC password</label>
+    <input id="settings-pass" type="password" autocomplete="off">
+    <div class="hint">Block scans need txindex=1 and server=1 on the node.</div>
+  </div>
+  <div id="esplora-fields" hidden>
+    <label for="settings-network">Network</label>
+    <select id="settings-network">
+      <option value="mainnet">mainnet</option>
+      <option value="testnet">testnet</option>
+      <option value="testnet4">testnet4</option>
+      <option value="signet">signet</option>
+    </select>
+  </div>
+  <div id="settings-error"></div>
+  <div class="row" style="margin-top:10px">
+    <button id="btn-source-save" class="primary">Test &amp; save</button>
+    <button id="btn-source-cancel">Cancel</button>
+  </div>
+</dialog>
 <main>
   <section>
     <h2>Chain source</h2>
@@ -289,6 +335,52 @@ function renderWatch(w) {
     ul.appendChild(li);
   }
 }
+
+// --- Settings dialog: switch chain source at runtime -----------------
+
+const settingsDialog = $("settings");
+
+$("btn-settings").addEventListener("click", () => {
+  $("settings-error").textContent = "";
+  settingsDialog.showModal();
+});
+
+$("settings-kind").addEventListener("change", () => {
+  const rpc = $("settings-kind").value === "rpc";
+  $("rpc-fields").hidden = !rpc;
+  $("esplora-fields").hidden = rpc;
+});
+
+$("btn-source-cancel").addEventListener("click", () => settingsDialog.close());
+
+$("btn-source-save").addEventListener("click", async () => {
+  const err = $("settings-error");
+  err.textContent = "";
+  const kind = $("settings-kind").value;
+  const body = kind === "rpc"
+    ? {
+        kind,
+        url: $("settings-url").value.trim(),
+        username: $("settings-user").value,
+        password: $("settings-pass").value,
+      }
+    : { kind, network: $("settings-network").value };
+  $("btn-source-save").disabled = true;
+  try {
+    await api("/api/source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    settingsDialog.close();
+    await refreshHealth();
+    status(`source switched: ${kind}`);
+  } catch (e) {
+    err.textContent = e.message;
+  } finally {
+    $("btn-source-save").disabled = false;
+  }
+});
 
 refreshHealth();
 setInterval(refreshHealth, 30_000);
