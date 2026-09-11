@@ -20,6 +20,7 @@ import {
   type TxClassification,
   type TxStructure,
 } from "./exit-detector.ts";
+import { parseRelaxedTx } from "../tx-utils.ts";
 import type { ChainSource } from "./chain-source.ts";
 
 export interface ScanFinding {
@@ -76,6 +77,28 @@ export async function scanBlock(
   const maxCandidates = options.maxCandidates ?? 50;
   const progress = options.onProgress ?? (() => {});
   const blockStartedAt = Date.now();
+
+  // Fast path: sources that can hand over the whole serialized block in one
+  // call (rpc, same host) skip the per-tx round-trips entirely - the block
+  // is split locally and every tx is parsed from memory.
+  if (!watchModeNeeded(options) && source.blockRawHex) {
+    let rawHex: string | null = null;
+    try {
+      rawHex = await source.blockRawHex(height);
+    } catch (error) {
+      // Fall through to the per-tx path; a blockRawHex failure is not a
+      // scan failure unless the fallback also fails.
+      rawHex = null;
+    }
+    if (rawHex) {
+      return scanRawBlock(source, rawHex, height, options, {
+        maxCandidates,
+        progress,
+        blockStartedAt,
+      });
+    }
+  }
+
   let txids: string[];
   try {
     txids = await source.blockTxids(height);
@@ -92,14 +115,15 @@ export async function scanBlock(
     };
   }
 
+  // Every tx below came from blockTxids(height), so its confirmation height
+  // is the scanned height; no per-tx confirmedHeight round-trip is needed.
   const watchTxids = new Set(options.watchTxids ?? []);
   const watchScripts = new Set(
     (options.watchScripts ?? []).map((s) => s.toLowerCase()),
   );
   const watchMode = watchTxids.size > 0 || watchScripts.size > 0;
+  void watchMode;
 
-  // Every tx below came from blockTxids(height), so its confirmation height
-  // is the scanned height; no per-tx confirmedHeight round-trip is needed.
   const findings: ScanFinding[] = [];
   let candidates = 0;
   let stopped = false;
@@ -161,6 +185,20 @@ export async function scanBlock(
   };
 }
 
+// The original per-tx path for scanRawBlock fallbacks: identical semantics
+// to scanBlock's tail above, reached only when raw-block parsing desyncs.
+async function scanBlockPerTx(
+  source: ChainSource,
+  height: number,
+  options: ScanOptions,
+  ctx: {
+    maxCandidates: number;
+    progress: (event: ScanProgressEvent) => void;
+  },
+): Promise<ScanResult> {
+  return scanBlock(source, height, { ...options, maxCandidates: ctx.maxCandidates, onProgress: ctx.progress });
+}
+
 // Fetch prevout txs in parallel and report whether any spent output is a
 // 0-value P2A anchor. Bounded to the input count (small for exit txs).
 async function checkSpendsAnchor(
@@ -175,6 +213,99 @@ async function checkSpendsAnchor(
     }),
   );
   return checks.some(Boolean);
+}
+
+function watchModeNeeded(options: ScanOptions): boolean {
+  return (
+    (options.watchTxids?.length ?? 0) > 0 || (options.watchScripts?.length ?? 0) > 0
+  );
+}
+
+// Whole-block scan: split the serialized block into transactions locally
+// (80-byte header, varint tx count, then each tx's own serialization
+// length) and classify from memory - no per-tx RPC at all.
+async function scanRawBlock(
+  source: ChainSource,
+  rawHex: string,
+  height: number,
+  options: ScanOptions,
+  ctx: {
+    maxCandidates: number;
+    progress: (event: ScanProgressEvent) => void;
+    blockStartedAt: number;
+  },
+): Promise<ScanResult> {
+  const { maxCandidates, progress } = ctx;
+  const raw = Buffer.from(rawHex, "hex");
+  let offset = 80;
+  const readVarint = (): number => {
+    const first = raw[offset] ?? 0;
+    offset += 1;
+    if (first < 0xfd) return first;
+    const len = first === 0xfd ? 2 : first === 0xfe ? 4 : 8;
+    const value =
+      len === 8
+        ? Number(raw.readBigUInt64LE(offset))
+        : raw.readUIntLE(offset, len);
+    offset += len;
+    return value;
+  };
+  const txCount = readVarint();
+  const findings: ScanFinding[] = [];
+  let candidates = 0;
+  let txSeen = 0;
+  let stopped = false;
+  while (offset < raw.length && txSeen < txCount) {
+    if (options.shouldStop?.()) {
+      stopped = true;
+      break;
+    }
+    let structure: ReturnType<typeof txStructure> | null = null;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const tx = parseRelaxedTx(raw.subarray(offset).toString("hex"));
+      const bytes = tx.toBytes(true, tx.hasWitnesses);
+      offset += bytes.length;
+      txSeen += 1;
+      const hex = Buffer.from(bytes).toString("hex");
+      structure = txStructure(hex);
+    } catch {
+      // A parse failure would desync the walk; bail to the safe path rather
+      // than misreport coverage.
+      return scanBlockPerTx(source, height, options, ctx);
+    }
+    if (classifyStructure(structure).stage === "unknown") continue;
+    candidates += 1;
+    // eslint-disable-next-line no-await-in-loop
+    const spendsAnchor = await checkSpendsAnchor(source, structure.inputs);
+    const classification = classifyStructure(structure, {
+      spendsAnchor,
+      parentConfirmedHeight: height,
+    });
+    findings.push({
+      classification,
+      blockHeight: height,
+      inMempool: false,
+    });
+    if (findings.length >= maxCandidates) break;
+  }
+  void readVarint;
+  progress({
+    type: "block-txs",
+    height,
+    done: txSeen,
+    total: txCount,
+    found: findings.length,
+  });
+  return {
+    height,
+    scannedAt: new Date().toISOString(),
+    txCount: txCount,
+    candidates,
+    findings,
+    error: null,
+    ...(stopped ? { stopped: true } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

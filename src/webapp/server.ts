@@ -746,9 +746,12 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(port, () => {
+// Listen on all interfaces so the monitor is reachable over the tailnet
+// (http://<node-ip>:4480); override the bind with --host if needed.
+const host = args.host ?? process.env.MONITOR_HOST ?? "0.0.0.0";
+server.listen(port, host, () => {
   process.stdout.write(
-    `spark exit monitor listening on http://localhost:${port} ` +
+    `spark exit monitor listening on http://${host}:${port} ` +
       `(source: ${activeSource.label})\n`,
   );
   // Auto-scan new blocks while a block-listing source is connected.

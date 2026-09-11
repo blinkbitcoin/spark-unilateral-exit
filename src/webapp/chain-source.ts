@@ -35,6 +35,11 @@ export interface ChainSource {
   txHex(txid: string): Promise<string | null>;
   /** Txids included in a block, in order. Throws when unsupported. */
   blockTxids(height: number): Promise<string[]>;
+  /**
+   * Full serialized block hex in one call (rpc only). Enables the fast
+   * whole-block scan path: one round-trip per block instead of one per tx.
+   */
+  blockRawHex?(height: number): Promise<string | null>;
   /** UTXOs for an address (esplora only; rpc has no address index). */
   addressUtxos(address: string): Promise<EsploraUtxo[]>;
   /** Confirmation height of a txid, or null when unconfirmed/unknown. */
@@ -196,6 +201,11 @@ export class BitcoindRpcSource implements ChainSource {
     const hash = await this.call<string>("getblockhash", [height]);
     const block = await this.call<{ tx: string[] }>("getblock", [hash, 1]);
     return block.tx ?? [];
+  }
+
+  async blockRawHex(height: number): Promise<string | null> {
+    const hash = await this.call<string>("getblockhash", [height]);
+    return this.call<string>("getblock", [hash, 0]);
   }
 
   async addressUtxos(): Promise<EsploraUtxo[]> {
