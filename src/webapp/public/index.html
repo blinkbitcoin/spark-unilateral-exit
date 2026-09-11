@@ -102,7 +102,7 @@
     height: 56px; overflow: hidden; border: 1px solid var(--border);
     border-radius: 6px; padding: 4px; background: #0d1117;
   }
-  #chain-viz .blk { flex: 1 1 0; min-width: 1px; border-radius: 1px; background: #1e2530; }
+  #chain-viz .blk { flex: 1 1 0; min-width: 2px; border-radius: 1px; background: #232c3d; }
   #chain-viz .blk.scanned { background: #2f6b3f; }
   #chain-viz .blk.hit { background: var(--amber); }
   #chain-viz .blk.ongoing { background: var(--accent); animation: pulse 1s infinite alternate; }
@@ -110,6 +110,7 @@
   #chain-legend { display: flex; gap: 12px; font-size: 10px; color: var(--muted); margin-top: 4px; }
   #chain-legend .key { display: inline-flex; align-items: center; gap: 4px; }
   #chain-legend .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  #chain-legend .key:has(.swatch[data-k="unread"]) .swatch { background: #232c3d; }
 </style>
 </head>
 <body>
@@ -193,7 +194,7 @@
     <div id="chain-meta" class="hint">no scan state yet</div>
     <div id="chain-viz"></div>
     <div id="chain-legend">
-      <span class="key"><span class="swatch" style="background:#1e2530"></span>unread</span>
+      <span class="key"><span class="swatch" data-k="unread" style="background:#232c3d"></span>unread</span>
       <span class="key"><span class="swatch" style="background:#2f6b3f"></span>scanned</span>
       <span class="key"><span class="swatch" style="background:var(--accent)"></span>ongoing</span>
       <span class="key"><span class="swatch" style="background:var(--amber)"></span>exit txs found</span>
@@ -556,38 +557,66 @@ async function refreshChainViz() {
 function renderChainViz() {
   if (!vizState) return;
   const tip = vizState.tip;
-  const from = Math.max(tip - VIZ_BLOCKS + 1, 0);
-  const scannedSet = new Set(vizState.scannedHeights);
+  const scanned = vizState.scannedHeights;
+  const newestScanned = scanned.length > 0 ? scanned[scanned.length - 1] : null;
+
+  // Anchor the window on real coverage: normally the last VIZ_BLOCKS up to
+  // the tip, but when scans sit far below the tip (a regtest range or a
+  // historical hunt), anchor on the newest scanned height so the cells show
+  // something. The meta line still reports the tip.
+  let vizFrom = Math.max(tip - VIZ_BLOCKS + 1, 0);
+  let vizTo = tip;
+  if (newestScanned !== null && newestScanned < vizFrom) {
+    vizFrom = Math.max(newestScanned - 20, 0);
+    vizTo = Math.max(newestScanned + 20, vizOngoingHeight ?? 0);
+  }
+  const span = vizTo - vizFrom + 1;
+  // Bucket heights into at most VIZ_BLOCKS cells; sparse coverage still
+  // lights up its bucket instead of vanishing between tip-anchored cells.
+  const bucketSize = Math.max(1, Math.ceil(span / VIZ_BLOCKS));
+  const cells = Math.ceil(span / bucketSize);
+
+  const scannedSet = new Set(scanned);
   const hitHeights = new Set(vizState.findings.map((f) => f.height));
-  const runStatus = scanRunStatusCache;
-  const runningRange = runStatus?.running
-    ? { from: runStatus.from, to: runStatus.to, current: vizOngoingHeight }
-    : null;
 
   const frag = document.createDocumentFragment();
-  for (let h = from; h <= tip; h += 1) {
+  for (let c = 0; c < cells; c += 1) {
+    const hFrom = vizFrom + c * bucketSize;
+    const hTo = Math.min(vizFrom + (c + 1) * bucketSize - 1, vizTo);
     const blk = document.createElement("div");
     blk.className = "blk";
-    blk.title = `block ${h}`;
-    if (hitHeights.has(h)) {
+    let isScanned = false;
+    let hits = 0;
+    let ongoing = false;
+    for (let h = hFrom; h <= hTo; h += 1) {
+      if (scannedSet.has(h)) isScanned = true;
+      if (hitHeights.has(h)) hits += 1;
+      if (h === vizOngoingHeight) ongoing = true;
+    }
+    if (hits > 0) {
       blk.classList.add("hit");
-      blk.title += ` · ${vizState.findings.filter((f) => f.height === h).length} exit tx(s)`;
-    } else if (runningRange && h === vizOngoingHeight) {
+      blk.title = `blocks ${hFrom}-${hTo} · ${hits} block(s) with exit txs`;
+    } else if (ongoing) {
       blk.classList.add("ongoing");
-      blk.title += " · scanning";
-    } else if (scannedSet.has(h)) {
+      blk.title = `blocks ${hFrom}-${hTo} · scanning`;
+    } else if (isScanned) {
       blk.classList.add("scanned");
+      blk.title = `blocks ${hFrom}-${hTo} · scanned`;
+    } else {
+      blk.title = `blocks ${hFrom}-${hTo} · unread`;
     }
     frag.appendChild(blk);
   }
   $("chain-viz").replaceChildren(frag);
 
-  const total = vizState.scannedHeights.length;
+  const total = scanned.length;
   const hits = vizState.findings.length;
   const caught = vizState.autoCaughtUpTo;
+  const windowNote = vizTo < tip ? ` · showing blocks ${vizFrom}-${vizTo}` : "";
   $("chain-meta").textContent =
     `tip ${tip} · ${total} block(s) scanned · ${hits} finding(s)` +
-    (caught !== null && caught < tip ? ` · auto-scanner caught up to ${caught}` : " · auto-scanner at tip");
+    (caught !== null && caught < tip ? ` · auto-scanner caught up to ${caught}` : " · auto-scanner at tip") +
+    windowNote;
 }
 
 let scanRunStatusCache = null;
