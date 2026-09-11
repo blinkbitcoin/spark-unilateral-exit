@@ -22,15 +22,20 @@
     position: sticky; top: 0; z-index: 5;
   }
   header .spacer { flex: 1; }
-  #btn-settings {
+  #btn-settings, #btn-exit {
     font-size: 12px; padding: 3px 12px; width: auto;
   }
+  #btn-exit { color: var(--red); border-color: var(--red); }
   h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
   h1 .spark { color: var(--accent); }
   #tip { color: var(--muted); font-size: 12px; }
   #conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
   #conn.ok { color: var(--green); border-color: var(--green); }
   #conn.bad { color: var(--red); border-color: var(--red); }
+  #scan-state {
+    color: var(--accent); border-color: var(--accent); font-size: 12px;
+    padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
+  }
   main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
@@ -82,6 +87,16 @@
   dialog h2 { margin: 0 0 4px; }
   dialog .hint { margin-top: 2px; }
   #settings-error { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 8px; }
+  #scan-log {
+    margin-top: 10px; max-height: 220px; overflow-y: auto;
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-size: 11px; line-height: 1.6; white-space: pre-wrap;
+  }
+  #scan-log .t { color: var(--muted); margin-right: 6px; }
+  #scan-log .ok { color: var(--green); }
+  #scan-log .err { color: var(--red); }
+  #scan-log .info { color: var(--text); }
+  #scan-progress { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -89,8 +104,10 @@
   <h1><span class="spark">⚡</span> Spark unilateral-exit monitor</h1>
   <span id="tip">tip: -</span>
   <span id="conn" class="ok">connecting…</span>
+  <span id="scan-state" hidden></span>
   <span class="spacer"></span>
   <button id="btn-settings">⚙ Settings</button>
+  <button id="btn-exit">✕ Exit app</button>
 </header>
 <dialog id="settings">
   <h2>Chain source</h2>
@@ -135,16 +152,19 @@
       <button id="btn-classify" class="primary">Classify</button>
       <button id="btn-follow">Follow family</button>
     </div>
-    <h2 style="margin-top:16px">Scan recent blocks</h2>
+    <h2 style="margin-top:16px">Scan blocks</h2>
     <label for="height">Block height</label>
     <input id="height" type="number" placeholder="leave empty for tip">
     <label for="span">How many blocks back</label>
     <input id="span" type="number" value="10" min="1" max="50">
     <div class="row" style="margin-top:8px">
-      <button id="btn-scan" class="primary">Scan</button>
+      <button id="btn-scan" class="primary">Start scan</button>
+      <button id="btn-stop" disabled>Stop</button>
       <button id="btn-clear">Clear</button>
     </div>
     <div id="scan-note" class="hint"></div>
+    <div id="scan-progress"></div>
+    <div id="scan-log" hidden></div>
     <h2 style="margin-top:16px">Watch list</h2>
     <div class="hint">Paste txids or output scripts (hex). Scans then only report family-related txs.</div>
     <textarea id="watch-input" rows="3" style="width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit" placeholder="one txid or script hex per line"></textarea>
@@ -228,13 +248,12 @@ async function refreshHealth() {
     $("sourceline").textContent = `${cfg.source.kind} · ${cfg.source.id}`;
     // Block scans need a source that can enumerate block txids; make the
     // capability visible instead of letting scans fail with an error.
-    const canScan = cfg.source.canListBlockTxids !== false;
-    $("btn-scan").disabled = !canScan;
-    $("height").disabled = !canScan;
-    $("span").disabled = !canScan;
-    $("scan-note").textContent = canScan
+    canBlockScan = cfg.source.canListBlockTxids !== false;
+    const running = !$("btn-stop").disabled;
+    setScanControls(running);
+    $("scan-note").textContent = canBlockScan
       ? ""
-      : "block scans need a bitcoind RPC source (--source rpc)";
+      : "block scans need a bitcoind RPC source (⚙ Settings)";
   } catch (e) {
     $("conn").textContent = "offline";
     $("conn").className = "bad";
@@ -263,38 +282,151 @@ $("btn-follow").addEventListener("click", async () => {
   } catch (e) { status(e.message); }
 });
 
+// --- Scan runs: start/stop with live progress over SSE -----------------
+
+const scanLog = $("scan-log");
+const scanProgress = $("scan-progress");
+let scanRunStats = null;
+
+function logLine(kind, text) {
+  scanLog.hidden = false;
+  const line = document.createElement("div");
+  const t = document.createElement("span");
+  t.className = "t";
+  t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+  const body = document.createElement("span");
+  body.className = kind;
+  body.textContent = text;
+  line.append(t, body);
+  scanLog.append(line);
+  // Keep the tail visible; cap retained lines so long scans don't grow
+  // the DOM unboundedly.
+  while (scanLog.childElementCount > 500) scanLog.firstElementChild.remove();
+  scanLog.scrollTop = scanLog.scrollHeight;
+}
+
+let canBlockScan = true;
+
+function setScanControls(running) {
+  $("btn-scan").disabled = running || !canBlockScan;
+  $("btn-stop").disabled = !running;
+  $("height").disabled = running || !canBlockScan;
+  $("span").disabled = running || !canBlockScan;
+}
+
+function handleScanEvent(ev) {
+  const state = $("scan-state");
+  switch (ev.type) {
+    case "range":
+      scanRunStats = { blocks: 0, txs: 0, findings: 0, total: ev.totalBlocks, startedAt: performance.now() };
+      logLine("info", `scan range ${ev.from}-${ev.to} (${ev.totalBlocks} blocks)`);
+      scanProgress.textContent = `0/${ev.totalBlocks} blocks`;
+      state.hidden = false;
+      state.textContent = `scanning 0/${ev.totalBlocks}`;
+      break;
+    case "block-start":
+      scanProgress.textContent = `block ${ev.height} (${ev.index}/${ev.totalBlocks})`;
+      state.textContent = `scanning ${ev.index - 1}/${ev.totalBlocks} · block ${ev.height}`;
+      break;
+    case "block-txs":
+      if (ev.total > 16) {
+        scanProgress.textContent =
+          `block ${ev.height}: ${ev.done}/${ev.total} txs, ${ev.found} found`;
+        state.textContent = `scanning block ${ev.height}: ${ev.done}/${ev.total} txs`;
+      }
+      break;
+    case "block-done": {
+      if (scanRunStats) {
+        scanRunStats.blocks += 1;
+        scanRunStats.txs += ev.txCount;
+        scanRunStats.findings += ev.findings;
+      }
+      const elapsed = performance.now() - (scanRunStats?.startedAt ?? performance.now());
+      const rate = elapsed > 0 && scanRunStats ? (scanRunStats.blocks / (elapsed / 1000)).toFixed(2) : "?";
+      logLine(
+        ev.findings > 0 ? "ok" : "info",
+        `block ${ev.height}: ${ev.txCount} txs, ${ev.candidates} shaped, ${ev.findings} found (${rate} blocks/s)`,
+      );
+      scanProgress.textContent =
+        `${scanRunStats?.blocks ?? "?"} blocks done · ` +
+        `${scanRunStats?.findings ?? 0} findings · ${rate} blocks/s`;
+      state.textContent =
+        `${scanRunStats?.blocks ?? "?"}/${scanRunStats?.total ?? "?"} blocks · ${rate}/s`;
+      break;
+    }
+    case "block-error":
+      logLine("err", `block ${ev.height}: ${ev.error}`);
+      state.textContent = `error at block ${ev.height}`;
+      break;
+    case "stop-requested":
+      logLine("info", "stop requested; finishing current block…");
+      state.textContent = "stopping…";
+      break;
+    case "range-done": {
+      const secs = ev.ms / 1000;
+      const bps = secs > 0 ? (ev.blocks / secs).toFixed(2) : "?";
+      logLine(
+        ev.findings > 0 ? "ok" : "info",
+        `scan ${ev.blocks} block(s) in ${secs.toFixed(1)}s (${bps} blocks/s), ${ev.findings} finding(s)`,
+      );
+      scanProgress.textContent = `done: ${ev.blocks} block(s), ${ev.findings} finding(s), ${secs.toFixed(1)}s`;
+      state.textContent = `idle · last scan: ${ev.blocks} blocks, ${ev.findings} findings`;
+      setScanControls(false);
+      break;
+    }
+  }
+}
+
+let scanEvents = null;
+function ensureScanEventStream() {
+  if (scanEvents) return;
+  scanEvents = new EventSource("/api/scan/events");
+  scanEvents.onmessage = (msg) => {
+    try {
+      handleScanEvent(JSON.parse(msg.data));
+    } catch { /* ignore malformed frames */ }
+  };
+}
+
 $("btn-scan").addEventListener("click", async () => {
-  status("scanning…");
+  const params = {};
+  const h = $("height").value ? Number($("height").value) : null;
+  const span = Number($("span").value || 10);
+  if (h !== null) params.from = Math.max(h - span + 1, 0);
+  params.span = span;
+  ensureScanEventStream();
   try {
-    const params = new URLSearchParams();
-    const h = $("height").value ? Number($("height").value) : null;
-    const span = Number($("span").value || 10);
-    if (h !== null) params.set("from", String(Math.max(h - span + 1, 0)));
-    params.set("span", String(span));
-    const r = await api(`/api/scan?${params}`);
-    const all = [];
-    const errors = [];
-    for (const b of r.results) {
-      if (b.error) {
-        errors.push(`block ${b.height}: ${b.error}`);
-        continue;
-      }
-      for (const f of b.findings) {
-        f.blockHeight = f.blockHeight ?? b.height;
-        all.push(f);
-      }
-    }
-    if (errors.length > 0) {
-      status(`scan incomplete - ${errors[0]}`);
-    } else {
-      status("");
-    }
-    renderFindings(all, `scanned blocks ${r.from}-${r.to}: ${r.results.reduce((n, b) => n + (b.txCount ?? 0), 0)} txs, ${all.length} exit-shaped${errors.length > 0 ? `, ${errors.length} block error(s)` : ""}`);
+    await api("/api/scan/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    setScanControls(true);
+    logLine("info", "scan started");
   } catch (e) { status(e.message); }
+});
+
+$("btn-stop").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/scan/stop", { method: "POST" });
+    if (!r.stopped) status("no running scan to stop");
+  } catch (e) { status(e.message); }
+});
+
+$("btn-exit").addEventListener("click", async () => {
+  if (!confirm("Shut down the monitor server?")) return;
+  try {
+    await api("/api/exit", { method: "POST" });
+  } catch { /* connection closes as the server exits */ }
+  document.body.innerHTML =
+    '<div style="padding:40px;text-align:center;color:var(--muted)">monitor shut down; restart it with <code>npm run monitor</code></div>';
 });
 
 $("btn-clear").addEventListener("click", () => {
   renderFindings(null);
+  scanLog.hidden = true;
+  scanLog.replaceChildren();
+  scanProgress.textContent = "";
   status("");
 });
 

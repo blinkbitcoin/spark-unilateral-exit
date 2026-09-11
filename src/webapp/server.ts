@@ -35,7 +35,7 @@ import {
   type ChainSource,
 } from "./chain-source.ts";
 import { classifyTx, txStructure, type ExitStage } from "./exit-detector.ts";
-import { followExitFamily, scanBlock } from "./scanner.ts";
+import { followExitFamily, scanBlock, type ScanResult } from "./scanner.ts";
 
 const EXIT_STAGES: ExitStage[] = [
   "static-deposit",
@@ -49,6 +49,22 @@ const EXIT_STAGES: ExitStage[] = [
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, "public");
+
+// Load gitignored .env (repo root) if present: BITCOIN_RPC_URL/USER/
+// PASSWORD for a LAN/mainnet bitcoind without passing secrets on the CLI.
+// Deliberately minimal: KEY=VALUE lines, no interpolation.
+const envPath = path.join(here, "..", "..", ".env");
+try {
+  const envFile = await fs.readFile(envPath, "utf8");
+  for (const line of envFile.split("\n")) {
+    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+    if (match && match[1] && process.env[match[1]] === undefined) {
+      process.env[match[1]] = match[2];
+    }
+  }
+} catch {
+  // Absent .env is the normal case (CI, regtest runs).
+}
 
 interface WatchState {
   txids: string[];
@@ -162,6 +178,199 @@ function instantiateSource(body: SourceBody): ChainSource {
   return new EsploraChainSource({ baseUrl: preset.esplora, label: preset.label });
 }
 
+// ---------------------------------------------------------------------------
+// Scan runs: async block-range scans with live progress, stop control, and
+// an event bus the SSE endpoint subscribes to.
+// ---------------------------------------------------------------------------
+
+interface ScanRunState {
+  id: number;
+  from: number;
+  to: number;
+  status: "running" | "stopped" | "done" | "error";
+  startedAt: number;
+  endedAt: number | null;
+  blocksDone: number;
+  blocksTotal: number;
+  txsScanned: number;
+  findings: number;
+  lastError: string | null;
+  /** Final per-block results, available once the run ends. */
+  results: ScanResult[];
+  stopRequested: boolean;
+}
+
+let currentRun: ScanRunState | null = null;
+let nextRunId = 1;
+type ScanEventListener = (event: Record<string, unknown>) => void;
+const scanEventListeners = new Set<ScanEventListener>();
+
+function emitScanEvent(event: Record<string, unknown>): void {
+  for (const listener of scanEventListeners) {
+    try {
+      listener(event);
+    } catch {
+      // A dead SSE subscriber must not break the scan loop.
+      scanEventListeners.delete(listener);
+    }
+  }
+  // Mirror progress to the server log so `npm run monitor` shows live state
+  // even with no browser attached.
+  const e = event as { type: string; from?: number; to?: number; height?: number; index?: number; totalBlocks?: number; txCount?: number; candidates?: number; findings?: number; done?: number; total?: number; error?: string; ms?: number; blocks?: number };
+  switch (e.type) {
+    case "range":
+      process.stdout.write(`[scan] range ${e.from}..${e.to} (${e.totalBlocks} blocks)\n`);
+      break;
+    case "block-start":
+      process.stdout.write(`[scan] block ${e.height} (${e.index}/${e.totalBlocks})\n`);
+      break;
+    case "block-done":
+      process.stdout.write(
+        `[scan] block ${e.height} done: ${e.txCount} txs, ${e.candidates} shaped, ${e.findings} found\n`,
+      );
+      break;
+    case "block-error":
+      process.stdout.write(`[scan] block ${e.height} error: ${e.error}\n`);
+      break;
+    case "range-done":
+      process.stdout.write(
+        `[scan] finished: ${e.blocks} blocks, ${e.findings} findings in ${(Number(e.ms) / 1000).toFixed(1)}s\n`,
+      );
+      break;
+    default:
+      break;
+  }
+}
+
+function subscribeScanEvents(listener: ScanEventListener): () => void {
+  scanEventListeners.add(listener);
+  return () => scanEventListeners.delete(listener);
+}
+
+function scanRunStatus(): Record<string, unknown> {
+  if (!currentRun) return { running: false };
+  const { results, ...state } = currentRun;
+  return {
+    running: state.status === "running",
+    ...state,
+    elapsedMs: state.endedAt ?? Date.now() - state.startedAt,
+  };
+}
+
+function stopScanRun(): boolean {
+  if (!currentRun || currentRun.status !== "running") return false;
+  currentRun.stopRequested = true;
+  emitScanEvent({ type: "stop-requested", runId: currentRun.id });
+  return true;
+}
+
+function startScanRun(
+  source: ChainSource,
+  params: { from?: number; to?: number; span?: number },
+  watchState: WatchState,
+): ScanRunState {
+  if (currentRun?.status === "running") {
+    throw new Error("a scan is already running; stop it first");
+  }
+  const span = Math.min(Math.max(params.span ?? 10, 1), 50);
+  const run: ScanRunState = {
+    id: nextRunId++,
+    from: 0,
+    to: 0,
+    status: "running",
+    startedAt: Date.now(),
+    endedAt: null,
+    blocksDone: 0,
+    blocksTotal: 0,
+    txsScanned: 0,
+    findings: 0,
+    lastError: null,
+    results: [],
+    stopRequested: false,
+  };
+  currentRun = run;
+
+  // Range resolution is async (tip lookup); the run starts immediately in
+  // the background so POST /api/scan/run returns at once.
+  void (async () => {
+    try {
+      const tip = await source.tipHeight();
+      const to = Math.min(params.to ?? tip, tip);
+      const from = Math.max(Math.min(params.from ?? to - span + 1, to), 0);
+      run.from = from;
+      run.to = Math.min(to, from + span - 1);
+      run.blocksTotal = run.to - run.from + 1;
+      emitScanEvent({
+        type: "range",
+        from: run.from,
+        to: run.to,
+        totalBlocks: run.blocksTotal,
+      });
+
+      const rangeStartedAt = Date.now();
+      for (let h = run.from; h <= run.to; h += 1) {
+        if (run.stopRequested) break;
+        emitScanEvent({
+          type: "block-start",
+          height: h,
+          index: run.blocksDone + 1,
+          totalBlocks: run.blocksTotal,
+        });
+        // eslint-disable-next-line no-await-in-loop
+        const result = await scanBlock(source, h, {
+          maxCandidates: 25,
+          watchTxids: watchState.txids,
+          watchScripts: watchState.scripts,
+          shouldStop: () => run.stopRequested,
+          onProgress: (event) => {
+            if (event.type === "block-txs") run.txsScanned = event.done;
+            emitScanEvent(event as unknown as Record<string, unknown>);
+          },
+        });
+        run.results.push(result);
+        run.blocksDone += 1;
+        run.findings += result.findings.length;
+        run.txsScanned = result.txCount;
+        if (result.error) {
+          run.lastError = `block ${h}: ${result.error}`;
+          emitScanEvent({ type: "block-error", height: h, error: result.error });
+          break;
+        }
+        emitScanEvent({
+          type: "block-done",
+          height: h,
+          txCount: result.txCount,
+          candidates: result.candidates,
+          findings: result.findings.length,
+          ms: Date.now() - rangeStartedAt,
+        });
+      }
+      run.status = run.stopRequested ? "stopped" : "done";
+    } catch (error) {
+      run.status = "error";
+      run.lastError = error instanceof Error ? error.message : String(error);
+    } finally {
+      run.endedAt = Date.now();
+      const elapsed = run.endedAt - run.startedAt;
+      emitScanEvent({
+        type: "range-done",
+        from: run.from,
+        to: run.to,
+        blocks: run.blocksDone,
+        findings: run.findings,
+        ms: elapsed,
+      });
+      process.stdout.write(
+        `scan run #${run.id} ${run.status}: ${run.blocksDone}/${run.blocksTotal} blocks, ` +
+          `${run.findings} findings in ${(elapsed / 1000).toFixed(1)}s` +
+          (run.lastError ? ` (last error: ${run.lastError})` : "") + "\n",
+      );
+    }
+  })();
+
+  return run;
+}
+
 async function handleApi(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -267,6 +476,9 @@ async function handleApi(
   }
 
   if (req.method === "GET" && pathname === "/api/scan") {
+    // Legacy one-shot synchronous form: kept for API compatibility, but the
+    // UI uses the async /api/scan/run + /api/scan/events flow so scans can
+    // be watched and stopped live.
     const tip = await source.tipHeight();
     const span = Math.min(Number(query.get("span") ?? 10), 50);
     const to = Math.min(Number(query.get("to") ?? tip), tip);
@@ -289,6 +501,52 @@ async function handleApi(
       if (r.error) break;
     }
     return send(200, { from, to: clampedTo, results });
+  }
+
+  if (req.method === "POST" && pathname === "/api/scan/run") {
+    const body = await readBody(req);
+    let parsed: { from?: number; to?: number; span?: number } = {};
+    try {
+      parsed = JSON.parse(body) as typeof parsed;
+    } catch {
+      // Empty body is fine: defaults below apply.
+    }
+    const run = startScanRun(source, parsed, watch);
+    return send(200, { runId: run.id });
+  }
+
+  if (req.method === "POST" && pathname === "/api/scan/stop") {
+    const stopped = stopScanRun();
+    return send(200, { stopped });
+  }
+
+  if (req.method === "GET" && pathname === "/api/scan/status") {
+    return send(200, scanRunStatus());
+  }
+
+  if (req.method === "GET" && pathname === "/api/scan/events") {
+    // Server-sent events: the scan loop pushes progress, the stream stays
+    // open until the run ends or the client disconnects.
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    const unsubscribe = subscribeScanEvents((event) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    });
+    req.on("close", unsubscribe);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/exit") {
+    // Graceful self-termination for the UI's Exit button: finish the
+    // response, then stop accepting connections and shut down.
+    send(200, { exiting: true });
+    process.stdout.write("exit requested via UI; shutting down\n");
+    server.close();
+    setImmediate(() => process.exit(0));
+    return;
   }
 
   if (req.method === "POST" && pathname === "/api/watch") {

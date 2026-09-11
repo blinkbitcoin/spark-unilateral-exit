@@ -35,7 +35,17 @@ export interface ScanResult {
   candidates: number;
   findings: ScanFinding[];
   error: string | null;
+  /** True when the scan stopped early because shouldStop() fired. */
+  stopped?: boolean;
 }
+
+export type ScanProgressEvent =
+  | { type: "range"; from: number; to: number; totalBlocks: number }
+  | { type: "block-start"; height: number; index: number; totalBlocks: number }
+  | { type: "block-txs"; height: number; done: number; total: number; found: number }
+  | { type: "block-done"; height: number; txCount: number; candidates: number; findings: number; ms: number }
+  | { type: "block-error"; height: number; error: string }
+  | { type: "range-done"; from: number; to: number; blocks: number; findings: number; ms: number };
 
 export interface ScanOptions {
   /** Stop after this many classified candidates per block (UI paginates). */
@@ -44,6 +54,10 @@ export interface ScanOptions {
   watchTxids?: string[];
   /** Only report findings touching these output scripts (watch mode). */
   watchScripts?: string[];
+  /** Progress sink for live logging (state, speed, progress). */
+  onProgress?: (event: ScanProgressEvent) => void;
+  /** Polled between chunks and blocks; returning true aborts the scan. */
+  shouldStop?: () => boolean;
 }
 
 // Fetch hexes with a small concurrency bound: a mainnet block carries
@@ -58,17 +72,21 @@ export async function scanBlock(
   options: ScanOptions = {},
 ): Promise<ScanResult> {
   const maxCandidates = options.maxCandidates ?? 50;
+  const progress = options.onProgress ?? (() => {});
+  const blockStartedAt = Date.now();
   let txids: string[];
   try {
     txids = await source.blockTxids(height);
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    progress({ type: "block-error", height, error: message });
     return {
       height,
       scannedAt: new Date().toISOString(),
       txCount: 0,
       candidates: 0,
       findings: [],
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     };
   }
 
@@ -82,7 +100,12 @@ export async function scanBlock(
   // is the scanned height; no per-tx confirmedHeight round-trip is needed.
   const findings: ScanFinding[] = [];
   let candidates = 0;
+  let stopped = false;
   for (let start = 0; start < txids.length; start += HEX_CONCURRENCY) {
+    if (options.shouldStop?.()) {
+      stopped = true;
+      break;
+    }
     const chunk = txids.slice(start, start + HEX_CONCURRENCY);
     const hexes = await Promise.all(
       chunk.map(async (txid) => ({ txid, hex: await source.txHex(txid) })),
@@ -115,6 +138,13 @@ export async function scanBlock(
       });
       if (findings.length >= maxCandidates) break;
     }
+    progress({
+      type: "block-txs",
+      height,
+      done: Math.min(start + HEX_CONCURRENCY, txids.length),
+      total: txids.length,
+      found: findings.length,
+    });
     if (findings.length >= maxCandidates) break;
   }
 
@@ -125,6 +155,7 @@ export async function scanBlock(
     candidates,
     findings,
     error: null,
+    ...(stopped ? { stopped: true } : {}),
   };
 }
 
