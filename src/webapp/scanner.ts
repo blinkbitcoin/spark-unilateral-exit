@@ -21,6 +21,7 @@ import {
   type TxStructure,
 } from "./exit-detector.ts";
 import { parseRelaxedTx } from "../tx-utils.ts";
+import { Transaction } from "@scure/btc-signer";
 import type { ChainSource } from "./chain-source.ts";
 
 export interface ScanFinding {
@@ -61,6 +62,8 @@ export interface ScanOptions {
   onProgress?: (event: ScanProgressEvent) => void;
   /** Polled between chunks and blocks; returning true aborts the scan. */
   shouldStop?: () => boolean;
+  /** Internal: skip the whole-block fast path (fallback re-entry guard). */
+  forcePerTx?: boolean;
 }
 
 // Fetch hexes with a small concurrency bound: a mainnet block carries
@@ -81,7 +84,7 @@ export async function scanBlock(
   // Fast path: sources that can hand over the whole serialized block in one
   // call (rpc, same host) skip the per-tx round-trips entirely - the block
   // is split locally and every tx is parsed from memory.
-  if (!watchModeNeeded(options) && source.blockRawHex) {
+  if (!options.forcePerTx && !watchModeNeeded(options) && source.blockRawHex) {
     let rawHex: string | null = null;
     try {
       rawHex = await source.blockRawHex(height);
@@ -185,20 +188,6 @@ export async function scanBlock(
   };
 }
 
-// The original per-tx path for scanRawBlock fallbacks: identical semantics
-// to scanBlock's tail above, reached only when raw-block parsing desyncs.
-async function scanBlockPerTx(
-  source: ChainSource,
-  height: number,
-  options: ScanOptions,
-  ctx: {
-    maxCandidates: number;
-    progress: (event: ScanProgressEvent) => void;
-  },
-): Promise<ScanResult> {
-  return scanBlock(source, height, { ...options, maxCandidates: ctx.maxCandidates, onProgress: ctx.progress });
-}
-
 // Fetch prevout txs in parallel and report whether any spent output is a
 // 0-value P2A anchor. Bounded to the input count (small for exit txs).
 async function checkSpendsAnchor(
@@ -224,6 +213,10 @@ function watchModeNeeded(options: ScanOptions): boolean {
 // Whole-block scan: split the serialized block into transactions locally
 // (80-byte header, varint tx count, then each tx's own serialization
 // length) and classify from memory - no per-tx RPC at all.
+//
+// A tx that fails to parse is skipped with its measured length when the
+// walk stays in sync, or the whole block falls back to the per-tx path
+// once (fallback flag prevents recursion).
 async function scanRawBlock(
   source: ChainSource,
   rawHex: string,
@@ -234,6 +227,7 @@ async function scanRawBlock(
     progress: (event: ScanProgressEvent) => void;
     blockStartedAt: number;
   },
+  allowFallback = true,
 ): Promise<ScanResult> {
   const { maxCandidates, progress } = ctx;
   const raw = Buffer.from(rawHex, "hex");
@@ -260,20 +254,32 @@ async function scanRawBlock(
       stopped = true;
       break;
     }
-    let structure: ReturnType<typeof txStructure> | null = null;
+    let structure: TxStructure | null = null;
+    let txLength = 0;
     try {
-      // eslint-disable-next-line no-await-in-loop
-      const tx = parseRelaxedTx(raw.subarray(offset).toString("hex"));
+      // Parse directly from the buffer slice - no hex round-trip, which
+      // would copy the whole block tail per tx (quadratic on 4MB blocks).
+      const tx = Transaction.fromRaw(raw.subarray(offset), {
+        allowUnknownOutputs: true,
+        allowUnknownInputs: true,
+        disableScriptCheck: true,
+      });
       const bytes = tx.toBytes(true, tx.hasWitnesses);
-      offset += bytes.length;
+      txLength = bytes.length;
       txSeen += 1;
-      const hex = Buffer.from(bytes).toString("hex");
-      structure = txStructure(hex);
+      structure = txStructure(Buffer.from(bytes).toString("hex"));
     } catch {
-      // A parse failure would desync the walk; bail to the safe path rather
-      // than misreport coverage.
-      return scanBlockPerTx(source, height, options, ctx);
+      if (!allowFallback) break;
+      // Desynced walk or unparseable tx: redo the block via the per-tx RPC
+      // path (which fetches each tx by txid, immune to walk desyncs).
+      return scanBlock(source, height, {
+        ...options,
+        maxCandidates,
+        onProgress: progress,
+        forcePerTx: true,
+      });
     }
+    offset += txLength;
     if (classifyStructure(structure).stage === "unknown") continue;
     candidates += 1;
     // eslint-disable-next-line no-await-in-loop
@@ -289,7 +295,6 @@ async function scanRawBlock(
     });
     if (findings.length >= maxCandidates) break;
   }
-  void readVarint;
   progress({
     type: "block-txs",
     height,
