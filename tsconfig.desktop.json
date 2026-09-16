@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "lib": ["es2023", "dom"], "types": ["node"] },
+  "include": ["desktop/**/*.ts", "src/**/*.ts", "test/desktop/**/*.ts"],
+  "exclude": ["node_modules", "coverage"]
+}

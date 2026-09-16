@@ -224,6 +224,16 @@ describe("reattachPendingRefunds", () => {
 });
 
 describe("decodeRefundFromTreeNode", () => {
+  it("recognizes an unsigned alternative refund by the same txid as its signed form", () => {
+    const signed = testTransaction(9000n);
+    const unsignedHex = bytesToHex(signed.toBytes(true, false));
+    expect(() => Transaction.fromRaw(hexToBytes(unsignedHex)).id).toThrow("not finalized");
+    const treeNodeHex = bytesToHex(TreeNode.encode(TreeNode.create({
+      refundTx: hexToBytes(testTransaction(10000n).hex),
+      directFromCpfpRefundTx: hexToBytes(unsignedHex),
+    })).finish());
+    expect(decodeRefundFromTreeNode(treeNodeHex)?.completionVariants[1]).toEqual({ txid: signed.id, txHex: unsignedHex });
+  });
   it("includes directRefundTx as a terminal sweep variant", () => {
     const refundTx = testTransaction(10_000n);
     const directFromCpfpRefundTx = testTransaction(9_000n);

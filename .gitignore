@@ -19,3 +19,6 @@ sweeps*.json
 # Checked-in fixtures are exempt.
 !examples/*.json
 !test/fixtures/*.json
+dist-desktop/
+playwright-report/
+test-results/

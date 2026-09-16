@@ -14,7 +14,12 @@
     "typecheck": "tsc --noEmit",
     "plan": "node src/cli.ts plan",
     "refresh-bundle": "node src/cli.ts refresh-bundle",
-    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle"
+    "refresh-recovery-bundle": "node src/cli.ts refresh-bundle",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:start": "npm run desktop:build && electron dist-desktop/main.cjs",
+    "desktop:typecheck": "tsc -p tsconfig.desktop.json --noEmit",
+    "desktop:test": "vitest run --config desktop/vitest.config.ts --coverage",
+    "desktop:test:ui": "npm run desktop:build && playwright test --config desktop/playwright.config.ts"
   },
   "dependencies": {
     "@buildonspark/spark-sdk": "^0.8.6",
@@ -35,12 +40,16 @@
     "ua-parser-js": "^1.0.41"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^22.15.0",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/coverage-v8": "5.0.0",
+    "electron": "44.3.0",
+    "esbuild": "0.28.2",
+    "jsdom": "30.0.1",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.9"
+    "vitest": "5.0.0"
   },
   "engines": {
-    "node": ">=22.18"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   }
 }
