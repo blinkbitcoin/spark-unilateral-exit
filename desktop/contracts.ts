@@ -39,7 +39,18 @@ export interface WalletState {
 export interface SeedProfile { id: string; label: string; wallet: WalletState }
 export interface VaultState { bitcoinRpc?: BitcoinRpc; version: 2; activeProfileId: string; profiles: SeedProfile[] }
 export type PublicSettings = Omit<Settings, "bitcoinRpc">;
+export interface BundleFreshness {
+  status: "match" | "stale" | "unknown" | "invalid";
+  checkedAt: string;
+  source: string;
+  message: string;
+  savedLeaves?: number;
+  currentLeaves?: number;
+  savedDigest?: string;
+  currentDigest?: string;
+}
 export interface PublicState {
+  bundleFreshness?: BundleFreshness;
   bitcoinRpc?: Omit<BitcoinRpc, "password">;
   hasRpcPassword?: boolean;
   activeProfileId?: string;

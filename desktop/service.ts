@@ -4,10 +4,10 @@ import { Vault, encryptBackup } from "./vault.ts";
 import { decodeImportedBundle } from "./import-bundle.ts";
 import { RecoveryEngine } from "./engine.ts";
 import { bundleCheck, settingsCheck, rpcCheck, bundleModeCheck } from "./validation.ts";
-import type { WalletState, Settings, PublicState, VaultState, ProfileOptions, BitcoinRpc } from "./contracts.ts";
+import type { WalletState, Settings, PublicState, VaultState, ProfileOptions, BitcoinRpc, BundleFreshness } from "./contracts.ts";
 import { FIRST_PROFILE, MAX_PROFILES, createProfile, readProfiles } from "./profiles.ts";
 
-type Engine = Pick<RecoveryEngine, "fundingKey" | "refresh" | "estimate" | "prepare" | "approve" | "advance">;
+type Engine = Pick<RecoveryEngine, "checkBundle" | "fundingKey" | "refresh" | "estimate" | "prepare" | "approve" | "advance">;
 export class DesktopService {
   private data?: VaultState;
   private get state(): WalletState | undefined { return this.data?.profiles.find((profile) => profile.id === this.data!.activeProfileId)!.wallet; }
@@ -18,6 +18,7 @@ export class DesktopService {
   private keepUnlocked = false;
   private message = "Create or unlock your encrypted seed vault.";
   private unlockedAt = 0;
+  private freshness = new Map<string, BundleFreshness>();
   private refreshAt = new Map<string, number>();
   private coordinatorOnline = new Map<string, boolean>();
   constructor(readonly vault: Vault, private readonly engine: Engine = new RecoveryEngine(), private readonly now = Date.now) {}
@@ -33,6 +34,7 @@ export class DesktopService {
 
     const { settings, bundle, session } = state;
     view.activeProfileId = this.data!.activeProfileId;
+    view.bundleFreshness = this.freshness.get(this.data!.activeProfileId);
     view.coordinatorOnline = this.coordinatorOnline.get(this.data!.activeProfileId) ?? false;
     view.profiles = this.data!.profiles.map((profile) => ({
       id: profile.id, label: profile.label, network: profile.wallet.settings.network!,
@@ -119,6 +121,7 @@ export class DesktopService {
       return;
     }
     this.data = undefined;
+    this.freshness.clear();
     this.refreshAt.clear();
     this.vault.lock();
     this.lockPending = false;
@@ -168,6 +171,8 @@ export class DesktopService {
       const state = this.requireProfile(profileId).wallet;
       if (state.session) throw new Error("Recovery bundle refresh is paused during a unilateral exit.");
       const mode = bundleModeCheck(rawMode);
+      // An economical refresh can swap leaves even if the later export fails.
+      this.freshness.delete(profileId!);
       try {
         const bundle = await this.engine.refresh(state, mode);
         await this.saveState({ ...state, bundle }, profileId);
@@ -177,6 +182,32 @@ export class DesktopService {
         this.coordinatorOnline.set(profileId!, false);
         throw error;
       }
+    });
+  }
+  async checkBundle() {
+    return this.run(async () => {
+      const state = this.requireState(), id = this.data!.activeProfileId;
+      this.freshness.delete(id);
+      if (state.session) throw new Error("Finish or cancel the current unilateral exit before checking bundle freshness.");
+      let saved: WalletState, checkpoint: string;
+      try {
+        const persisted = await this.vault.inspect();
+        checkpoint = JSON.stringify(persisted);
+        saved = readProfiles(persisted).profiles.find((profile) => profile.id === id)!.wallet;
+        if (saved.seed !== state.seed || JSON.stringify(saved.settings) !== JSON.stringify(state.settings) || saved.session) throw new Error("Saved profile changed.");
+      } catch {
+        this.freshness.set(id, { status: "invalid", checkedAt: new Date(this.now()).toISOString(), source: state.settings.coordinatorUrl,
+          message: "Could not read and validate the saved vault profile. No coordinator query was made." });
+        return;
+      }
+      let result = await this.engine.checkBundle(state, saved.bundle);
+      try {
+        if (JSON.stringify(await this.vault.inspect()) !== checkpoint) throw new Error("Saved vault changed.");
+      } catch {
+        result = { status: "unknown", checkedAt: new Date(this.now()).toISOString(), source: state.settings.coordinatorUrl,
+          message: "Saved vault changed or became unreadable during the check. Unlock again before retrying." };
+      }
+      this.freshness.set(id, result);
     });
   }
   setAutoRefresh(enabled: boolean): void {
@@ -281,6 +312,7 @@ export class DesktopService {
   private async saveData(next: VaultState): Promise<void> {
     // Publish every profile together only after the encrypted checkpoint is durable.
     await this.vault.save(next);
+    this.freshness.clear();
     this.data = next;
   }
   private async run<T>(operation: () => Promise<T>): Promise<T> {

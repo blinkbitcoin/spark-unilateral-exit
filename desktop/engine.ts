@@ -9,12 +9,37 @@ import { BitcoinChain, LocalChain, coordinatorFetch } from "./chain.ts";
 import { ExplorerChain } from "./explorer.ts";
 import { transactionIdFromHex } from "../src/transaction-id.ts";
 import { bundleCheck, destinationCheck, feeCheck } from "./validation.ts";
-import type { WalletState, RecoverySession, Settings, BundleMode } from "./contracts.ts";
+import type { WalletState, RecoverySession, Settings, BundleMode, BundleFreshness } from "./contracts.ts";
+import { bundleFingerprint } from "./bundle-fingerprint.ts";
 import { DEFAULT_SETTINGS } from "./contracts.ts";
 import type { RecoveryBundle } from "../src/types.ts";
 
 export class RecoveryEngine {
-  constructor(readonly chain?: BitcoinChain) {}
+  constructor(readonly chain?: BitcoinChain, private readonly exportSnapshot = exportRecoveryBundleFromSeed) {}
+  async checkBundle(state: WalletState, saved: unknown): Promise<BundleFreshness> {
+    let checked: RecoveryBundle;
+    try { checked = bundleCheck(structuredClone(saved), state.seed, state.settings.accountNumber, state.settings.network); }
+    catch {
+      return { status: "invalid", checkedAt: new Date().toISOString(), source: state.settings.coordinatorUrl,
+        message: "Saved bundle is missing or failed structural / seed / account / network validation. No coordinator query was made." };
+    }
+    const options = { seed: state.seed, network: state.settings.network ?? "LOCAL", accountNumber: state.settings.accountNumber,
+      coordinatorUrl: state.settings.coordinatorUrl, fetchImpl: coordinatorFetch(state.settings.coordinatorCa), appVersion: "electron-app" };
+    const savedDigest = bundleFingerprint(checked);
+    const report = { checkedAt: new Date().toISOString(), source: state.settings.coordinatorUrl, savedLeaves: checked.leaves.length, savedDigest };
+    try {
+      const first = bundleCheck(await this.exportSnapshot(options), state.seed, state.settings.accountNumber, state.settings.network);
+      const current = bundleCheck(await this.exportSnapshot(options), state.seed, state.settings.accountNumber, state.settings.network);
+      const currentDigest = bundleFingerprint(current);
+      if (bundleFingerprint(first) !== currentDigest) return { ...report, status: "unknown", message: "Coordinator recovery material changed between consecutive snapshots. Check again after wallet activity settles." };
+      const matches = savedDigest === currentDigest;
+      return { ...report, status: matches ? "match" : "stale", checkedAt: new Date().toISOString(),
+        message: matches ? "Matches the latest observed coordinator snapshot." : "Saved recovery material differs from the latest observed coordinator snapshot. Nothing was updated.",
+        currentLeaves: current.leaves.length, currentDigest };
+    } catch {
+      return { ...report, status: "unknown", message: "Coordinator snapshot unavailable, empty or invalid. Saved bundle passed structural and identity checks only; current coverage is unknown." };
+    }
+  }
   private chainFor(settings: Settings) {
     if (this.chain) return this.chain;
     if (settings.network === "MAINNET" && !settings.bitcoinRpc) return new ExplorerChain();

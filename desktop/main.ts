@@ -94,6 +94,7 @@ app.whenReady().then(async () => {
     lock: () => service.lock(),
     configureBitcoin: (rpc?: BitcoinRpc) => service.configureBitcoin(rpc),
     configure: (settings: Settings) => service.configure(settings),
+    checkBundle: () => service.checkBundle(),
     refresh: (mode?: unknown) => service.refresh(undefined, mode),
     autoRefresh: (enabled: boolean) => service.setAutoRefresh(enabled),
     keepUnlocked: (enabled: boolean) => service.setKeepUnlocked(enabled),

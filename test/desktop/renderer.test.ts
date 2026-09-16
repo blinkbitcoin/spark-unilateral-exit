@@ -17,12 +17,42 @@ function unlocked() {
 beforeEach(() => {
   vi.resetModules(); vi.useFakeTimers(); document.documentElement.innerHTML = html;
   state = { exists: false, unlocked: false, busy: false, autoRefresh: false, keepUnlocked: false, message: "Ready" };
-  api = Object.fromEntries(["reset", "status", "create", "createFromBundle", "addProfile", "addProfileFromBundle", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish", "approve", "import", "export"].map((name) => [name, vi.fn(async () => ({ ok: true }))]));
+  api = Object.fromEntries(["checkBundle", "reset", "status", "create", "createFromBundle", "addProfile", "addProfileFromBundle", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish", "approve", "import", "export"].map((name) => [name, vi.fn(async () => ({ ok: true }))]));
   api.status!.mockImplementation(async () => ({ ok: true, value: state }));
   window.recovery = api as Window["recovery"];
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 describe("desktop user interface", () => {
+  it("shows scoped freshness evidence and calls only the independent check action", async () => {
+    unlocked(); await import("../../desktop/renderer.ts"); await flush();
+    expect(el("freshness-result").textContent).toContain("Not checked");
+    for (const status of ["match", "stale", "unknown", "invalid"] as const) {
+      state.bundleFreshness = { status, checkedAt: "2026-09-16T00:00:00Z", source: "https://test.invalid", message: "test evidence",
+        ...(status === "match" ? { savedLeaves: 1, currentLeaves: 1, savedDigest: "ab".repeat(32), currentDigest: "ab".repeat(32) } : {}) };
+      await event("check-bundle");
+      expect(el("freshness-panel").dataset.status).toBe(status);
+      expect(el("freshness-result").textContent).toContain("test evidence");
+      expect(el("freshness-evidence").textContent).toContain("https://test.invalid");
+    }
+    expect(api.checkBundle).toHaveBeenCalledTimes(4);
+    for (const name of ["refresh", "prepare", "estimate", "approve", "advance", "export"]) expect(api[name]).not.toHaveBeenCalled();
+    state.bundleFreshness = undefined; await vi.advanceTimersByTimeAsync(2000);
+    expect(el("freshness-evidence").textContent).toBe("");
+  });
+  it("removes the previous result immediately while checking and when locked", async () => {
+    unlocked(); state.bundleFreshness = { status: "match", checkedAt: "test", source: "test", message: "old match" };
+    await import("../../desktop/renderer.ts"); await flush();
+    let release!: (value: unknown) => void;
+    api.checkBundle!.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    await event("check-bundle");
+    expect(el("freshness-result").textContent).toContain("Checking");
+    expect(el("freshness-evidence").textContent).toBe("");
+    release({ ok: true }); await flush();
+    state.unlocked = false; state.bundleFreshness = undefined;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(el("freshness-result").textContent).not.toContain("old match");
+    expect(el("freshness-evidence").textContent).toBe("");
+  });
   it("hides reset until locked and collapsed, validates text and clears secrets after success", async () => {
     await import("../../desktop/renderer.ts"); await flush();
     expect(el("forgot-password").hidden).toBe(true);

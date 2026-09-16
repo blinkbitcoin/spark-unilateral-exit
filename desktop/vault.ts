@@ -32,15 +32,20 @@ function encode(value: unknown, key: Buffer, salt: Buffer): string {
   return envelope;
 }
 
+function parseEnvelope(raw: string): Envelope {
+  const e = JSON.parse(raw) as Envelope;
+  if (e.format !== FORMAT || !/^[a-f0-9]{32}$/.test(e.salt) ||
+      !/^[a-f0-9]{24}$/.test(e.iv) || !/^[a-f0-9]{32}$/.test(e.tag) || typeof e.data !== "string") {
+    throw new Error("Invalid envelope");
+  }
+  return e;
+}
+
 async function decode(raw: string, password: string) {
   if (Buffer.byteLength(raw) > MAX_FILE_BYTES) throw new Error("Backup file is too large.");
   let key: Buffer | undefined;
   try {
-    const e = JSON.parse(raw) as Envelope;
-    if (e.format !== FORMAT || !/^[a-f0-9]{32}$/.test(e.salt) ||
-        !/^[a-f0-9]{24}$/.test(e.iv) || !/^[a-f0-9]{32}$/.test(e.tag) || typeof e.data !== "string") {
-      throw new Error("Invalid envelope");
-    }
+    const e = parseEnvelope(raw);
     const salt = Buffer.from(e.salt, "hex");
     key = await derive(password, salt);
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(e.iv, "hex"));
@@ -119,6 +124,16 @@ export class Vault {
     this.key = result.key;
     this.salt = result.salt;
     return result.value;
+  }
+  async inspect(): Promise<unknown> {
+    if (!this.key) throw new Error("Unlock the vault first.");
+    const raw = await readLimited(this.filename);
+    const e = parseEnvelope(raw);
+    if (e.salt !== this.salt!.toString("hex")) throw new Error("Saved vault envelope changed.");
+    const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(e.iv, "hex"));
+    decipher.setAAD(Buffer.from(FORMAT));
+    decipher.setAuthTag(Buffer.from(e.tag, "hex"));
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(e.data, "base64")), decipher.final()]).toString("utf8"));
   }
   async save(value: unknown): Promise<void> {
     if (!this.key || !this.salt) throw new Error("Unlock the vault first.");

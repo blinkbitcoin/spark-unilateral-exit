@@ -6,6 +6,27 @@ import { Vault, encryptBackup, decryptBackup, passwordCheck, readLimited, durabl
 import { PASSWORD, SEED } from "./helpers.ts";
 const dir = () => mkdtemp(path.join(os.tmpdir(), "spark-desktop-vault-test-"));
 describe("encrypted desktop vault", () => {
+  it("re-reads authenticated persisted state with the unlocked key without rewriting ciphertext", async () => {
+    const file = path.join(await dir(), "vault.json"), vault = new Vault(file);
+    await expect(vault.inspect()).rejects.toThrow("Unlock");
+    await vault.create({ value: 1 }, PASSWORD);
+    const first = await readFile(file, "utf8");
+    await vault.save({ value: 2 });
+    await writeFile(file, first);
+    expect(await vault.inspect()).toEqual({ value: 1 });
+    expect(await readFile(file, "utf8")).toBe(first);
+    for (const field of ["format", "salt", "iv", "tag", "data"]) {
+      const changed = JSON.parse(first); changed[field] = "bad";
+      await writeFile(file, JSON.stringify(changed));
+      await expect(vault.inspect()).rejects.toThrow();
+    }
+    const changedSalt = JSON.parse(first);
+    changedSalt.salt = `${changedSalt.salt[0] === "0" ? "1" : "0"}${changedSalt.salt.slice(1)}`;
+    await writeFile(file, JSON.stringify(changedSalt));
+    await expect(vault.inspect()).rejects.toThrow("Saved vault envelope changed");
+    await writeFile(file, first); expect(await vault.inspect()).toEqual({ value: 1 });
+    vault.lock(); await expect(vault.inspect()).rejects.toThrow("Unlock");
+  });
   it("resets only vault ciphertext, rotation and exact crash temp files", async () => {
     const root = await dir(), file = path.join(root, "vault.json");
     const vault = new Vault(file); await vault.create({ seed: SEED }, PASSWORD); await vault.save({ seed: SEED });

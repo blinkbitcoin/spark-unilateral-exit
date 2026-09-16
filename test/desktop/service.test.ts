@@ -9,7 +9,7 @@ import { DEFAULT_SETTINGS } from "../../desktop/contracts.ts";
 import { SEED, PASSWORD, bundle, recovery, blinkBackup } from "./helpers.ts";
 async function fixture() {
   const vault = new Vault(path.join(await mkdtemp(path.join(os.tmpdir(), "spark-desktop-service-")), "vault.json"));
-  const engine = { fundingKey: new RecoveryEngine().fundingKey, refresh: vi.fn(async () => bundle()),
+  const engine = { checkBundle: vi.fn(), fundingKey: new RecoveryEngine().fundingKey, refresh: vi.fn(async () => bundle()),
     estimate: vi.fn(async () => ({ address: "bcrt1fee", requiredSats: "2000", feeSats: "1000", netSats: "98000", economical: true })),
     prepare: vi.fn(async () => recovery()),
     approve: vi.fn((state) => { state.session.approved = true; state.session.status = "running"; }),

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TreeNode } from "@buildonspark/spark-sdk/proto/spark";
 import { Transaction, p2wpkh } from "@scure/btc-signer";
 import { bytesToHex } from "@noble/curves/utils";
 import { RecoveryEngine } from "../../desktop/engine.ts";
@@ -37,6 +38,97 @@ beforeEach(() => {
   mocks.consolidate.mockResolvedValue({ executed: false });
 });
 describe("desktop recovery engine", () => {
+  it("checks two observed snapshots read-only without replacing the saved bundle", async () => {
+    const f = fixture(), state = wallet(), before = structuredClone(state);
+    delete state.bundle!.nodes;
+    delete before.bundle!.nodes;
+    const result = await f.engine.checkBundle(state, state.bundle);
+    expect(result).toMatchObject({ status: "match", savedLeaves: 1, currentLeaves: 1, source: state.settings.coordinatorUrl });
+    expect(result.savedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.currentDigest).toBe(result.savedDigest);
+    expect(mocks.refresh).toHaveBeenCalledTimes(2);
+    expect(state).toEqual(before);
+    for (const mock of [mocks.consolidate, mocks.construct, mocks.sweep, mocks.sign, mocks.estimate, f.verify, f.broadcast, f.submit]) expect(mock).not.toHaveBeenCalled();
+  });
+  it("compares recovery material canonically, ignoring ordering and timestamps", async () => {
+    const state = wallet();
+    const node = TreeNode.decode(Buffer.from(state.bundle!.leaves[0]!.treeNodeHex, "hex"));
+    node.parentNodeId = "root";
+    const encode = (n: typeof node) => ({ id: n.id, treeNodeHex: bytesToHex(TreeNode.encode(n).finish()) });
+    state.bundle!.leaves = [encode(node), encode({ ...node, id: "leaf2" })];
+    state.bundle!.nodes = [encode({ ...node, id: "root", parentNodeId: undefined })];
+    const current = structuredClone(state.bundle!);
+    current.createdAt = "2026-09-10T00:00:00Z"; current.appVersion = "other"; current.leaves.reverse();
+    const timestamped = { ...node, createdTime: new Date(), updatedTime: new Date() };
+    current.leaves[1] = encode(timestamped);
+    current.nodes!.push(encode({ ...node, id: "unreachable", parentNodeId: undefined }));
+    mocks.refresh.mockResolvedValue(current);
+    const result = await new RecoveryEngine().checkBundle(state, state.bundle);
+    expect(result.status).toBe("match"); expect(result.currentDigest).toBe(result.savedDigest);
+  });
+  it.each(["saved/current", "consecutive snapshots"])("ignores public-share map wire order across %s", async (comparison) => {
+    const state = wallet();
+    const node = TreeNode.decode(Buffer.from(state.bundle!.leaves[0]!.treeNodeHex, "hex"));
+    const shares = { "operator-b": new Uint8Array([2]), "operator-a": new Uint8Array([1]) };
+    node.signingKeyshare = TreeNode.fromPartial({ signingKeyshare: { publicShares: shares } }).signingKeyshare;
+    state.bundle!.leaves[0]!.treeNodeHex = bytesToHex(TreeNode.encode(node).finish());
+    const reordered = structuredClone(state.bundle!);
+    node.signingKeyshare!.publicShares = Object.fromEntries(Object.entries(shares).reverse());
+    reordered.leaves[0]!.treeNodeHex = bytesToHex(TreeNode.encode(node).finish());
+    expect(reordered.leaves[0]!.treeNodeHex).not.toBe(state.bundle!.leaves[0]!.treeNodeHex);
+    mocks.refresh.mockResolvedValueOnce(comparison === "saved/current" ? reordered : state.bundle)
+      .mockResolvedValueOnce(reordered);
+    const result = await new RecoveryEngine().checkBundle(state, state.bundle);
+    expect(result.status).toBe("match"); expect(result.currentDigest).toBe(result.savedDigest);
+
+    node.signingKeyshare!.publicShares["operator-a"] = new Uint8Array([3]);
+    const changed = structuredClone(reordered);
+    changed.leaves[0]!.treeNodeHex = bytesToHex(TreeNode.encode(node).finish());
+    mocks.refresh.mockResolvedValue(changed);
+    const stale = await new RecoveryEngine().checkBundle(state, state.bundle);
+    expect(stale.status).toBe("stale"); expect(stale.currentDigest).not.toBe(stale.savedDigest);
+  });
+  it("detects same-balance replacements and changed recovery bytes at any reachable depth", async () => {
+    const state = wallet(), encode = (n: TreeNode) => ({ id: n.id, treeNodeHex: bytesToHex(TreeNode.encode(n).finish()) });
+    const leaf = TreeNode.decode(Buffer.from(state.bundle!.leaves[0]!.treeNodeHex, "hex"));
+    leaf.parentNodeId = "parent";
+    const parent = { ...leaf, id: "parent", parentNodeId: "root" }, root = { ...leaf, id: "root", parentNodeId: undefined };
+    state.bundle!.leaves = [encode(leaf)]; state.bundle!.nodes = [encode(parent), encode(root)];
+    for (const changed of [
+      { ...state.bundle!, leaves: [encode({ ...leaf, id: "replacement" })] },
+      ...["nodeTx", "refundTx", "directTx", "directRefundTx", "directFromCpfpRefundTx"].flatMap((field) => [
+        { ...state.bundle!, leaves: [encode({ ...leaf, [field]: new Uint8Array([2]) })] },
+        { ...state.bundle!, nodes: [encode(parent), encode({ ...root, [field]: new Uint8Array([2]) })] },
+      ]),
+    ]) {
+      mocks.refresh.mockResolvedValue(changed);
+      const result = await new RecoveryEngine().checkBundle(state, state.bundle);
+      expect(result.status).toBe("stale"); expect(result.savedLeaves).toBe(result.currentLeaves);
+      expect(result.savedDigest).not.toBe(result.currentDigest);
+    }
+  });
+  it("returns unknown rather than match for changing or unavailable operator snapshots", async () => {
+    const state = wallet(), engine = new RecoveryEngine();
+    mocks.refresh.mockResolvedValueOnce(bundle()).mockResolvedValueOnce({ ...bundle(), leaves: [] });
+    expect((await engine.checkBundle(state, state.bundle)).status).toBe("unknown");
+    mocks.refresh.mockRejectedValueOnce(new Error("offline"));
+    expect((await engine.checkBundle(state, state.bundle)).status).toBe("unknown");
+    mocks.refresh.mockResolvedValueOnce(bundle()).mockResolvedValueOnce(bundle(0));
+    expect((await engine.checkBundle(state, state.bundle)).status).toBe("unknown");
+    const changed = bundle(), node = TreeNode.decode(Buffer.from(changed.leaves[0]!.treeNodeHex, "hex"));
+    node.refundTx = new Uint8Array([2]); changed.leaves[0]!.treeNodeHex = bytesToHex(TreeNode.encode(node).finish());
+    mocks.refresh.mockResolvedValueOnce(bundle()).mockResolvedValueOnce(changed);
+    expect(await engine.checkBundle(state, state.bundle)).toMatchObject({ status: "unknown", message: expect.stringContaining("changed between") });
+  });
+  it("marks absent, wrong-identity and incomplete saved material invalid before contacting operators", async () => {
+    const state = wallet(), incomplete = bundle();
+    const node = TreeNode.decode(Buffer.from(incomplete.leaves[0]!.treeNodeHex, "hex"));
+    node.parentNodeId = "missing"; incomplete.leaves[0]!.treeNodeHex = bytesToHex(TreeNode.encode(node).finish());
+    for (const saved of [undefined, {}, { ...bundle(), leaves: [] }, bundle(0), bundle(1, SEED, "MAINNET"), incomplete]) {
+      expect((await new RecoveryEngine().checkBundle(state, saved)).status).toBe("invalid");
+    }
+    expect(mocks.refresh).not.toHaveBeenCalled();
+  });
   afterEach(() => vi.restoreAllMocks());
   it("selects mainnet explorer by default and uses a configured node without falling back", async () => {
     const engine = new RecoveryEngine(); const state = wallet();

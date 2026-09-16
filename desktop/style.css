@@ -65,6 +65,13 @@ button:disabled { opacity: .5; cursor: wait; }
 .actions { flex: none; display: flex; flex-direction: column; gap: 10px; padding: 10px 20px 20px; }
 .actions button { width: 100%; }
 .password-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+#freshness-panel { border: 1px solid var(--grey4); border-left: 3px solid var(--grey3); border-radius: 8px; padding: 12px; margin: 12px 0; }
+#freshness-panel[data-status="match"] { border-left-color: #74d5a0; }
+#freshness-panel[data-status="stale"], #freshness-panel[data-status="unknown"] { border-left-color: var(--primary); }
+#freshness-panel[data-status="invalid"] { border-left-color: #ff8585; }
+#freshness-panel h2 { font-size: 16px; margin: 0; }
+#freshness-result { font-size: 14px; }
+#freshness-evidence { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .snapshot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .metric { font-size: 20px; line-height: 1.2; font-weight: 700; font-variant-numeric: tabular-nums; }
 details { border-top: 1px solid var(--grey4); margin-top: 10px; }

@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({ handlers: {} as Record<string, (...args: any[]) =>
     requestSingleInstanceLock: vi.fn(() => true), quit: vi.fn(), on: vi.fn(), whenReady: vi.fn() },
   dialog: { showMessageBox: vi.fn(), showOpenDialog: vi.fn(), showSaveDialog: vi.fn(), showErrorBox: vi.fn() },
   session: { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn() },
-  service: Object.fromEntries(["reset", "initialize", "view", "addProfile", "selectProfile", "create", "unlock", "lock", "screenLocked", "setKeepUnlocked", "configure", "configureBitcoin", "refresh", "setAutoRefresh", "estimate", "prepare", "advance", "finish", "approve", "importBundle", "exportBundle", "tick"].map((n) => [n, vi.fn()])) as Record<string, any>,
+  service: Object.fromEntries(["checkBundle", "reset", "initialize", "view", "addProfile", "selectProfile", "create", "unlock", "lock", "screenLocked", "setKeepUnlocked", "configure", "configureBitcoin", "refresh", "setAutoRefresh", "estimate", "prepare", "advance", "finish", "approve", "importBundle", "exportBundle", "tick"].map((n) => [n, vi.fn()])) as Record<string, any>,
   readLimited: vi.fn(), durableWrite: vi.fn(), generatePassword: vi.fn(() => "generated"), readFile: vi.fn(), expose: vi.fn(), invoke: vi.fn(),
 }));
 vi.mock("electron", () => ({
@@ -92,7 +92,7 @@ describe("Electron security boundary", () => {
   });
   it("routes only explicit operations and confirms the current recovery natively", async () => {
     await boot();
-    for (const name of ["status", "create", "addProfile", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish"]) {
+    for (const name of ["checkBundle", "status", "create", "addProfile", "selectProfile", "generatePassword", "unlock", "lock", "configure", "configureBitcoin", "refresh", "autoRefresh", "keepUnlocked", "estimate", "prepare", "advance", "finish"]) {
       expect((await invoke(name, "a", "b", "c", "d")).ok).toBe(true);
     }
     expect(h.service.refresh).toHaveBeenCalledWith(undefined, "a");

@@ -61,6 +61,7 @@ async function update() {
   updateImportAvailability();
   el("vault-title").textContent = current.exists ? "Unlock your vault" : "Create your vault";
   el("vault-submit").textContent = current.exists ? "Unlock vault" : "Create encrypted vault";
+  updateFreshness();
   if (!current.unlocked) {
     if (activeProfileId) for (const id of ["additional-seed", "additional-password", "rpc-password", "backup-password"]) input(id).value = "";
     activeProfileId = undefined; settingsLoaded = false; showNetwork(); return;
@@ -69,13 +70,21 @@ async function update() {
   el("wallet-identity").textContent = `Account ${current.settings!.accountNumber} · ${current.identity!.slice(0, 20)}…${current.keepUnlocked ? " · Kept unlocked" : ""}`;
   el("funding-address").textContent = current.fundingAddress!;
   el("backup-summary").textContent = current.bundle ? `${Number(current.bundle.sats).toLocaleString()} sats in recovery bundle` : "No recovery bundle yet";
-  el("backup-date").textContent = current.bundle ? `Bundle created: ${current.bundle.createdAt}. Latest state is unknown until refreshed.` : current.message;
+  el("backup-date").textContent = current.bundle ? `Bundle created: ${current.bundle.createdAt}. The timestamp alone does not prove freshness.` : current.message;
   input("auto-refresh").checked = current.autoRefresh;
   input("keep-unlocked").checked = current.keepUnlocked;
   el("exit-warning").hidden = !current.coordinatorOnline;
   el("refresh-frequency").textContent = current.keepUnlocked ? "Refresh all profiles hourly while unlocked" : "Refresh all profiles every minute while unlocked";
   updateLeaves();
   updateExit();
+}
+function updateFreshness() {
+  const result = current.bundleFreshness;
+  el("freshness-panel").dataset.status = result?.status ?? "unchecked";
+  el("freshness-result").textContent = result ? `${{ match: "Snapshot match", stale: "Stale / different", unknown: "Unknown", invalid: "Invalid saved bundle" }[result.status]}: ${result.message}` : "Not checked. This check does not update your bundle.";
+  el("freshness-evidence").textContent = result ? `Checked: ${result.checkedAt} · Source: ${result.source}
+Saved leaves: ${result.savedLeaves ?? "unknown"} · Observed leaves: ${result.currentLeaves ?? "unknown"}
+Saved fingerprint: ${result.savedDigest?.slice(0, 12) ?? "unavailable"} · Observed: ${result.currentDigest?.slice(0, 12) ?? "unavailable"}` : "";
 }
 function updateProfile() {
   if (activeProfileId !== current.activeProfileId) {
@@ -236,6 +245,12 @@ el("settings-form").addEventListener("submit", (event) => {
   void action(() => call("configure", value));
 });
 el("recover-form").addEventListener("submit", (event) => { event.preventDefault(); void action(() => call("prepare", input("leaf").value, input("destination").value, Number(input("fee-rate").value))); });
+click("check-bundle", () => {
+  el("freshness-panel").dataset.status = "checking";
+  el("freshness-result").textContent = "Checking saved bundle against consecutive coordinator snapshots…";
+  el("freshness-evidence").textContent = "";
+  return call("checkBundle");
+});
 click("lock", () => call("lock")); click("refresh", () => call("refresh", input("bundle-mode").value));
 click("estimate", async () => { const result = await call("estimate", input("leaf").value, Number(input("fee-rate").value));
   el("estimate-result").textContent = `Fund at least ${result.requiredSats} sats. Estimated net after all fees: ${result.netSats ?? "unknown"} sats.`; });
